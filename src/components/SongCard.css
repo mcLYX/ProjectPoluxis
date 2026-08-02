@@ -1,0 +1,7 @@
+/* Collapsed card hover glow — driven by the --song-card-hover-glow CSS variable
+   set inline on each card's root <div>. The value is computed from the beatmap-
+   defined accentColor (falls back to cyan default), replacing the old hardcoded
+   cyan hover shadow that was baked into the Tailwind classes. */
+.song-card__collapsed:hover {
+  box-shadow: var(--song-card-hover-glow);
+}

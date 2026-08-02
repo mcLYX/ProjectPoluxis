@@ -1,0 +1,3391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Project Polygon (Lite)</title>
+  <style>
+    /* === Visual style aligned with the full version (IE11 compatible) ===
+     * All modern-only properties have IE11 fallbacks:
+     *   inset:0 → top:0;right:0;bottom:0;left:0  (+ width/height:100%)
+     *   gap → margin/padding workarounds
+     *   -webkit-text-fill-color:transparent → solid color fallback (IE11 ignores this)
+     *   flex column centering → explicit heights + box-sizing
+     *   vh units are OK in IE11 */
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%; width: 100%;
+      background: #05070d; color: #e2e8f0;
+      font-family: 'Consolas', 'Courier New', monospace;
+      overflow: hidden; -ms-user-select: none; -moz-user-select: none; -webkit-user-select: none; user-select: none;
+      -ms-touch-action: none; touch-action: none;
+    }
+    #app { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; }
+    /* touch-action MUST be set on the canvas itself (the actual touch target
+     * during gameplay — HUD/overlay are pointer-events:none and click-through).
+     * touch-action does NOT inherit from html/body. With the default `auto`,
+     * IE11 runs its touch-gesture pipeline on every pointermove: 1 finger =
+     * pan detection (cheap), but 2+ fingers = full pinch-zoom gesture pipeline
+     * (transform matrices + MSGesture state machine + hit-testing per event).
+     * On the Atom Z3735G this drops multi-touch framerate to single digits,
+     * independent of game logic (Autoplay is affected too). `none` disables all
+     * default touch gestures so IE11 just delivers raw pointer events. */
+    #game-canvas {
+      position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+      width: 100%; height: 100%; display: block;
+      -ms-touch-action: none; touch-action: none;
+    }
+    /* overlay is click-through by default; only visible .screen children capture
+     * pointer events. This lets the HUD pause button (z-index 5, below the
+     * overlay's z-index 10) receive clicks during gameplay when all screens
+     * are hidden. */
+    .overlay { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+    .screen { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column; pointer-events: auto; }
+    .screen.hidden { display: none; }
+
+    /* Menu */
+    #menu-screen {
+      -ms-flex-pack: justify; justify-content: space-between; padding: 24px;
+      background: rgba(5, 7, 13, 0.5);
+    }
+    .menu-title {
+      font-size: 36px; font-weight: 900; letter-spacing: 6px; margin: 0;
+      background: linear-gradient(90deg, #06b6d4, #2563eb);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-align: center;
+    }
+    /* IE11 fallback for gradient text is at the end of the stylesheet
+     * (must come after the base rules so it can override them). */
+    .menu-subtitle { text-align: center; font-size: 12px; color: #94a3b8; letter-spacing: 2px; margin: 4px 0 0 0; }
+    .chart-list { -ms-flex: 1 1 auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: 720px; width: 100%; margin: 0 auto; padding: 16px 0; }
+    .chart-card {
+      padding: 14px 18px; margin-bottom: 10px; border-radius: 14px; cursor: pointer;
+      background: rgba(9, 17, 36, 0.9); border: 1px solid rgba(6, 182, 212, 0.2);
+    }
+    .chart-card:hover { border-color: rgba(6, 182, 212, 0.5); background: #0c1733; }
+    .chart-card.selected { border-color: #06b6d4; box-shadow: 0 0 18px rgba(6, 182, 212, 0.25); }
+    .chart-title { font-size: 16px; font-weight: 700; color: #fff; margin: 0 0 4px 0; }
+    .chart-meta { font-size: 12px; color: #94a3b8; }
+    .chart-bpm { display: inline-block; padding: 2px 8px; border-radius: 6px; border: 1px solid rgba(6,182,212,0.3); color: #67e8f9; margin-left: 8px; font-size: 11px; }
+    .menu-footer {
+      display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap;
+      -ms-flex-align: center; align-items: center;
+      -ms-flex-pack: justify; justify-content: space-between;
+      border-top: 1px solid rgba(6, 182, 212, 0.2); padding-top: 12px;
+    }
+    .toolbar { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; font-size: 12px; color: #cbd5e1; }
+    .toolbar > * { margin-right: 16px; }
+    .toolbar > *:last-child { margin-right: 0; }
+    /* Buttons — frosted glass: translucent accent fill + accent hairline
+     * border + outer glow + inner top highlight (mirrors .glass-btn /
+     * .glass-btn-primary in src/index.css). Concrete accent colors are
+     * re-injected per chart by the Theme module; the values here are the
+     * cyan defaults. backdrop-filter is progressive enhancement (IE11
+     * ignores it, and the design still reads correctly without blur). */
+    .btn-tool {
+      padding: 6px 12px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+      backdrop-filter: blur(10px) saturate(130%);
+      border: 1px solid rgba(6, 182, 212, 0.42); color: #67e8f9;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+    }
+    .btn-tool:hover {
+      background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    .btn-start {
+      padding: 12px 28px; border-radius: 14px; cursor: pointer;
+      background: rgba(6, 182, 212, 0.18);
+      -webkit-backdrop-filter: blur(10px) saturate(140%);
+      backdrop-filter: blur(10px) saturate(140%);
+      border: 1px solid rgba(6, 182, 212, 0.5);
+      color: #fff; font-family: inherit; font-weight: 900; font-size: 14px; letter-spacing: 2px;
+      box-shadow: 0 0 24px rgba(6, 182, 212, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+      margin-top: 12px;
+    }
+    .btn-start:hover {
+      background: rgba(6, 182, 212, 0.28); border-color: rgba(6, 182, 212, 0.66);
+      box-shadow: 0 0 34px rgba(6, 182, 212, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.26);
+      -ms-transform: scale(1.04); transform: scale(1.04);
+    }
+
+    /* HUD — layout mirrors full version App.tsx L506-534:
+     *   top-left:  chart info (title/difficulty/BPM)
+     *   top-right: Score (large) + ACC/RANK below
+     *   bottom-left: Pause button
+     *   bottom: progress bar
+     * Combo is drawn on canvas (transparent, center, behind notes) — not in HUD. */
+    #hud { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; display: none; }
+    #hud.active { display: block; }
+    .hud-score { position: absolute; top: 16px; right: 20px; font-size: 28px; font-weight: 900; color: #fff; text-shadow: 0 0 12px rgba(6,182,212,0.6); text-align: right; }
+    .hud-acc { position: absolute; top: 50px; right: 20px; font-size: 14px; color: #38bdf8; font-weight: 700; text-align: right; }
+    .hud-rank { position: absolute; top: 70px; right: 20px; font-size: 18px; color: #38bdf8; font-weight: 900; text-align: right; letter-spacing: 1px; }
+    .hud-pause-btn { position: absolute; bottom: 24px; left: 20px; pointer-events: auto; }
+    /* Chart info badge (top-left) — mirrors full version's chart label */
+    .hud-chart-info { position: absolute; top: 16px; left: 20px; font-size: 11px; color: #94a3b8; width: 220px; line-height: 1.4; }
+    .hud-chart-info .ci-title { color: #e2e8f0; font-weight: 700; font-size: 13px; }
+    /* Progress bar (bottom) — mirrors full version's TimingBar */
+    .hud-progress { position: absolute; bottom: 0; left: 0; right: 0; height: 4px; background: rgba(15, 23, 42, 0.6); }
+    .hud-progress-fill { height: 100%; background: #06b6d4; width: 0%; }
+
+    /* Result */
+    #result-screen { -ms-flex-pack: center; justify-content: center; -ms-flex-align: center; align-items: center; background: rgba(5, 7, 13, 0.85); }
+    .result-card { max-width: 420px; width: 90%; margin: 0 auto; background: rgba(14, 27, 56, 0.95); border: 1px solid rgba(6,182,212,0.3); border-radius: 18px; padding: 28px; text-align: center; }
+    .result-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 4px 0; letter-spacing: 1px; word-break: break-word; }
+    .result-meta { font-size: 11px; color: #94a3b8; margin: 0 0 14px 0; }
+    .result-rank {
+      font-size: 56px; font-weight: 900; margin: 0 0 8px 0;
+      background: linear-gradient(90deg, #fbbf24, #f97316);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    /* Score: bumped from 24px/400 → 36px/800 per user spec "略微改粗改大".
+     * Still smaller than the 56px rank so the rank stays the visual anchor. */
+    .result-score { font-size: 36px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; }
+    .result-row { display: -ms-flexbox; display: flex; -ms-flex-pack: justify; justify-content: space-between; font-size: 13px; color: #cbd5e1; margin: 4px 0; }
+    .result-row .p { color: #ffd700; }
+    .result-row .g { color: #38bdf8; } .result-row .m { color: #ef4444; }
+    /* Orange (+N) suffix beside the merged Perfect count — shows how many of
+     * the Perfects were S-Perfect. Color matches the old .sp row (#ff8c00). */
+    .result-row .s-perfect-indicator { color: #ff8c00; font-weight: 700; margin-left: 2px; }
+    .result-actions { display: -ms-flexbox; display: flex; -ms-flex-pack: center; justify-content: center; margin-top: 20px; }
+    .result-actions .btn-tool { margin: 0 5px; }
+
+    /* Pause */
+    #pause-screen { -ms-flex-pack: center; justify-content: center; -ms-flex-align: center; align-items: center; background: rgba(5, 7, 13, 0.8); }
+    .pause-card { text-align: center; }
+    .pause-title { font-size: 32px; font-weight: 900; letter-spacing: 4px; color: #67e8f9; margin: 0 0 24px 0; }
+    .pause-actions { display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column; min-width: 200px; }
+    .pause-actions .btn-start { margin-top: 0; }
+    .pause-actions .btn-tool { margin-top: 10px; }
+    .pause-actions .btn-tool:first-child { margin-top: 0; }
+
+    /* Modal (settings / editor) */
+    .modal-backdrop {
+      position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%;
+      z-index: 20; display: none;
+      background: rgba(0,0,0,0.6);
+      padding: 16px; box-sizing: border-box;
+    }
+    .modal-backdrop.active { display: block; }
+    .modal-card {
+      max-width: 560px; width: 100%; max-height: 88%; overflow-y: auto;
+      margin: 0 auto; margin-top: 5%;
+      background: rgba(14, 27, 56, 0.97); border: 1px solid rgba(6,182,212,0.3);
+      border-radius: 18px; padding: 22px; box-sizing: border-box;
+    }
+    .modal-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; }
+    .modal-row { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; -ms-flex-pack: justify; justify-content: space-between; margin: 10px 0; font-size: 13px; color: #cbd5e1; }
+    .modal-row label { -ms-flex: 0 0 auto; flex: 0 0 auto; min-width: 120px; margin-right: 12px; }
+    .modal-row input[type="range"] { -ms-flex: 1 1 auto; flex: 1 1 auto; }
+    .modal-row input[type="number"] { width: 70px; padding: 4px 6px; background: #05070d; border: 1px solid rgba(6,182,212,0.3); border-radius: 6px; color: #e2e8f0; font-family: inherit; font-size: 12px; margin-left: 12px; }
+    .modal-row .val { color: #67e8f9; font-weight: 700; min-width: 48px; text-align: right; margin-left: 12px; }
+    .modal-actions { display: -ms-flexbox; display: flex; -ms-flex-pack: end; justify-content: flex-end; margin-top: 18px; }
+    .modal-actions .btn-tool { margin-left: 10px; }
+    .editor-textarea {
+      width: 100%; min-height: 280px; box-sizing: border-box;
+      background: #05070d; border: 1px solid rgba(6,182,212,0.3); border-radius: 8px;
+      color: #e2e8f0; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; padding: 10px;
+    }
+    .editor-hint { font-size: 11px; color: #94a3b8; margin: 6px 0 0 0; line-height: 1.5; }
+    .editor-error { font-size: 12px; color: #ef4444; margin: 6px 0 0 0; min-height: 16px; }
+    .file-input-wrap { display: inline-block; }
+    .file-input-wrap input[type="file"] { display: none; }
+    .upload-btn {
+      display: inline-block; padding: 6px 12px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+      backdrop-filter: blur(10px) saturate(130%);
+      border: 1px solid rgba(6, 182, 212, 0.42); color: #67e8f9;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+    }
+    .upload-btn:hover {
+      background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    .pause-btn {
+      pointer-events: auto; padding: 8px 14px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+      backdrop-filter: blur(10px) saturate(130%);
+      border: 1px solid rgba(6, 182, 212, 0.42); color: #67e8f9;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+    }
+    .pause-btn:hover {
+      background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    /* === IE11 fallbacks ===
+     * Must come AFTER all base rules so they can properly override.
+     * Targeted via IE11-specific media query. */
+    @media all and (-ms-high-contrast: none), (-ms-high-contrast: active) {
+      .menu-title {
+        background: transparent; background-image: none;
+        color: #06b6d4; -webkit-text-fill-color: #06b6d4;
+      }
+      .result-rank {
+        background: transparent; background-image: none;
+        color: #fbbf24; -webkit-text-fill-color: #fbbf24;
+      }
+      /* .btn-start needs no override: rgba() backgrounds and box-shadow work in
+       * IE11, so the glass look survives (only backdrop-filter blur is lost). */
+      .hud-progress-fill { background: #06b6d4; }
+    }
+  </style>
+  <!--[if IE 9]>
+  <style>
+    /* IE9 overrides — minimal "just enough to click START GAME" fixes.
+     * Full layout polish is intentionally skipped per user requirement. */
+
+    /* 1. Gradient-text fallback (webkit-background-clip:text not supported).
+     *    The IE11 media query above doesn't apply to IE9, so force solid color. */
+    .menu-title  { background: transparent !important; color: #06b6d4 !important; }
+    .result-rank { background: transparent !important; color: #fbbf24 !important; }
+
+    /* 2. Flexbox not supported in IE9. Give menu-screen a crude block layout
+     *    so the title, chart-list, and footer (start button) are all visible.
+     *    We don't care about alignment — just that START is reachable. */
+    .screen { display: block !important; }
+    #menu-screen { padding: 16px; overflow: auto; }
+    .chart-list  { max-height: 45%; overflow-y: auto; margin: 8px 0; padding: 8px 0; }
+    .menu-footer { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(6,182,212,0.2); }
+    .toolbar     { display: block; }
+    .toolbar > * { display: inline-block; margin: 4px 8px 4px 0; }
+    .btn-start   { display: block; margin: 12px auto 0 auto; }
+
+    /* 3. Pause/result screens: rough centering so buttons are reachable */
+    .pause-card, .result-card { margin: 15% auto 0 auto; }
+    .result-row { display: block; }
+    .result-row span { display: inline-block; width: 48%; }
+    .result-actions { text-align: center; }
+
+    /* 4. Modal layout — flex rows → floated labels + inline-block inputs */
+    .modal-row { display: block; padding: 4px 0; zoom: 1; overflow: hidden; }
+    .modal-row label { float: left; min-width: 120px; margin-right: 12px; }
+    .modal-row input[type="range"],
+    .modal-row input[type="number"],
+    .modal-row .val { display: inline-block; vertical-align: middle; margin: 2px 0; }
+    .modal-actions { text-align: right; }
+
+    /* 5. pointer-events:none is ignored on IE9 HTML elements.
+     *    The JS forwarder handles the event re-dispatch, but we also force
+     *    overlay/hud to not claim mouse events by reducing their clickable
+     *    footprint when their content is hidden. */
+    .overlay        { z-index: 10; }
+    .overlay > *    { position: static; }
+    .screen.hidden  { display: none !important; }
+    #hud            { z-index: 5; }
+    #hud:not(.active) { display: none !important; }
+    .hud-pause-btn  { z-index: 6; }
+  </style>
+  <![endif]-->
+</head>
+<body>
+<div id="app">
+  <canvas id="game-canvas"></canvas>
+  <div id="hud">
+    <div class="hud-chart-info" id="hud-chart-info"></div>
+    <div class="hud-score" id="hud-score">0</div>
+    <div class="hud-acc" id="hud-acc">100.00%</div>
+    <div class="hud-rank" id="hud-rank">EX+</div>
+    <div class="hud-pause-btn">
+      <button class="pause-btn" id="btn-pause">暂停</button>
+    </div>
+    <div class="hud-progress"><div class="hud-progress-fill" id="hud-progress-fill"></div></div>
+  </div>
+  <div class="overlay">
+    <!-- Menu -->
+    <div class="screen" id="menu-screen">
+      <div>
+        <h1 class="menu-title">Proj:POLYGON Lite</h1>
+      </div>
+      <div class="chart-list" id="chart-list"></div>
+      <div class="menu-footer">
+        <div class="toolbar">
+          <label><input type="checkbox" id="autoplay-toggle"> Auto-Play</label>
+          <button class="btn-tool" id="btn-settings">设置</button>
+          <button class="btn-tool" id="btn-editor">导入和编辑</button>
+          <button class="btn-tool" id="btn-switch-full">切换完整版</button>
+        </div>
+        <button class="btn-start" id="btn-start">START GAME</button>
+      </div>
+    </div>
+    <!-- Pause -->
+    <div class="screen hidden" id="pause-screen">
+      <div class="pause-card">
+        <h2 class="pause-title">已暂停</h2>
+        <div class="pause-actions">
+          <button class="btn-start" id="btn-resume">继续</button>
+          <button class="btn-tool" id="btn-restart">重新开始</button>
+          <button class="btn-tool" id="btn-pause-menu">返回菜单</button>
+        </div>
+      </div>
+    </div>
+    <!-- Result -->
+    <div class="screen hidden" id="result-screen">
+      <div class="result-card" id="result-card"></div>
+    </div>
+  </div>
+  <!-- Settings Modal -->
+  <div class="modal-backdrop" id="settings-modal">
+    <div class="modal-card">
+      <h3 class="modal-title">设置</h3>
+      <div class="modal-row">
+        <label>下落速度</label>
+        <input type="range" id="set-speed" min="0.5" max="4" step="0.1">
+        <span class="val" id="val-speed">1.0x</span>
+      </div>
+      <div class="modal-row">
+        <label>音符缩放</label>
+        <input type="range" id="set-size" min="0.6" max="1" step="0.05">
+        <span class="val" id="val-size">1.0x</span>
+      </div>
+      <div class="modal-row">
+        <label>渲染距离</label>
+        <input type="range" id="set-render" min="20" max="120" step="5">
+        <span class="val" id="val-render">70</span>
+      </div>
+      <div class="modal-row">
+        <label>音频偏移</label>
+        <input type="range" id="set-offset" min="-600" max="600" step="5">
+        <span class="val" id="val-offset">0ms</span>
+      </div>
+      <div class="modal-row">
+        <label>判定框浮现</label>
+        <input type="range" id="set-proj" min="0" max="1000" step="50">
+        <span class="val" id="val-proj">500ms</span>
+      </div>
+      <div class="modal-row">
+        <label>音乐音量</label>
+        <input type="range" id="set-music" min="0" max="1" step="0.01">
+        <span class="val" id="val-music">80%</span>
+      </div>
+      <div class="modal-row">
+        <label>音效音量</label>
+        <input type="range" id="set-sfx" min="0" max="1" step="0.01">
+        <span class="val" id="val-sfx">90%</span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-tool" id="btn-settings-close">关闭</button>
+      </div>
+    </div>
+  </div>
+  <!-- Chart Editor Modal -->
+  <div class="modal-backdrop" id="editor-modal">
+    <div class="modal-card">
+      <h3 class="modal-title">导入和编辑</h3>
+      <p class="editor-hint">
+        粘贴 JSON 格式的谱面。结构：<code>{ metadata: {...}, notes: [...] }</code>。
+        notes 支持 type: <code>tap</code> / <code>touch</code> / <code>slide</code>（slide 带 nodes 数组）。
+      </p>
+      <textarea class="editor-textarea" id="editor-textarea" spellcheck="false" placeholder='{ "metadata": {...}, "notes": [...] }'></textarea>
+      <p class="editor-error" id="editor-error"></p>
+      <div class="modal-actions">
+        <label class="file-input-wrap">
+          <input type="file" id="editor-file" accept=".json,application/json">
+          <span class="upload-btn">导入谱面</span>
+        </label>
+        <label class="file-input-wrap">
+          <input type="file" id="editor-audio-file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac">
+          <span class="upload-btn" id="editor-audio-label">导入音频</span>
+        </label>
+        <button class="btn-tool" id="btn-editor-load">加载谱面</button>
+        <button class="btn-tool" id="btn-editor-close">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+ * Polytone Lite — lightweight Canvas-2D build
+ * ES5 only (Chrome 30+ / IE 11+ compatible). No build step.
+ * Sections: 1.Polyfill 2.Constants 3.Core logic 4.LiteAudio
+ *           5.Renderer 6.GameLoop 6.5.Input 7.UI 8.Demo charts
+ * Mirrors src/components/PolytoneCanvas.tsx + src/audio/AudioManager.ts
+ * + src/utils/{scoring,beatTime,chartParser}.ts in plain ES5.
+ * ============================================================ */
+(function () {
+  'use strict';
+
+  /* === 1. Polyfill (only what old browsers lack) === */
+
+  /* --- IE9 classList polyfill (IE10+ have it; IE9 has nothing) ---
+   * Minimal implementation covering add/remove/contains/toggle.
+   * Only installs if Element.prototype.classList is absent.
+   *
+   * IMPORTANT: Caching strategy avoids re-entrant Object.defineProperty on
+   * the 'classList' property name itself — inside the prototype getter we
+   * MUST NOT call Object.defineProperty(this, 'classList', ...) because
+   * IE9 re-triggers the prototype getter during the operation, causing
+   * infinite recursion / stack overflow at ClassList constructor + getter.
+   * Instead we stash the per-element ClassList instance under a plain
+   * expando property name (__cl__) that's never defined via defineProperty.
+   * The prototype getter always runs but the heavy ClassList object is
+   * built at most once per element. */
+  (function () {
+    if (typeof Element === 'undefined') return; /* non-DOM env */
+    if ('classList' in document.documentElement) return; /* already supported */
+    var kTest = /^\s+|\s+$/g, kTrim = /\s+/;
+    var CACHE_KEY = '__cl__'; /* plain expando, never Object.defineProperty'd */
+    function tokens(s) { return (s || '').replace(kTest, '').split(kTrim); }
+    function ClassList(el) { this._el = el; }
+    ClassList.prototype = {
+      add: function () {
+        var cls = this._el.className, list = tokens(cls), changed = false, i, j, tok;
+        for (i = 0; i < arguments.length; i++) {
+          tok = String(arguments[i]);
+          if (!tok) continue;
+          for (j = 0; j < list.length; j++) if (list[j] === tok) break;
+          if (j === list.length) { list.push(tok); changed = true; }
+        }
+        if (changed) this._el.className = list.join(' ');
+      },
+      remove: function () {
+        var cls = this._el.className, list = tokens(cls), changed = false, i, j, tok;
+        for (i = 0; i < arguments.length; i++) {
+          tok = String(arguments[i]);
+          for (j = 0; j < list.length; j++) {
+            if (list[j] === tok) { list.splice(j, 1); j--; changed = true; }
+          }
+        }
+        if (changed) this._el.className = list.join(' ');
+      },
+      contains: function (cls) {
+        var list = tokens(this._el.className), tok = String(cls);
+        for (var i = 0; i < list.length; i++) if (list[i] === tok) return true;
+        return false;
+      },
+      toggle: function (cls, force) {
+        var exists = this.contains(cls), add = (typeof force === 'boolean') ? force : !exists;
+        if (add) { if (!exists) this.add(cls); return true; }
+        else { if (exists) this.remove(cls); return false; }
+      }
+    };
+    /* On some IE9 document modes Object.defineProperty on a DOM prototype
+     * can itself misbehave (throw or silently ignore or recurse). Fall back
+     * to __defineGetter__ (IE8/9 legacy hook) if the standard way throws.
+     * In the getter we only access CACHE_KEY (a plain property on the
+     * element instance) — never 'classList' — so no re-entrancy. */
+    function install(getterFn) {
+      try {
+        Object.defineProperty(Element.prototype, 'classList', {
+          get: getterFn,
+          configurable: true
+        });
+      } catch (defErr) {
+        try {
+          /* IE9 legacy accessor hook */
+          Element.prototype.__defineGetter__('classList', getterFn);
+        } catch (gErr) {
+          /* Give up on prototype injection — install a wrapper function.
+           * Consumer code uses el.classList.METHOD() so a function-valued
+           * classList would break calls. Instead, at first interaction
+           * below we do nothing here; user will see feature not work rather
+           * than crash on load. */
+        }
+      }
+    }
+    install(function () {
+      var inst = this[CACHE_KEY];
+      if (!inst) {
+        inst = new ClassList(this);
+        try { this[CACHE_KEY] = inst; } catch (expandoErr) { /* won't cache, still return fresh */ }
+      }
+      return inst;
+    });
+  })();
+
+  /* --- IE9 pointer-events feature detection + JS forwarding ---
+   * IE9 ignores pointer-events:none on HTML elements, so overlay/hud blocks
+   * clicks on the canvas. We detect the bug and install a click-forwarder
+   * that re-dispatches the event to the element beneath (document.elementFromPoint).
+   * This is the lightest fix: no need to restructure DOM/z-index. */
+  (function () {
+    var el = document.createElement('div');
+    if (!('pointerEvents' in el.style) && !('msPointerEvents' in el.style)) {
+      window._ie9NoPointerEvents = true;
+    }
+  })();
+  function installPointerEventsFallback() {
+    if (!window._ie9NoPointerEvents) return;
+    var targets = [document.getElementById('hud'), document.querySelector('.overlay')];
+    for (var ti = 0; ti < targets.length; ti++) {
+      (function (layer) {
+        if (!layer) return;
+        /* Only forward when the real event target IS the layer itself — i.e.
+         * the user clicked on a transparent/uncovered part of overlay/hud.
+         * If the target is a child (e.g. a button inside .screen), the normal
+         * DOM event flow already delivers it — forwarding would double-fire. */
+        function forward(e) {
+          var realTarget = e.target || e.srcElement;
+          if (realTarget !== layer) return;
+          /* Find the topmost element that would be under the cursor if this
+           * layer wasn't here. Temporarily hide this layer, probe, restore. */
+          var prevDisplay = layer.style.display;
+          var below;
+          try {
+            layer.style.display = 'none';
+            below = document.elementFromPoint(e.clientX, e.clientY);
+          } finally {
+            layer.style.display = prevDisplay;
+          }
+          if (!below || below === layer) return;
+          /* Re-dispatch a synthetic mouse event at the newly revealed element
+           * so that its own handlers (canvas mouse/tap binding, buttons etc.)
+           * see the interaction exactly as if the layer hadn't intercepted. */
+          var evtName = e.type;
+          try {
+            var ev;
+            if (document.createEvent) {
+              ev = document.createEvent('MouseEvents');
+              ev.initMouseEvent(evtName, true, true, window, 1,
+                e.clientX, e.clientY, e.clientX, e.clientY,
+                e.ctrlKey, e.altKey, e.shiftKey, e.metaKey, 0, null);
+              below.dispatchEvent(ev);
+            }
+          } catch (err) { /* swallow */ }
+          /* Stop the original event so the layer doesn't also claim it. */
+          try { e.stopPropagation(); e.preventDefault(); } catch (err2) {}
+        }
+        /* Forward all primary mouse interaction events. mousemove is critical
+         * for slide-note drag tracking in gameplay. contextmenu / dblclick
+         * omitted (they aren't used by this app). */
+        ['mousedown', 'mouseup', 'click', 'mousemove', 'mouseover', 'mouseout'].forEach(
+          function (evtName) {
+            layer.addEventListener(evtName, forward, true);
+          }
+        );
+      })(targets[ti]);
+    }
+  }
+
+  var rAF = window.requestAnimationFrame
+    || window.webkitRequestAnimationFrame
+    || window.mozRequestAnimationFrame
+    || function (cb) { return window.setTimeout(cb, 16); };
+  var cAF = window.cancelAnimationFrame
+    || window.webkitCancelAnimationFrame
+    || window.mozCancelAnimationFrame
+    || function (id) { window.clearTimeout(id); };
+  if (!Object.assign) {
+    Object.assign = function (target) {
+      for (var i = 1; i < arguments.length; i++) {
+        var src = arguments[i];
+        if (src) for (var k in src) if (Object.prototype.hasOwnProperty.call(src, k)) target[k] = src[k];
+      }
+      return target;
+    };
+  }
+  if (!Array.isArray) {
+    Array.isArray = function (o) { return Object.prototype.toString.call(o) === '[object Array]'; };
+  }
+  var now = (window.performance && performance.now)
+    ? function () { return performance.now(); }
+    : function () { return new Date().getTime(); };
+
+  /* --- Integer thousands-separator formatter.
+   *   Why not Number.prototype.toLocaleString()?
+   *   IE9 / IE10 ship a non-standard locale formatter that appends ".00"
+   *   to integer values (old NumberFormat defaulted to fractionDigits:2).
+   *   Modern browsers agree that toLocaleString() on an integer shows no
+   *   decimals, but we can't rely on that on IE<11, so we hand-roll a
+   *   small, deterministic formatter that never touches browser locale. */
+  function formatInt(n) {
+    var v = Math.round(Number(n) || 0);
+    var sign = v < 0 ? '-' : '';
+    var s = String(Math.abs(v));
+    var out = '';
+    for (var i = s.length - 1, j = 0; i >= 0; i--, j++) {
+      if (j > 0 && j % 3 === 0) out = ',' + out;
+      out = s.charAt(i) + out;
+    }
+    return sign + out;
+  }
+
+  /* === 2. Constants (mirrors src/components/PolytoneCanvas.tsx L30-51) === */
+  var TAP_SIZE = 1.6;
+  var TOUCH_SIZE = TAP_SIZE * 0.707;
+  var SLIDE_SIZE = TAP_SIZE * 0.707;
+  var SLIDE_HALF = (SLIDE_SIZE * Math.SQRT2) / 2;
+  var SLIDE_PIPE_HALF = SLIDE_HALF * 0.82;
+  var JUDGE_Z = 0;
+  var TAP_HIT_HALF = 1.2;
+  var TOUCH_HIT_HALF = 1.0;
+  var SLIDE_HIT_HALF = 1.2;
+  var HIT_WINDOW_MS = 160;
+  var SLIDE_RED = '#ff0000';
+  var CAMERA_VFOV = 52;
+  var FIT_HALF = 2.42;
+  var CAMERA_AXIS_Y = -0.18;
+  var TAN_HALF_FOV = Math.tan(CAMERA_VFOV * Math.PI / 180 / 2); /* ≈0.4877 */
+  var FADE_ZONE = 12;
+  /* Judge plane border (mirrors full version tunnel plane corners ±3.8/±2.5).
+   * Previous ±3.0/±1.9 made the play area look smaller than the full version. */
+  var PLANE_HALF_X = 3.8;
+  var PLANE_HALF_Y = 2.5;
+  var JUDGE_THRESH = { S_PERFECT: 40, PERFECT: 80, GOOD: 160 };
+  var JUDGE_COLORS = {
+    'S-Perfect': '#ff8c00',
+    'Perfect': '#ffd700',
+    'Good': '#38bdf8',
+    'Miss': '#ef4444'
+  };
+  /* Burst animation scale target per judgment — mirrors JUDGEMENT_COLORS[].scale
+   * in src/utils/scoring.ts. The burst starts at the note's size and grows by
+   * this factor (1.2 = 20% growth for S-Perfect, etc.) using a sine curve. */
+  var JUDGE_SCALE = {
+    'S-Perfect': 1.2,
+    'Perfect': 1.1,
+    'Good': 1.05,
+    'Miss': 1.0
+  };
+
+  /* === 3. Core logic (ported verbatim from src/utils/*.ts to ES5) === */
+  function beatToSeconds(beat, bpm, offset) { return offset + (beat * 60) / bpm; }
+
+  /* Multi-BPM support: convert beat to seconds using bpmlist.
+   * Mirrors beatToSecondsMultiBpm in src/utils/beatTime.ts. */
+  function beatToSecondsMultiBpm(beat, baseBpm, offset, bpmlist) {
+    if (!bpmlist || bpmlist.length === 0) return beatToSeconds(beat, baseBpm, offset);
+    var currentBeat = 0;
+    var currentBpm = baseBpm;
+    var acc = 0;
+    for (var i = 0; i < bpmlist.length; i++) {
+      var p = bpmlist[i];
+      if (p.beat <= 0) continue;
+      if (p.beat >= beat) break;
+      acc += ((p.beat - currentBeat) * 60) / currentBpm;
+      currentBeat = p.beat;
+      currentBpm = p.bpm;
+    }
+    acc += ((beat - currentBeat) * 60) / currentBpm;
+    return offset + acc;
+  }
+
+  function resolveChart(chart) {
+    var bpm = chart.metadata.bpm, offset = chart.metadata.offset || 0;
+    var bpmlist = chart.metadata.bpmlist || null;
+    var out = [];
+    for (var i = 0; i < chart.notes.length; i++) {
+      var n = chart.notes[i];
+      var r = { id: n.id, beat: n.beat, x: n.x, y: n.y, type: n.type, color: n.color, timeSec: beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist) };
+      if (n.type === 'slide' && n.nodes) {
+        var kids = [];
+        for (var k = 0; k < n.nodes.length; k++) {
+          var sn = n.nodes[k];
+          kids.push({ beat: sn.beat, x: sn.x, y: sn.y, timeSec: beatToSecondsMultiBpm(sn.beat, bpm, offset, bpmlist) });
+        }
+        r.resolvedNodes = kids;
+      }
+      out.push(r);
+    }
+    out.sort(function (a, b) { return a.timeSec - b.timeSec; });
+    return out;
+  }
+
+  /* Get the time of the earliest note (including slide child nodes).
+   * Mirrors getFirstNoteTime in src/utils/beatTime.ts. */
+  function getFirstNoteTime(chart) {
+    if (!chart.notes || chart.notes.length === 0) return 0;
+    var bpm = chart.metadata.bpm, offset = chart.metadata.offset || 0;
+    var bpmlist = chart.metadata.bpmlist || null;
+    var minBeat = Infinity;
+    for (var i = 0; i < chart.notes.length; i++) {
+      var n = chart.notes[i];
+      if (n.beat < minBeat) minBeat = n.beat;
+      if (n.type === 'slide' && n.nodes) {
+        for (var k = 0; k < n.nodes.length; k++) {
+          if (n.nodes[k].beat < minBeat) minBeat = n.nodes[k].beat;
+        }
+      }
+    }
+    return beatToSecondsMultiBpm(minBeat, bpm, offset, bpmlist);
+  }
+
+  /* Resolve events from beat-based to absolute seconds.
+   * Mirrors resolveEvents in src/utils/beatTime.ts. */
+  function resolveEvents(chart) {
+    var bpm = chart.metadata.bpm, offset = chart.metadata.offset || 0;
+    var bpmlist = chart.metadata.bpmlist || null;
+    if (!chart.events || chart.events.length === 0) {
+      /* Legacy speedEvents migration */
+      if (chart.speedEvents && chart.speedEvents.length > 0) {
+        var legacy = [];
+        for (var li = 0; li < chart.speedEvents.length; li++) {
+          var se = chart.speedEvents[li];
+          legacy.push({
+            id: 'legacy-speed-' + li,
+            type: 'event',
+            eventType: 'speed_change',
+            beat: se.beat,
+            speed: se.speed,
+            timeSec: beatToSecondsMultiBpm(se.beat, bpm, offset, bpmlist)
+          });
+        }
+        legacy.sort(function (a, b) { return a.timeSec - b.timeSec; });
+        return legacy;
+      }
+      return [];
+    }
+    var resolved = [];
+    for (var ei = 0; ei < chart.events.length; ei++) {
+      var e = chart.events[ei];
+      var re = {};
+      for (var ek in e) { if (e.hasOwnProperty(ek)) re[ek] = e[ek]; }
+      re.timeSec = beatToSecondsMultiBpm(e.beat, bpm, offset, bpmlist);
+      resolved.push(re);
+    }
+    resolved.sort(function (a, b) { return a.timeSec - b.timeSec; });
+    return resolved;
+  }
+
+  /* Pre-compute scroll speed change points for note position calculation.
+   * Mirrors extractSpeedPoints + getScrollDistance in src/utils/beatTime.ts. */
+  function extractSpeedPoints(events) {
+    var points = [];
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      if (e.eventType === 'speed_change' && typeof e.speed === 'number') {
+        points.push({ timeSec: e.timeSec, speed: e.speed });
+      }
+    }
+    points.sort(function (a, b) { return a.timeSec - b.timeSec; });
+    return points;
+  }
+  function getScrollDistance(timeSec, speedPoints) {
+    if (!speedPoints || speedPoints.length === 0) return timeSec;
+    var dist = 0;
+    var curTime = 0;
+    var curSpeed = 1;
+    for (var i = 0; i < speedPoints.length; i++) {
+      var p = speedPoints[i];
+      if (p.timeSec <= 0) { curSpeed = p.speed; continue; }
+      if (p.timeSec >= timeSec) break;
+      dist += (p.timeSec - curTime) * curSpeed;
+      curTime = p.timeSec;
+      curSpeed = p.speed;
+    }
+    dist += (timeSec - curTime) * curSpeed;
+    return dist;
+  }
+  function countPlayableNotes(chart) {
+    var t = 0;
+    for (var i = 0; i < chart.notes.length; i++) {
+      var n = chart.notes[i];
+      t += 1 + (n.type === 'slide' ? (n.nodes ? n.nodes.length : 0) : 0);
+    }
+    return t;
+  }
+  function evaluateJudgement(deltaTMs) {
+    var a = Math.abs(deltaTMs);
+    if (a < JUDGE_THRESH.S_PERFECT) return 'S-Perfect';
+    if (a < JUDGE_THRESH.PERFECT) return 'Perfect';
+    if (a < JUDGE_THRESH.GOOD) return 'Good';
+    return null;
+  }
+  /* Per-note score — mirrors calculateNoteScore in src/utils/scoring.ts.
+   * baseUnit = 10M / totalNotes. S-Perfect = baseUnit + 1, Perfect = baseUnit,
+   * Good = baseUnit * 0.5, Miss = 0. */
+  function calculateNoteScore(j, total) {
+    if (total <= 0) return 0;
+    var base = 10000000 / total;
+    if (j === 'S-Perfect') return base + 1;
+    if (j === 'Perfect') return base;
+    if (j === 'Good') return base * 0.5;
+    return 0;
+  }
+  function calculateRank(score) {
+    if (score >= 9900000) return 'EX+';
+    if (score >= 9500000) return 'EX';
+    if (score >= 9000000) return 'S';
+    if (score >= 8000000) return 'A';
+    if (score >= 7000000) return 'B';
+    if (score >= 6000000) return 'C';
+    return 'F';
+  }
+
+  /* === 3.5 Color helpers (ES5, IE11-safe) === */
+  var FALLBACK_SCHEME = { accentColor: '#06b6d4', gradientStart: '#050816', gradientEnd: '#02040c' };
+  function hexToRgb(hex) {
+    var h = ('' + hex).replace('#', '');
+    if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+    var n = parseInt(h, 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  }
+  function withAlpha(hex, a) {
+    var c = hexToRgb(hex);
+    return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')';
+  }
+  function adjustBrightness(hex, f) {
+    var c = hexToRgb(hex);
+    function cl(x) { x = Math.round(x); return x < 0 ? 0 : (x > 255 ? 255 : x); }
+    return 'rgb(' + cl(c.r * f) + ',' + cl(c.g * f) + ',' + cl(c.b * f) + ')';
+  }
+
+  /* === 3.6 Theme — UI accent follows the active chart's bgScheme.accentColor.
+   * IE11 has no CSS custom properties, so we inject a concrete <style> block with
+   * the derived accent colors baked in (gradients, borders, :hover, etc.). A media
+   * query overrides gradient text for IE11 with a solid color. === */
+  var Theme = (function () {
+    var styleEl = null;
+    var current = FALLBACK_SCHEME.accentColor; /* also read by canvas effects */
+    /* Glass button recipe (mirrors .glass-btn-primary / .glass-accent in
+     * src/index.css): translucent accent fill + accent hairline border +
+     * outer accent glow + inner top highlight. backdrop-filter is a
+     * progressive enhancement — IE11 ignores it and still looks correct. */
+    function glass(accent, fill, brd, glow, rim) {
+      return 'background:' + withAlpha(accent, fill) + ';' +
+             'border:1px solid ' + withAlpha(accent, brd) + ';' +
+             'box-shadow:0 0 ' + glow.px + 'px ' + withAlpha(accent, glow.a) +
+             ',inset 0 1px 0 rgba(255,255,255,' + rim + ');';
+    }
+    function apply(scheme) {
+      var accent = (scheme && scheme.accentColor) || FALLBACK_SCHEME.accentColor;
+      current = accent;
+      var adark = adjustBrightness(accent, 0.55);
+      var light = adjustBrightness(accent, 1.35);
+      var bright = adjustBrightness(accent, 1.6);
+      var a20 = withAlpha(accent, 0.2), a30 = withAlpha(accent, 0.3),
+          a50 = withAlpha(accent, 0.5), a60 = withAlpha(accent, 0.6);
+      var primaryGrad = 'linear-gradient(90deg,' + accent + ',' + adark + ')';
+      /* Secondary (tool/upload/pause) and primary (start) glass buttons */
+      var gSub = glass(accent, 0.08, 0.42, { px: 12, a: 0.18 }, 0.08);
+      var gSubHover = glass(accent, 0.2, 0.62, { px: 20, a: 0.32 }, 0.14);
+      var gPri = glass(accent, 0.18, 0.5, { px: 24, a: 0.3 }, 0.2);
+      var gPriHover = glass(accent, 0.28, 0.66, { px: 34, a: 0.45 }, 0.26);
+      var css =
+        '.chart-card{border-color:' + a20 + ';}' +
+        '.chart-card:hover{border-color:' + a50 + ';background:' + withAlpha(adark, 0.55) + ';}' +
+        '.chart-card.selected{border-color:' + accent + ';box-shadow:0 0 18px ' + a30 + ';}' +
+        '.chart-bpm{border-color:' + a30 + ';color:' + light + ';}' +
+        '.menu-footer{border-top-color:' + a20 + ';}' +
+        '.btn-tool,.upload-btn,.pause-btn{' + gSub + 'color:' + light + ';}' +
+        '.btn-tool:hover,.upload-btn:hover,.pause-btn:hover{' + gSubHover + '}' +
+        '.btn-start{' + gPri + 'color:#fff;}' +
+        '.btn-start:hover{' + gPriHover + '}' +
+        '.hud-score{text-shadow:0 0 12px ' + a60 + ';}' +
+        '.hud-acc,.hud-rank{color:' + bright + ';}' +
+        '.hud-progress-fill{background:' + accent + ';}' +
+        '.result-card{border-color:' + a30 + ';}' +
+        '.result-rank{color:' + bright + ';}' +
+        '.pause-title{color:' + light + ';}' +
+        '.modal-card{border-color:' + a30 + ';}' +
+        '.modal-row input[type=number],.editor-textarea{border-color:' + a30 + ';}' +
+        '.modal-row .val{color:' + light + ';}' +
+        '.menu-title{background:' + primaryGrad + ';-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}' +
+        /* IE11 only: no background-clip:text support → solid accent text.
+         * rgba backgrounds / box-shadow DO work in IE11, so the glass buttons
+         * need no override here. */
+        '@media all and (-ms-high-contrast:none),(-ms-high-contrast:active){' +
+          '.hud-progress-fill{background:' + accent + ';}' +
+          '.menu-title{background:transparent;color:' + accent + ';-webkit-text-fill-color:' + accent + ';}' +
+        '}';
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = 'theme-style';
+        document.head.appendChild(styleEl);
+      }
+      /* IE9: <style>.textContent does not always propagate to the active
+       * stylesheet; must go through the DOM styleSheet.cssText interface.
+       * Modern browsers accept textContent directly. */
+      try {
+        if (styleEl.styleSheet && styleEl.styleSheet.cssText !== undefined) {
+          styleEl.styleSheet.cssText = css;
+        } else {
+          styleEl.textContent = css;
+        }
+      } catch (e) {
+        /* Last resort: clear and append a text node (IE8 style, works in IE9 too) */
+        try {
+          while (styleEl.firstChild) styleEl.removeChild(styleEl.firstChild);
+          styleEl.appendChild(document.createTextNode(css));
+        } catch (e2) { /* give up */ }
+      }
+    }
+    return { apply: apply, accent: function () { return current; } };
+  })();
+
+  /* === 4. LiteAudio — ported from src/audio/AudioManager.ts ===
+   * Primary path: Web Audio API (modern browsers).
+   * Fallback path: HTML5 <audio> element (IE11, which lacks Web Audio API
+   *   entirely). In fallback mode: imported audio plays via blob URL, but
+   *   synth BGM and hit sounds are unavailable (no way to generate audio
+   *   without Web Audio API). The game remains playable, just silent for
+   *   demo tracks. */
+  function LiteAudio() {
+    this.ctx = null; this.masterGain = null; this.bgmGain = null; this.sfxGain = null;
+    this.bgmSource = null; this.synthInterval = null; this.synthBpm = 140;
+    this.startTime = 0; this.pauseTime = 0; this.isPlaying = false;
+    this.userOffset = 0; this.leadInTime = 0; this.musicVolume = 0.8; this.effectVolume = 0.9;
+    this.hasUploadedAudio = false; this.forceSynth = false; this.bgmBuffer = null;
+    this.hitSoundBuffers = {}; this.useOscFallback = false; this.disabled = false;
+    /* HTML5 fallback (IE11): when true, BGM plays via <audio> element. */
+    this.useHtml5 = false; this.htmlAudioEl = null;
+  }
+  LiteAudio.prototype.init = function () {
+    if (this.useHtml5) return; /* already initialized as HTML5 fallback */
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) {
+      /* IE11: no Web Audio API at all. Fall back to HTML5 <audio> for BGM.
+       * Synth BGM and hit sounds are unavailable — the game runs silent
+       * unless the user imports an audio file. */
+      this.useHtml5 = true;
+      return;
+    }
+    try {
+      this.ctx = new AC();
+      this.masterGain = this.ctx.createGain(); this.masterGain.gain.value = 0.9;
+      this.masterGain.connect(this.ctx.destination);
+      this.bgmGain = this.ctx.createGain(); this.bgmGain.gain.value = this.musicVolume;
+      this.bgmGain.connect(this.masterGain);
+      this.sfxGain = this.ctx.createGain(); this.sfxGain.gain.value = this.effectVolume;
+      this.sfxGain.connect(this.masterGain);
+      this.loadBuiltinSounds();
+    } catch (e) { this.disabled = true; }
+  };
+  /* Pre-render per-note-type hit sounds (tap/touch/slide) offline. These are the
+   * procedural fallback; loadBuiltinSounds() may upgrade them with packaged OGG. */
+  LiteAudio.prototype.preRenderHitSounds = function () {
+    var sr = this.ctx ? this.ctx.sampleRate : 44100;
+    var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OAC) { this.useOscFallback = true; return; }
+    var self = this;
+    var render = function (key, durSec, build) {
+      try {
+        var off = new OAC(1, Math.ceil(sr * durSec), sr);
+        var out = off.createGain(); out.connect(off.destination);
+        build(off, out);
+        var result = off.startRendering();
+        var store = function (b) { if (b) self.hitSoundBuffers[key] = b; };
+        if (result && typeof result.then === 'function') result.then(store, function () {});
+        else if (result) store(result);
+      } catch (e) { /* fall back to oscillator path per-call */ }
+    };
+    /* tap: triangle 880→1760 + sine 1320→2640, 0.18s */
+    render('tap', 0.22, function (ctx, out) {
+      var o1 = ctx.createOscillator(), o2 = ctx.createOscillator(), g = ctx.createGain();
+      o1.type = 'triangle'; o1.frequency.setValueAtTime(880, 0);
+      o1.frequency.exponentialRampToValueAtTime(1760, 0.08);
+      o2.type = 'sine'; o2.frequency.setValueAtTime(1320, 0);
+      o2.frequency.exponentialRampToValueAtTime(2640, 0.12);
+      g.gain.setValueAtTime(0.7, 0); g.gain.exponentialRampToValueAtTime(0.001, 0.18);
+      o1.connect(g); o2.connect(g); g.connect(out);
+      o1.start(0); o2.start(0); o1.stop(0.18); o2.stop(0.18);
+    });
+    /* touch: sine 740→1480, 0.14s */
+    render('touch', 0.18, function (ctx, out) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(740, 0);
+      o.frequency.exponentialRampToValueAtTime(1480, 0.1);
+      g.gain.setValueAtTime(0.6, 0); g.gain.exponentialRampToValueAtTime(0.001, 0.14);
+      o.connect(g); g.connect(out); o.start(0); o.stop(0.14);
+    });
+    /* slide: sawtooth 480→880 through lowpass 2200→800, 0.16s */
+    render('slide', 0.2, function (ctx, out) {
+      var o = ctx.createOscillator(), g = ctx.createGain(), f = ctx.createBiquadFilter();
+      f.type = 'lowpass'; f.frequency.setValueAtTime(2200, 0); f.frequency.linearRampToValueAtTime(800, 0.16);
+      o.type = 'sawtooth'; o.frequency.setValueAtTime(480, 0);
+      o.frequency.exponentialRampToValueAtTime(880, 0.16);
+      g.gain.setValueAtTime(0.32, 0); g.gain.exponentialRampToValueAtTime(0.001, 0.16);
+      o.connect(f); f.connect(g); g.connect(out); o.start(0); o.stop(0.16);
+    });
+    /* ui: crisp 2-note plink (sine 1240 + 1860 Hz, 60ms) — same recipe as the
+     * full version, used for DOM button/card clicks when ui.ogg is absent. */
+    render('ui', 0.08, function (ctx, out) {
+      var o1 = ctx.createOscillator(), o2 = ctx.createOscillator(), g = ctx.createGain();
+      o1.type = 'sine'; o1.frequency.value = 1240;
+      o2.type = 'sine'; o2.frequency.value = 1860;
+      g.gain.setValueAtTime(0.35, 0); g.gain.exponentialRampToValueAtTime(0.001, 0.06);
+      o1.connect(g); o2.connect(g); g.connect(out);
+      o1.start(0); o2.start(0); o1.stop(0.06); o2.stop(0.06);
+    });
+  };
+  /* Load packaged OGG sounds (tap/touch/slide/ui) when available, upgrading the
+   * synthesized fallback. Any file that is missing (e.g. ui.ogg not shipped yet)
+   * simply keeps its synthesized version — a 404 never breaks the others.
+   * Skipped on IE11 (no fetch/decodeAudioData): synthesized sounds are the
+   * degrade path there, per requirement. */
+  LiteAudio.prototype.loadBuiltinSounds = function () {
+    if (this.useHtml5 || !this.ctx) return;
+    this.preRenderHitSounds(); /* guarantee a fallback is ready immediately */
+    if (!window.fetch || !this.ctx.decodeAudioData) return;
+    var self = this;
+    var files = [
+      { type: 'tap', url: '/sounds/tap.ogg' },
+      { type: 'touch', url: '/sounds/touch.ogg' },
+      { type: 'slide', url: '/sounds/slide.ogg' },
+      { type: 'ui', url: '/sounds/ui.ogg' }
+    ];
+    files.forEach(function (item) {
+      try {
+        fetch(item.url).then(function (res) {
+          if (!res || !res.ok) return null;
+          return res.arrayBuffer();
+        }).then(function (ab) {
+          if (!ab) return;
+          var ok = function (buf) { if (buf) self.hitSoundBuffers[item.type] = buf; };
+          var fail = function () { /* keep synthesized fallback */ };
+          var p = self.ctx.decodeAudioData(ab, ok, fail);
+          if (p && typeof p.then === 'function') p.then(ok, fail);
+        }).catch(function () { /* keep synthesized fallback */ });
+      } catch (e) { /* keep synthesized fallback */ }
+    });
+  };
+  LiteAudio.prototype.playHitSound = function (type) {
+    if (this.useHtml5) return; /* no hit sounds in HTML5 mode (no Web Audio API) */
+    if (!this.ctx || !this.sfxGain || this.disabled) return;
+    var buf = this.hitSoundBuffers[type];
+    if (buf) {
+      var src = this.ctx.createBufferSource(); src.buffer = buf;
+      src.connect(this.sfxGain); src.start(); return;
+    }
+    /* Oscillator fallback (pre-render not ready / failed). Per note type. */
+    var t = this.ctx.currentTime, o, g, f;
+    if (type === 'touch') {
+      o = this.ctx.createOscillator(); g = this.ctx.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(740, t); o.frequency.exponentialRampToValueAtTime(1480, t + 0.1);
+      g.gain.setValueAtTime(0.6, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+      o.connect(g); g.connect(this.sfxGain); o.start(t); o.stop(t + 0.14);
+    } else if (type === 'slide') {
+      o = this.ctx.createOscillator(); g = this.ctx.createGain(); f = this.ctx.createBiquadFilter();
+      f.type = 'lowpass'; f.frequency.setValueAtTime(2200, t); f.frequency.linearRampToValueAtTime(800, t + 0.16);
+      o.type = 'sawtooth'; o.frequency.setValueAtTime(480, t); o.frequency.exponentialRampToValueAtTime(880, t + 0.16);
+      g.gain.setValueAtTime(0.32, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      o.connect(f); f.connect(g); g.connect(this.sfxGain); o.start(t); o.stop(t + 0.16);
+    } else { /* tap (default) */
+      o = this.ctx.createOscillator(); var o2 = this.ctx.createOscillator(); g = this.ctx.createGain();
+      o.type = 'triangle'; o.frequency.setValueAtTime(880, t); o.frequency.exponentialRampToValueAtTime(1760, t + 0.08);
+      o2.type = 'sine'; o2.frequency.setValueAtTime(1320, t); o2.frequency.exponentialRampToValueAtTime(2640, t + 0.12);
+      g.gain.setValueAtTime(0.7, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+      o.connect(g); o2.connect(g); g.connect(this.sfxGain);
+      o.start(t); o2.start(t); o.stop(t + 0.18); o2.stop(t + 0.18);
+    }
+  };
+  /* Play the UI click sound (ui.ogg when shipped, synthesized plink otherwise).
+   * init() runs here because callers are always inside a click handler, which is
+   * the only place AudioContext creation/resume is allowed by autoplay policy. */
+  LiteAudio.prototype.playUiSound = function () {
+    this.init();
+    if (this.useHtml5) return; /* IE11: no Web Audio API → silent, but no error */
+    if (!this.ctx || !this.sfxGain || this.disabled) return;
+    var buf = this.hitSoundBuffers['ui'];
+    if (buf) {
+      var src = this.ctx.createBufferSource(); src.buffer = buf;
+      src.connect(this.sfxGain); src.start(); return;
+    }
+    var t = this.ctx.currentTime;
+    var o1 = this.ctx.createOscillator(), o2 = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o1.type = 'sine'; o1.frequency.value = 1240;
+    o2.type = 'sine'; o2.frequency.value = 1860;
+    g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    o1.connect(g); o2.connect(g); g.connect(this.sfxGain);
+    o1.start(t); o2.start(t); o1.stop(t + 0.06); o2.stop(t + 0.06);
+  };
+  LiteAudio.prototype.setOffset = function (sec) { this.userOffset = sec; };
+  /* Load an uploaded audio file (mp3/wav/ogg). Mirrors AudioManager.loadAudioFile.
+   * Three code paths for maximum browser compatibility:
+   *   1. HTML5 fallback (IE11, no Web Audio API): blob URL → <audio> element.
+   *      No decodeAudioData needed — the browser decodes on playback.
+   *   2. Modern browsers with FileReader.readAsArrayBuffer: File → ArrayBuffer
+   *      → decodeAudioData (Promise or callback style).
+   *   3. Old browsers with Web Audio but no readAsArrayBuffer (old Safari):
+   *      XHR + blob URL → ArrayBuffer → decodeAudioData. */
+  LiteAudio.prototype.loadAudioFile = function (file, onLoad, onError) {
+    this.init();
+    var self = this;
+    /* Path 1: HTML5 <audio> fallback (IE11) */
+    if (this.useHtml5) {
+      var createURL = (window.URL && window.URL.createObjectURL)
+        || (window.webkitURL && window.webkitURL.createObjectURL);
+      if (!createURL) { if (onError) onError(new Error('不支持文件导入')); return; }
+      var url = createURL(file);
+      var audioEl = document.createElement('audio');
+      audioEl.src = url;
+      audioEl.volume = this.musicVolume;
+      /* IE11 supports loadedmetadata; 'canplay' fires when enough data to
+       * start. Use both for cross-browser reliability. */
+      var done = false;
+      var onReady = function () {
+        if (done) return; done = true;
+        self.htmlAudioEl = audioEl;
+        self.hasUploadedAudio = true; self.forceSynth = false;
+        if (onLoad) onLoad({ duration: audioEl.duration || 0 });
+      };
+      audioEl.addEventListener('loadedmetadata', onReady);
+      audioEl.addEventListener('canplay', onReady);
+      audioEl.addEventListener('error', function () {
+        if (done) return; done = true;
+        if (onError) onError(new Error('音频解码失败（请尝试MP3格式）'));
+      });
+      return;
+    }
+    if (!this.ctx) { if (onError) onError(new Error('AudioContext unavailable')); return; }
+    /* Shared decode function — works for both FileReader and XHR paths. */
+    var decodeBuffer = function (arrayBuffer) {
+      if (!arrayBuffer) { if (onError) onError(new Error('读取失败')); return; }
+      var success = function (buffer) {
+        self.bgmBuffer = buffer; self.hasUploadedAudio = true; self.forceSynth = false;
+        if (onLoad) onLoad(buffer);
+      };
+      var failure = function (err) { if (onError) onError(err || new Error('解码失败')); };
+      try {
+        /* IE11-style callback signature: decodeAudioData(buf, successCb, failCb).
+         * Modern signature returns a Promise — handle both. */
+        var r = self.ctx.decodeAudioData(arrayBuffer, success, failure);
+        if (r && typeof r.then === 'function') r.then(success, failure);
+      } catch (e) { if (onError) onError(e); }
+    };
+    /* Path 2: FileReader.readAsArrayBuffer (modern browsers) */
+    var reader = new FileReader();
+    if (typeof reader.readAsArrayBuffer === 'function') {
+      reader.onload = function () { decodeBuffer(reader.result); };
+      reader.onerror = function () { if (onError) onError(new Error('文件读取失败')); };
+      reader.readAsArrayBuffer(file);
+    } else {
+      /* Path 3: XHR + blob URL fallback (old Safari without readAsArrayBuffer) */
+      var createURL2 = (window.URL && window.URL.createObjectURL)
+        || (window.webkitURL && window.webkitURL.createObjectURL);
+      if (!createURL2) { if (onError) onError(new Error('不支持文件导入')); return; }
+      var url2 = createURL2(file);
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url2, true);
+      xhr.responseType = 'arraybuffer';
+      xhr.onload = function () { decodeBuffer(xhr.response); };
+      xhr.onerror = function () { if (onError) onError(new Error('文件读取失败')); };
+      xhr.send();
+    }
+  };
+
+  /* Load audio from a URL (for online beatmaps). IE11-compatible. */
+  LiteAudio.prototype.loadAudioUrl = function (url, onLoad, onError) {
+    this.init();
+    var self = this;
+    /* HTML5 fallback (IE11) */
+    if (this.useHtml5) {
+      var audioEl = document.createElement('audio');
+      audioEl.src = url;
+      audioEl.volume = this.musicVolume;
+      var done = false;
+      var onReady = function () {
+        if (done) return; done = true;
+        self.htmlAudioEl = audioEl;
+        self.hasUploadedAudio = true; self.forceSynth = false;
+        if (onLoad) onLoad({ duration: audioEl.duration || 0 });
+      };
+      audioEl.addEventListener('loadedmetadata', onReady);
+      audioEl.addEventListener('canplay', onReady);
+      audioEl.addEventListener('error', function () {
+        if (done) return; done = true;
+        if (onError) onError(new Error('音频加载失败'));
+      });
+      return;
+    }
+    if (!this.ctx) { if (onError) onError(new Error('AudioContext unavailable')); return; }
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url + '?t=' + Date.now(), true);
+    xhr.responseType = 'arraybuffer';
+    xhr.onload = function () {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        if (onError) onError(new Error('HTTP ' + xhr.status));
+        return;
+      }
+      var success = function (buffer) {
+        self.bgmBuffer = buffer; self.hasUploadedAudio = true; self.forceSynth = false;
+        if (onLoad) onLoad(buffer);
+      };
+      var failure = function (err) { if (onError) onError(err || new Error('解码失败')); };
+      try {
+        var r = self.ctx.decodeAudioData(xhr.response, success, failure);
+        if (r && typeof r.then === 'function') r.then(success, failure);
+      } catch (e) { if (onError) onError(e); }
+    };
+    xhr.onerror = function () { if (onError) onError(new Error('网络错误')); };
+    xhr.send();
+  };
+
+  LiteAudio.prototype.setMusicVolume = function (v) {
+    this.musicVolume = Math.max(0, Math.min(1, v));
+    if (this.useHtml5) { if (this.htmlAudioEl) this.htmlAudioEl.volume = this.musicVolume; return; }
+    if (this.bgmGain && this.ctx) {
+      var gain = this.bgmGain.gain;
+      var t = this.ctx.currentTime;
+      if (gain.setTargetAtTime) {
+        gain.setTargetAtTime(this.musicVolume, t, 0.015);
+      } else {
+        gain.value = this.musicVolume;
+      }
+    }
+  };
+  LiteAudio.prototype.setEffectVolume = function (v) {
+    this.effectVolume = Math.max(0, Math.min(1, v));
+    if (this.useHtml5) return; /* no effect volume in HTML5 mode */
+    if (this.sfxGain && this.ctx) {
+      var gain = this.sfxGain.gain;
+      var t = this.ctx.currentTime;
+      if (gain.setTargetAtTime) {
+        gain.setTargetAtTime(this.effectVolume, t, 0.015);
+      } else {
+        gain.value = this.effectVolume;
+      }
+    }
+  };
+  LiteAudio.prototype.setSynthesizedTrack = function (bpm) {
+    this.init();
+    /* IE11 (HTML5 mode): can't synthesize audio. Mark forceSynth so play()
+     * knows to run the game clock without audio when no file is uploaded. */
+    this.forceSynth = true; this.synthBpm = bpm;
+  };
+  LiteAudio.prototype.play = function (offsetSec, leadInSec) {
+    this.init();
+    offsetSec = offsetSec || 0;
+    leadInSec = leadInSec || 0;
+    this.leadInTime = leadInSec;
+    var self = this;
+    if (this.useHtml5) {
+      this.stop();
+      this.isPlaying = true;
+      /* Shift start time forward so that getCurrentTime() returns
+       * offsetSec - leadInSec + userOffset immediately, matching the
+       * Web Audio API behaviour. */
+      this.startTime = now() - (offsetSec - leadInSec) * 1000;
+      if (this.htmlAudioEl) {
+        try { this.htmlAudioEl.currentTime = Math.max(0, offsetSec); } catch (e) {}
+        this.htmlAudioEl.volume = this.musicVolume;
+        /* Delay playback by leadInSec seconds to match the Web Audio path.
+         * Use setTimeout — less precise than Web Audio scheduling, but
+         * acceptable for the IE11 fallback. */
+        if (leadInSec > 0) {
+          window.setTimeout(function () {
+            if (!self.isPlaying) return;
+            var p = self.htmlAudioEl.play();
+            if (p && typeof p.catch === 'function') p.catch(function () { /* autoplay blocked */ });
+          }, leadInSec * 1000);
+        } else {
+          var p = this.htmlAudioEl.play();
+          if (p && typeof p.catch === 'function') p.catch(function () { /* autoplay blocked */ });
+        }
+      }
+      return;
+    }
+    if (!this.ctx) return; this.stop();
+    /* startTime is shifted forward by leadInSec so that getCurrentTime()
+     * returns offsetSec - leadInSec + userOffset right after play(),
+     * counting up normally. Real audio starts leadInSec seconds later
+     * from offsetSec, preserving note <-> audio synchronisation. */
+    this.startTime = this.ctx.currentTime - offsetSec + leadInSec;
+    this.isPlaying = true;
+    var useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
+    var audioStartInCtx = this.ctx.currentTime + leadInSec;
+    if (useBuffer && this.bgmBuffer && this.bgmGain) {
+      this.bgmSource = this.ctx.createBufferSource(); this.bgmSource.buffer = this.bgmBuffer;
+      this.bgmSource.connect(this.bgmGain);
+      this.bgmSource.start(audioStartInCtx, Math.max(0, offsetSec));
+    } else {
+      this.startSynthesizedMusic(Math.max(0, offsetSec));
+    }
+  };
+  LiteAudio.prototype.pause = function () { if (!this.isPlaying) return; this.pauseTime = this.getCurrentTime(); this.stop(); };
+  LiteAudio.prototype.stop = function () {
+    this.isPlaying = false;
+    if (this.useHtml5) {
+      if (this.htmlAudioEl) { try { this.htmlAudioEl.pause(); } catch (e) {} }
+      return;
+    }
+    if (this.bgmSource) { try { this.bgmSource.stop(); this.bgmSource.disconnect(); } catch (e) {} this.bgmSource = null; }
+    if (this.synthInterval) { window.clearInterval(this.synthInterval); this.synthInterval = null; }
+  };
+  LiteAudio.prototype.getCurrentTime = function () {
+    if (!this.isPlaying) return this.pauseTime;
+    if (this.useHtml5) {
+      /* Prefer audioEl.currentTime (actual playback position) over wall clock
+       * for accuracy. Fall back to wall clock if no audio element (silent mode).
+       *
+       * Note: during the lead-in period, the audio element hasn't started
+       * playing yet, so currentTime stays at offsetSec. We use the wall
+       * clock (startTime-based) instead, which advances smoothly through
+       * the lead-in period. Once audio starts, currentTime will be correct. */
+      if (this.htmlAudioEl && isFinite(this.htmlAudioEl.currentTime) &&
+          now() - this.startTime >= this.leadInTime * 1000) {
+        return this.htmlAudioEl.currentTime + this.userOffset;
+      }
+      return (now() - this.startTime) / 1000 + this.userOffset;
+    }
+    if (!this.ctx) return this.pauseTime;
+    return (this.ctx.currentTime - this.startTime) + this.userOffset;
+  };
+  /* Synth BGM — ported from AudioManager.ts L293-336 (4-chord arp + kick + hat) */
+  LiteAudio.prototype.startSynthesizedMusic = function (startOffset) {
+    if (!this.ctx || !this.bgmGain) return;
+    var beatInterval = 60 / this.synthBpm;
+    var step = Math.floor(startOffset / (beatInterval / 4));
+    var chords = [[220,277.18,329.63,440],[174.61,220,261.63,349.23],[261.63,329.63,392,523.25],[196,246.94,293.66,392]];
+    var self = this;
+    var tick = function () {
+      if (!self.isPlaying || !self.ctx || !self.bgmGain) return;
+      var t = self.ctx.currentTime;
+      var beat16 = step % 16, bar = Math.floor(step / 16) % chords.length, chord = chords[bar];
+      if (beat16 % 4 === 0) {
+        var o = self.ctx.createOscillator(), g = self.ctx.createGain();
+        o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.08);
+        g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        o.connect(g); g.connect(self.bgmGain); o.start(t); o.stop(t + 0.12);
+      }
+      if (beat16 === 4 || beat16 === 12) {
+        var h = self.ctx.createOscillator(), hg = self.ctx.createGain();
+        h.type = 'triangle'; h.frequency.setValueAtTime(240, t); h.frequency.exponentialRampToValueAtTime(80, t + 0.09);
+        hg.gain.setValueAtTime(0.5, t); hg.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+        h.connect(hg); hg.connect(self.bgmGain); h.start(t); h.stop(t + 0.1);
+      }
+      if (beat16 % 2 === 1) {
+        var hs = self.ctx.createOscillator(), hsg = self.ctx.createGain();
+        hs.type = 'triangle'; hs.frequency.setValueAtTime(3000, t);
+        hsg.gain.setValueAtTime(0.15, t); hsg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+        hs.connect(hsg); hsg.connect(self.bgmGain); hs.start(t); hs.stop(t + 0.04);
+      }
+      var arp = chord[beat16 % chord.length];
+      var ao = self.ctx.createOscillator(), ag = self.ctx.createGain();
+      ao.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine'; ao.frequency.setValueAtTime(arp, t);
+      ag.gain.setValueAtTime(0.25, t); ag.gain.exponentialRampToValueAtTime(0.001, t + beatInterval * 0.35);
+      ao.connect(ag); ag.connect(self.bgmGain); ao.start(t); ao.stop(t + beatInterval * 0.35);
+      step++;
+    };
+    this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
+  };
+  var audio = new LiteAudio();
+
+  /* === 5. Renderer — full perspective projection (mirrors Three.js camera) === */
+  var canvas = document.getElementById('game-canvas');
+  var ctx = canvas.getContext('2d');
+  var view = { w: 0, h: 0, aspect: 1, cd: 4.96, dpr: 1, pxPerUnit: 0 };
+
+  function fitCameraDistance(aspect) {
+    var dV = FIT_HALF / TAN_HALF_FOV;
+    var dH = FIT_HALF / (TAN_HALF_FOV * Math.max(aspect, 0.2));
+    return Math.max(dV, dH, 4.4);
+  }
+  function resize() {
+    var w = canvas.clientWidth || window.innerWidth;
+    var h = canvas.clientHeight || window.innerHeight;
+    view.dpr = window.devicePixelRatio || 1;
+    view.w = w; view.h = h; view.aspect = w / h;
+    view.cd = fitCameraDistance(view.aspect);
+    view.pxPerUnit = h / (2 * TAN_HALF_FOV * view.cd); /* world→px at z=0 */
+    canvas.width = Math.round(w * view.dpr);
+    canvas.height = Math.round(h * view.dpr);
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+
+  /* Project world (nx,ny,nz) → screen {x,y,scale,alpha} or null if culled.
+   * Mirrors the full version's PerspectiveCamera math exactly. */
+  function project(nx, ny, nz, spawnLimit) {
+    if (nz < spawnLimit) return null;
+    var depth = view.cd - nz;
+    if (depth <= 0.1) return null; /* at/behind camera */
+    var ndcX = nx / (TAN_HALF_FOV * view.aspect * depth);
+    var ndcY = (ny - CAMERA_AXIS_Y) / (TAN_HALF_FOV * depth);
+    var sx = view.w * 0.5 * (1 + ndcX);
+    var sy = view.h * 0.5 * (1 - ndcY);
+    var scale = view.cd / depth;
+    var alpha = Math.max(0, Math.min(1, (nz - spawnLimit) / FADE_ZONE));
+    return { x: sx, y: sy, scale: scale, alpha: alpha };
+  }
+
+  /* Draw a tap note (square outline + 0.94 filled plane). Mirrors mkTap. */
+  function drawTap(p, color, vScale) {
+    var size = TAP_SIZE * view.pxPerUnit * p.scale * vScale;
+    if (size < 2) return;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.globalAlpha = p.alpha * 0.18;
+    ctx.fillStyle = color;
+    ctx.fillRect(-size * 0.47, -size * 0.47, size * 0.94, size * 0.94);
+    ctx.globalAlpha = p.alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-size / 2, -size / 2, size, size);
+    ctx.restore();
+  }
+  /* Draw a touch note (filled disc + outline). Mirrors mkTouch (32 seg). */
+  function drawTouch(p, color, vScale) {
+    var r = (TOUCH_SIZE / 2) * view.pxPerUnit * p.scale * vScale;
+    if (r < 1) return;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.92, 0, Math.PI * 2);
+    ctx.globalAlpha = p.alpha * 0.22;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.globalAlpha = p.alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+  /* Draw a slide node (45° diamond). Mirrors mkSlide diamondPts. */
+  function drawSlideNode(p, color, vScale, isHead) {
+    var half = SLIDE_HALF * view.pxPerUnit * p.scale * vScale;
+    if (half < 1) return;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.beginPath();
+    ctx.moveTo(0, -half);
+    ctx.lineTo(half, 0);
+    ctx.lineTo(0, half);
+    ctx.lineTo(-half, 0);
+    ctx.closePath();
+    ctx.globalAlpha = p.alpha * 0.2;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.globalAlpha = p.alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+  /* Draw a slide pipe segment between two projected points as a tapered ribbon.
+   * Width at each end follows perspective scale → narrower where farther, wider
+   * where nearer — this creates a 3D "pipe in perspective" look that a flat
+   * constant-width line cannot. Edges are outlined for definition.
+   * `brightness` scales fill/stroke opacity: 1.0=normal, ~2.3=held (brighter).
+   * Mirrors the full version's placeDiamondPipe diamond cross-section + holding
+   * opacity boost (PolytoneCanvas.tsx L1226-1230).
+   *
+   * PER-END ALPHA (fixes "pipe vanishes when next node is off-screen"):
+   *   alphaA/alphaB are independent. When the next node is beyond the far render
+   *   plane it is clamped to spawnLimit → alphaB becomes 0. Using a single min()
+   *   alpha made the whole pipe invisible in that case. Instead we build a
+   *   linear gradient from pA→pB so the pipe stays visible at the in-view end
+   *   and fades smoothly toward the clamped (far-plane) end — matching how the
+   *   full version's per-vertex alpha behaves on the 3D mesh. */
+  function drawPipe(pA, pB, color, alphaA, alphaB, maxScale, brightness) {
+    if (!pA || !pB) return;
+    brightness = brightness || 1.0;
+    var dx = pB.x - pA.x, dy = pB.y - pA.y;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 0.5) return;
+    /* Perpendicular unit vector (screen space) */
+    var nx = -dy / len, ny = dx / len;
+    /* Half-width at each end, perspective-scaled (narrower when farther). */
+    var hwA = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pA.scale);
+    var hwB = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pB.scale);
+    /* Parse #rrggbb → rgb components for gradient color stops. All slide pipe
+     * colors in this build are 7-char hex (SLIDE_RED + chart noteColor). */
+    var cr = parseInt(color.substr(1, 2), 16);
+    var cg = parseInt(color.substr(3, 2), 16);
+    var cb = parseInt(color.substr(5, 2), 16);
+    /* Opacity bands (per user spec "整体透明程度调低一些/更不透明"):
+     *   fill 0.22 → 0.30 (ribbon body), stroke 0.55 → 0.70 (edge definition).
+     *   brightness still scales these (held ≈2.3× → capped at 1.0 by Math.min). */
+    var fillA = Math.min(1, alphaA * 0.30 * brightness);
+    var fillB = Math.min(1, alphaB * 0.30 * brightness);
+    var strA = Math.min(1, alphaA * 0.70 * brightness);
+    var strB = Math.min(1, alphaB * 0.70 * brightness);
+    ctx.save();
+    /* Filled ribbon (semi-transparent, gives body) — gradient fill so the
+     * ribbon fades independently at each end. */
+    var fillGrad = ctx.createLinearGradient(pA.x, pA.y, pB.x, pB.y);
+    fillGrad.addColorStop(0, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + fillA + ')');
+    fillGrad.addColorStop(1, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + fillB + ')');
+    ctx.fillStyle = fillGrad;
+    ctx.beginPath();
+    ctx.moveTo(pA.x + nx * hwA, pA.y + ny * hwA);
+    ctx.lineTo(pB.x + nx * hwB, pB.y + ny * hwB);
+    ctx.lineTo(pB.x - nx * hwB, pB.y - ny * hwB);
+    ctx.lineTo(pA.x - nx * hwA, pA.y - ny * hwA);
+    ctx.closePath();
+    ctx.fill();
+    /* Edge outlines (define the pipe shape, brighter) — separate gradient so
+     * the stroke can use a higher opacity band than the fill. */
+    var strGrad = ctx.createLinearGradient(pA.x, pA.y, pB.x, pB.y);
+    strGrad.addColorStop(0, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + strA + ')');
+    strGrad.addColorStop(1, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + strB + ')');
+    ctx.strokeStyle = strGrad;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(pA.x + nx * hwA, pA.y + ny * hwA);
+    ctx.lineTo(pB.x + nx * hwB, pB.y + ny * hwB);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(pA.x - nx * hwA, pA.y - ny * hwA);
+    ctx.lineTo(pB.x - nx * hwB, pB.y - ny * hwB);
+    ctx.stroke();
+    ctx.restore();
+  }
+  /* Draw a pipe cap — a filled (no wireframe) semi-transparent diamond at a
+   * projected point. Used at judge-plane cross-sections to make the cut pipe
+   * look like it has a solid 3D end, not a flat edge. User spec: "加个和note
+   * 一样但没有线框的半透明菱形盖住，假装截面是立体的" */
+  function drawPipeCap(p, color, alpha, scale) {
+    if (!p) return;
+    var half = Math.max(1.5, SLIDE_HALF * view.pxPerUnit * scale);
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, alpha * 0.35);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - half);
+    ctx.lineTo(p.x + half, p.y);
+    ctx.lineTo(p.x, p.y + half);
+    ctx.lineTo(p.x - half, p.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  /* Judge plane border (white rectangle at z=0). */
+  function drawJudgePlane() {
+    var corners = [
+      project(-PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000),
+      project( PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000),
+      project( PLANE_HALF_X,  PLANE_HALF_Y, 0, -1000),
+      project(-PLANE_HALF_X,  PLANE_HALF_Y, 0, -1000)
+    ];
+    if (!corners[0]) return;
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for (var i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+  /* Tunnel: 4 perspective lines from far (z=-spawnLimit) converging to plane corners. */
+  function drawTunnel(spawnLimit) {
+    var farZ = spawnLimit;
+    var corners = [
+      [-PLANE_HALF_X, -PLANE_HALF_Y], [ PLANE_HALF_X, -PLANE_HALF_Y],
+      [ PLANE_HALF_X,  PLANE_HALF_Y], [-PLANE_HALF_X,  PLANE_HALF_Y]
+    ];
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = Theme.accent(); /* mirrors gridColor in PolytoneCanvas L671 */
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 4; i++) {
+      var near = project(corners[i][0], corners[i][1], 0, -1000);
+      var far = project(corners[i][0], corners[i][1], farZ, -100000);
+      if (!near || !far) continue;
+      ctx.beginPath();
+      ctx.moveTo(far.x, far.y);
+      ctx.lineTo(near.x, near.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  /* Background gradient from chart bgScheme. */
+  function drawBackground(chart) {
+    var bg = chart.metadata.bgScheme;
+    var g = ctx.createLinearGradient(0, 0, 0, view.h);
+    g.addColorStop(0, bg.gradientStart);
+    g.addColorStop(1, bg.gradientEnd);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, view.w, view.h);
+  }
+
+  /* === 6. Game loop === */
+  var STATE = { MENU: 0, PLAYING: 1, PAUSED: 2, RESULT: 3 };
+  var game = {
+    state: STATE.MENU,
+    chart: null, notes: [], totalNotes: 0, lastNoteTime: 0,
+    events: [], speedPoints: [], nextEventIdx: 0,
+    currentSpeedMul: 1.0, currentNoteColor: null, currentText: null, currentTextTimeout: 0,
+    speed: 36, speedMul: 1.0, renderDist: 70, sizeScale: 1.0, autoPlay: false,
+    curTime: 0, judged: {}, judgedCount: 0,
+    score: 0, combo: 0, maxCombo: 0, counts: { 'S-Perfect': 0, 'Perfect': 0, 'Good': 0, 'Miss': 0 },
+    bursts: [], songEnded: false,
+    /* Pointer tracking (mirrors PolytoneCanvas pointersRef). pid → {x,y,down,active}.
+     * Used by per-frame processSlide/processTouchNote to detect hover-style hits. */
+    pointers: {},
+    /* Slide chain state (mirrors PolytoneCanvas slideStateRef): noteId → SlideRt.
+     * Each SlideRt tracks boundPointerIds (multiple) + per-node flags so nodes are judged
+     * only when they reach the plane (dt>=0), not early on pointer proximity. */
+    slideStates: {},
+    /* Touch note state (mirrors PolytoneCanvas touchTrackRef): noteId →
+     * {lastInsideTime, arrivalChecked}. Touch notes are hover-triggered. */
+    touchStates: {}
+  };
+  /* Settings — persisted to localStorage when changed. Mirrors the full version's
+   * SettingsModal defaults so both versions feel the same. */
+  var settings = {
+    speedMul: 1.0,
+    audioOffsetMs: 0,
+    projectionLeadMs: 500,
+    renderDist: 70,
+    sizeScale: 1.0,
+    musicVolume: 0.8,
+    effectVolume: 0.9
+  };
+  try {
+    var saved = window.localStorage && localStorage.getItem('polytone-lite-settings');
+    if (saved) {
+      var parsed = JSON.parse(saved);
+      if (parsed) for (var sk in parsed) if (Object.prototype.hasOwnProperty.call(settings, sk))
+        settings[sk] = parsed[sk];
+    }
+  } catch (e) { /* private mode / old browser — keep defaults */ }
+  function saveSettings() {
+    try { window.localStorage && localStorage.setItem('polytone-lite-settings', JSON.stringify(settings)); } catch (e) {}
+  }
+
+  function resetGame(chart) {
+    game.chart = chart;
+    game.notes = resolveChart(chart);
+    game.events = resolveEvents(chart);
+    game.speedPoints = extractSpeedPoints(game.events);
+    game.nextEventIdx = 0;
+    game.currentSpeedMul = 1.0;
+    game.currentNoteColor = null;
+    game.currentText = null;
+    game.currentTextTimeout = 0;
+    game.totalNotes = countPlayableNotes(chart);
+    game.lastNoteTime = 0;
+    /* maxSlideSpan = max over slides of (lastChildTime - headTime).
+     * Ported from full version commit 9f04e42: without this, a slide whose
+     * head has left the sliding window's pastBuffer drops out of iteration
+     * while its later child nodes are still upcoming → children never judged. */
+    var maxSlideSpan = 0;
+    for (var i = 0; i < game.notes.length; i++) {
+      var n = game.notes[i];
+      if (n.timeSec > game.lastNoteTime) game.lastNoteTime = n.timeSec;
+      if (n.resolvedNodes && n.resolvedNodes.length > 0) {
+        var lastChildT = n.resolvedNodes[n.resolvedNodes.length - 1].timeSec;
+        for (var k = 0; k < n.resolvedNodes.length; k++)
+          if (n.resolvedNodes[k].timeSec > game.lastNoteTime) game.lastNoteTime = n.resolvedNodes[k].timeSec;
+        var span = lastChildT - n.timeSec;
+        if (span > maxSlideSpan) maxSlideSpan = span;
+      }
+    }
+    game.maxSlideSpan = maxSlideSpan;
+    game.judged = {}; game.judgedCount = 0;
+    game.score = 0; game.combo = 0; game.maxCombo = 0;
+    game.counts = { 'S-Perfect': 0, 'Perfect': 0, 'Good': 0, 'Miss': 0 };
+    game.bursts = []; game.songEnded = false; game.curTime = 0;
+    game.pointers = {}; game.slideStates = {}; game.touchStates = {};
+    /* Clear per-game visual feedback so markers/bursts don't bleed across songs. */
+    timingMarkers = []; comboBursts = [];
+    /* Apply persisted settings to per-game runtime fields */
+    game.speedMul = settings.speedMul;
+    game.renderDist = settings.renderDist;
+    game.sizeScale = settings.sizeScale;
+  }
+
+  /* Spawn a hit burst at world (wx,wy). The 4th arg `nt` is the note type
+   * ('tap'/'touch'/'slide') so the burst shape matches the note (mirrors
+   * full version spawnBurst using _tapOutlineGeo/_touchOutlineGeo/_slideOutlineGeo).
+   * baseSize = the note's projected size at the judge plane (z=0).
+   * scaleTarget = per-judgment growth factor (1.2/1.1/1.05/1.0) from JUDGE_SCALE.
+   * Animation: size = baseSize * (1 + (scaleTarget-1) * sin(p*π/2)), 300ms, linear fade.
+   * Mirrors PolytoneCanvas.tsx L1338-1343 exactly. */
+  function spawnBurst(wx, wy, jType, nt) {
+    var p = project(wx, wy, 0, -1000);
+    if (!p) return;
+    var kind = nt || 'tap';
+    var vs = game.sizeScale;
+    /* Same formula as drawProjection at z=0 (p.scale = 1).
+     * NOTE: drawBursts uses `r` as the HALF-size for shapes:
+     *   tap  → strokeRect(-r, -r, r*2, r*2) → r is half-width
+     *   touch→ arc(0, 0, r) → r is radius (already half)
+     *   slide→ diamond with r as half-diagonal (already half)
+     * So tap's baseSize must be HALVED to match the projection guide. */
+    var baseSize;
+    if (kind === 'touch') {
+      baseSize = (TOUCH_SIZE / 2) * view.pxPerUnit * p.scale * vs;
+    } else if (kind === 'slide') {
+      baseSize = SLIDE_HALF * view.pxPerUnit * p.scale * vs;
+    } else {
+      baseSize = (TAP_SIZE / 2) * view.pxPerUnit * p.scale * vs;
+    }
+    game.bursts.push({
+      x: p.x, y: p.y, start: now(), dur: 300,
+      color: JUDGE_COLORS[jType], kind: kind, baseSize: baseSize,
+      scaleTarget: JUDGE_SCALE[jType] || 1.0
+    });
+  }
+  /* Draw active bursts. Shape varies by note type:
+   *   tap → square, touch → circle, slide → diamond.
+   * Size: starts at baseSize (note size at judge plane), grows to
+   *   baseSize * scaleTarget via sine curve (1.2× max for S-Perfect).
+   *   Mirrors PolytoneCanvas.tsx L1338-1343. */
+  function drawBursts() {
+    var t = now();
+    var kept = [];
+    for (var i = 0; i < game.bursts.length; i++) {
+      var b = game.bursts[i];
+      var prog = (t - b.start) / b.dur;
+      if (prog >= 1) continue;
+      /* Sine-eased scale: 1 at start → scaleTarget at end (p=1).
+       * multiplier = 1 + (scaleTarget - 1) * sin(p * π / 2) */
+      var multiplier = 1 + (b.scaleTarget - 1) * Math.sin(prog * Math.PI * 0.5);
+      var r = b.baseSize * multiplier;
+      ctx.save();
+      ctx.globalAlpha = (1 - prog) * 0.95;
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 3;
+      ctx.translate(b.x, b.y);
+      if (b.kind === 'touch') {
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+      } else if (b.kind === 'slide') {
+        /* diamond (45° square) */
+        ctx.beginPath();
+        ctx.moveTo(0, -r); ctx.lineTo(r, 0); ctx.lineTo(0, r); ctx.lineTo(-r, 0); ctx.closePath();
+        ctx.stroke();
+      } else {
+        /* tap: square */
+        ctx.strokeRect(-r, -r, r * 2, r * 2);
+      }
+      ctx.restore();
+      kept.push(b);
+    }
+    game.bursts = kept;
+  }
+
+  function commitJudge(id, j, dt, wx, wy, nt) {
+    if (game.judged[id]) return;
+    game.judged[id] = true; game.judgedCount++;
+    var sc = calculateNoteScore(j, game.totalNotes);
+    game.score += sc;
+    if (j === 'Miss') { game.combo = 0; } else { game.combo++; if (game.combo > game.maxCombo) game.maxCombo = game.combo; }
+    game.counts[j]++;
+    if (j !== 'Miss' && game.combo > 0 && game.combo % 10 === 0) {
+      comboBursts.push({ value: game.combo, start: now(), dur: 600 });
+    }
+    if (typeof wx === 'number' && typeof wy === 'number' && nt) {
+      spawnBurst(wx, wy, j, nt);
+    }
+    addTimingMarker(j, dt);
+    return sc;
+  }
+
+  /* === Combo display + wireframe burst (mirrors App.tsx L473-504) ===
+   * Large semi-transparent combo number drawn at screen center, BEHIND notes.
+   * Every 10 combo: a wireframe outline number scales up 1→1.8 and fades. */
+  var comboBursts = [];
+  function drawCombo() {
+    if (game.combo <= 0) return;
+    var cx = view.w * 0.5, cy = view.h * 0.5;
+    var size = Math.min(view.w, view.h) * 0.22;
+    ctx.save();
+    ctx.font = '900 ' + size + 'px Consolas, "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = 0.07;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(String(game.combo), cx, cy);
+    ctx.globalAlpha = 0.12;
+    ctx.font = '700 ' + (size * 0.1) + 'px Consolas, "Courier New", monospace';
+    ctx.fillText('COMBO', cx, cy + size * 0.45);
+    ctx.restore();
+  }
+  function drawComboBursts() {
+    var t = now();
+    var kept = [];
+    var cx = view.w * 0.5, cy = view.h * 0.5;
+    var baseSize = Math.min(view.w, view.h) * 0.18;
+    for (var i = 0; i < comboBursts.length; i++) {
+      var b = comboBursts[i];
+      var prog = (t - b.start) / b.dur;
+      if (prog >= 1) continue;
+      var scale = 1 + 0.8 * prog;            /* 1 → 1.8 (mirrors comboBurstAnim) */
+      var alpha = 0.7 * (1 - prog);
+      var sz = baseSize * scale;
+      ctx.save();
+      ctx.font = '900 ' + sz + 'px Consolas, "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = withAlpha(Theme.accent(), 0.85); /* follows chart accentColor */
+      ctx.lineWidth = 2;
+      ctx.strokeText(String(b.value), cx, cy);
+      ctx.restore();
+      kept.push(b);
+    }
+    comboBursts = kept;
+  }
+
+  /* === Rainbow timing bar (mirrors TimingBar.tsx) ===
+   * ADOFAI-style accuracy bar at the top: red-blue-yellow-orange-yellow-blue-red
+   * gradient. Each hit drops a dot at its dt position; miss pins to far right. */
+  var TIMING_RANGE_MS = 240;
+  var timingMarkers = [];
+  var TIMING_BAR_GRADIENT = (function () {
+    /* Pre-compute gradient stops as RGB so we can build it per-frame (canvas
+     * gradients are tied to coordinates and IE11 has no CSS-style string). */
+    return [
+      [0,    '#ef4444'], [8,  '#ef4444'],
+      [16.7, '#38bdf8'], [26, '#38bdf8'],
+      [33.3, '#ffd700'], [37, '#ffd700'],
+      [44,   '#ff8c00'], [56, '#ff8c00'],
+      [63,   '#ffd700'], [66.7,'#ffd700'],
+      [74,   '#38bdf8'], [83.3,'#38bdf8'],
+      [92,   '#ef4444'], [100, '#ef4444']
+    ];
+  })();
+  function addTimingMarker(j, dt) {
+    var pct;
+    if (j === 'Miss') pct = 100;
+    else {
+      var clamped = Math.max(-TIMING_RANGE_MS, Math.min(TIMING_RANGE_MS, dt));
+      pct = ((clamped + TIMING_RANGE_MS) / (TIMING_RANGE_MS * 2)) * 100;
+    }
+    timingMarkers.push({ pct: pct, color: JUDGE_COLORS[j], start: now(), dur: 1150 });
+    /* Cap marker count to avoid unbounded growth in long songs. */
+    if (timingMarkers.length > 40) timingMarkers.shift();
+  }
+  function drawTimingBar() {
+    var barH = 10, barY = 4, barX = view.w * 0.15, barW = view.w * 0.7;
+    if (barW < 100) { barX = 10; barW = view.w - 20; }
+    ctx.save();
+    /* Rainbow gradient track */
+    var grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    for (var i = 0; i < TIMING_BAR_GRADIENT.length; i++) {
+      grad.addColorStop(TIMING_BAR_GRADIENT[i][0] / 100, TIMING_BAR_GRADIENT[i][1]);
+    }
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = grad;
+    ctx.fillRect(barX, barY, barW, barH);
+    /* Center tick (0ms) */
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(barX + barW * 0.5 - 1, barY - 3, 2, barH + 6);
+    /* Boundary ticks at ±40ms / ±80ms */
+    ctx.globalAlpha = 0.25;
+    [41.67, 58.33, 33.33, 66.67].forEach(function (p) {
+      ctx.fillRect(barX + barW * p / 100 - 0.5, barY - 2, 1, barH + 4);
+    });
+    /* Marker dots — animate in then fade (mirrors timingMarkerAnim 1.15s) */
+    var t = now();
+    var kept = [];
+    for (var m = 0; m < timingMarkers.length; m++) {
+      var mk = timingMarkers[m];
+      var prog = (t - mk.start) / mk.dur;
+      if (prog >= 1) continue;
+      var mx = barX + barW * mk.pct / 100;
+      var my = barY + barH * 0.5;
+      var appear = Math.min(1, prog * 8);     /* quick fade-in */
+      var alpha = appear * (1 - prog);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = mk.color;
+      ctx.beginPath();
+      ctx.arc(mx, my, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      kept.push(mk);
+    }
+    timingMarkers = kept;
+    ctx.restore();
+  }
+
+  /* === Note landing projection guide (mirrors mkProj) ===
+   * Faint outline of the note at the judge plane (z=0) that fades in as the
+   * note approaches. Opacity = clamp(1 - timeToHitMs / leadMs, 0, 0.95).
+   * leadMs is configurable via settings.projectionLeadMs (0 = disabled).
+   * If chart.metadata.effectToggles.projection === false, the projection guide
+   * is forcibly disabled regardless of the user's leadMs setting. */
+  function drawProjection(note, color, vScale, curTime) {
+    /* game.chart is the global chart reference (render() uses a local `chart`
+     * shadow which we cannot see here — must access via game.chart). */
+    var md = (game.chart && game.chart.metadata) || {};
+    var toggles = md.effectToggles || {};
+    var projEnabled = toggles.projection !== false;
+    if (!projEnabled) return; /* chart disabled projection guide */
+    var leadMs = settings.projectionLeadMs;
+    if (leadMs <= 0) return; /* 0 = projection guide disabled */
+    var timeToHitMs = (note.timeSec - curTime) * 1000;
+    if (timeToHitMs < 0 || timeToHitMs > leadMs) return;
+    var po = Math.max(0, Math.min(0.95, 1 - timeToHitMs / leadMs));
+    if (po <= 0.01) return;
+    var p = project(note.x, note.y, 0, -1000);
+    if (!p) return;
+    ctx.save();
+    ctx.globalAlpha = po;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    if (note.type === 'tap') {
+      var sz = TAP_SIZE * view.pxPerUnit * p.scale * vScale;
+      ctx.strokeRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
+    } else if (note.type === 'touch') {
+      var r = (TOUCH_SIZE / 2) * view.pxPerUnit * p.scale * vScale;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.92, 0, Math.PI * 2); ctx.stroke();
+    } else {
+      var half = SLIDE_HALF * view.pxPerUnit * p.scale * vScale;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - half); ctx.lineTo(p.x + half, p.y);
+      ctx.lineTo(p.x, p.y + half); ctx.lineTo(p.x - half, p.y); ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* Binary search the visible window [firstIdx, lastIdx). Mirrors full version.
+   * Falls back to full range when negative speed events are present, because time
+   * order no longer matches spatial order (reverse scroll can make earlier
+   * notes appear farther away). */
+  function findWindow(curTime, spawnLimit) {
+    var sp = game.speedPoints;
+    var hasNegativeSpeed = false;
+    for (var i = 0; i < sp.length; i++) { if (sp[i].speed < 0) { hasNegativeSpeed = true; break; } }
+    if (hasNegativeSpeed) {
+      return { first: 0, last: game.notes.length };
+    }
+    var speed = game.speed * game.speedMul;
+    var pastBuffer = 0.3 + (game.maxSlideSpan || 0), futureBuffer = -spawnLimit / speed + 0.3;
+    var pastTh = curTime - pastBuffer, futureTh = curTime + futureBuffer;
+    var lo = 0, hi = game.notes.length, mid;
+    while (lo < hi) { mid = (lo + hi) >> 1; if (game.notes[mid].timeSec < pastTh) lo = mid + 1; else hi = mid; }
+    var first = lo; lo = first; hi = game.notes.length;
+    while (lo < hi) { mid = (lo + hi) >> 1; if (game.notes[mid].timeSec <= futureTh) lo = mid + 1; else hi = mid; }
+    return { first: first, last: lo };
+  }
+
+  /* Compute z position using scroll distance integral (mirrors PolytoneCanvas).
+   * This ensures note spacing reflects speed changes before the event visually arrives,
+   * preventing teleportation artifacts when speed_change events trigger. */
+  function noteZPos(noteTimeSec, curTime, baseSpeed) {
+    var noteDist = getScrollDistance(noteTimeSec, game.speedPoints);
+    var curDist = getScrollDistance(curTime, game.speedPoints);
+    return JUDGE_Z - (noteDist - curDist) * baseSpeed;
+  }
+
+  function render() {
+    var chart = game.chart;
+    if (!chart || !ctx) return;
+    var curTime = game.curTime;
+    var baseSpeed = game.speed * game.speedMul;
+    var spawnLimit = -game.renderDist;
+    var vScale = game.sizeScale;
+    var colorHex = game.currentNoteColor || chart.metadata.noteColor || '#00f0ff';
+
+    /* Process events first (speed changes, text, note color, etc.) */
+    processEvents(curTime);
+
+    /* Per-frame judgment pass (slides + touch hover + tap miss + AutoPlay).
+     * Replaces the inline AutoPlay/miss logic that previously lived here. */
+    processAllNotes(curTime);
+
+    drawBackground(chart);
+    /* effectToggles.gridLines === false hides both the tunnel perspective lines
+     * and the judge plane border. Default true if chart omits effectToggles. */
+    var _toggles = (chart.metadata && chart.metadata.effectToggles) || {};
+    if (_toggles.gridLines !== false) {
+      drawTunnel(spawnLimit);
+    }
+
+    /* Combo number BEHIND everything (mirrors full version z-[1] layer). */
+    drawCombo();
+
+    var win = findWindow(curTime, spawnLimit);
+
+    /* Two-pass: pipes + projections first (behind), then notes (front). */
+    var toDrawNotes = [];
+    for (var i = win.first; i < win.last; i++) {
+      var note = game.notes[i];
+      var nc = note.color || colorHex;
+
+      if (note.type === 'slide') {
+        var allNodes = getAllSlideNodes(note);
+        /* Pipes between consecutive nodes — drawn as tapered ribbons with
+         * perspective-scaled width for a 3D "pipe in space" look.
+         *
+         * CROSS-SECTION APPROACH (user spec):
+         *   Imagine a physical pipe from A to B. We cut it with two planes:
+         *   the judge plane (z=0) and the far render plane (z=spawnLimit).
+         *   The visible pipe segment is the portion between these cuts.
+         *   Each endpoint's x/y is interpolated along the A→B segment at
+         *   the cut z — NOT the node's own position. This ensures the pipe
+         *   follows the slide path exactly, even when nodes are judged or
+         *   beyond the render distance. */
+        for (var pi = 0; pi < allNodes.length - 1; pi++) {
+          var nodeA = allNodes[pi];
+          var nodeB = allNodes[pi + 1];
+          var zA = noteZPos(nodeA.timeSec, curTime, baseSpeed);
+          var zB = noteZPos(nodeB.timeSec, curTime, baseSpeed);
+          var keyA = note.id + '#' + pi;
+          var keyB = note.id + '#' + (pi + 1);
+          var judgedA = !!game.judged[keyA];
+          var judgedB = !!game.judged[keyB];
+
+          /* Skip when both judged, both far, or both past plane */
+          if (judgedA && judgedB) continue;
+          if (zA < spawnLimit && zB < spawnLimit) continue;
+          if (zA > 0 && zB > 0) continue;
+
+          /* Clamp render z to [spawnLimit, 0]: judged/past-plane → 0,
+           * beyond-far → spawnLimit. */
+          var rZA = (judgedA || zA > 0) ? 0 : zA;
+          var rZB = (judgedB || zB > 0) ? 0 : zB;
+          if (rZA < spawnLimit) rZA = spawnLimit;
+          if (rZB < spawnLimit) rZB = spawnLimit;
+
+          /* Interpolate x/y at the clamped z along the A→B segment.
+           * Parametric: P(t) = A + t*(B-A), where t = (z - zA) / (zB - zA).
+           * This gives the cross-section coordinate — like slicing the pipe. */
+          var pxA = nodeA.x, pyA = nodeA.y;
+          var pxB = nodeB.x, pyB = nodeB.y;
+          var dz = zB - zA;
+          if (Math.abs(dz) > 0.001) {
+            if (rZA !== zA) {
+              var tA = (rZA - zA) / dz;
+              pxA = nodeA.x + tA * (nodeB.x - nodeA.x);
+              pyA = nodeA.y + tA * (nodeB.y - nodeA.y);
+            }
+            if (rZB !== zB) {
+              var tB = (rZB - zA) / dz;
+              pxB = nodeA.x + tB * (nodeB.x - nodeA.x);
+              pyB = nodeA.y + tB * (nodeB.y - nodeA.y);
+            }
+          }
+
+          var pA = project(pxA, pyA, rZA, spawnLimit);
+          var pB = project(pxB, pyB, rZB, spawnLimit);
+          if (!pA || !pB) continue;
+          /* Per-end fade: when the next node is beyond the far plane it is
+           * clamped to spawnLimit → fadeB hits 0. drawPipe builds a gradient
+           * from fadeA→fadeB so the pipe stays visible at the in-view end and
+           * fades toward the clamped end, instead of vanishing entirely. */
+          var fadeA = Math.max(0, Math.min(1, (rZA - spawnLimit) / FADE_ZONE));
+          var fadeB = Math.max(0, Math.min(1, (rZB - spawnLimit) / FADE_ZONE));
+
+          /* --- Slide pipe color/brightness effects (mirrors PolytoneCanvas.tsx
+           *   L1220-1230) ---
+           * 1. Red: destination node has redWarn (pointer left zone) or
+           *    missLocked (pointer released early) → pipe turns SLIDE_RED.
+           * 2. Holding: ANY bound pointer is down AND within the square hit zone of
+           *    the judge-plane cross-section → pipe brightens (~2.3×). */
+          var slideRt = getSlideRt(note.id, allNodes.length);
+          var nextNodeRt = slideRt.nodes[pi + 1];
+          var isRed = !!nextNodeRt && (nextNodeRt.missLocked || nextNodeRt.redWarn) && !judgedB;
+          var isHolding = false;
+          if (!isRed) {
+            var hasAnyBound = false;
+            for (var hbpid in slideRt.boundPointerIds) {
+              if (!slideRt.boundPointerIds.hasOwnProperty(hbpid)) continue;
+              hasAnyBound = true;
+              var hbp = game.pointers[hbpid];
+              if (hbp && hbp.down) {
+                /* Check if pointer is near the judge-plane cross-section.
+                 * Cross-section exists when pipe crosses z=0 (one end >0, other <0). */
+                var crossesPlane = (zA > 0 && zB < 0) || (zA < 0 && zB > 0);
+                if (crossesPlane && Math.abs(dz) > 0.001) {
+                  var tCross = (0 - zA) / dz;
+                  var cx = nodeA.x + tCross * (nodeB.x - nodeA.x);
+                  var cy = nodeA.y + tCross * (nodeB.y - nodeA.y);
+                  if (Math.abs(hbp.x - cx) < SLIDE_HIT_HALF && Math.abs(hbp.y - cy) < SLIDE_HIT_HALF) {
+                    isHolding = true;
+                    break;
+                  }
+                }
+              }
+            }
+            if (!hasAnyBound) isHolding = false;
+          }
+          var brightness = 1.0;
+          if (isHolding) brightness = isRed ? 2.7 : 2.3;
+          else if (isRed) brightness = 1.7;
+          var pipeColor = isRed ? SLIDE_RED : nc;
+          drawPipe(pA, pB, pipeColor, fadeA, fadeB, Math.max(pA.scale, pB.scale), brightness);
+
+          /* Draw caps at judge-plane cross-sections — filled diamonds (no
+           * wireframe) that make the cut pipe look 3D. Only at z=0 cuts,
+           * not far-plane cuts (those just fade out). Caps sit at the judge
+           * plane (z=0) where fade is always ~1, so reusing fadeA/fadeB
+           * here is safe — they are 1 at this end. */
+          if (rZA !== zA && rZA === 0) drawPipeCap(pA, pipeColor, fadeA, pA.scale);
+          if (rZB !== zB && rZB === 0) drawPipeCap(pB, pipeColor, fadeB, pB.scale);
+        }
+        /* Slide nodes + projection guides */
+        for (var nj = 0; nj < allNodes.length; nj++) {
+          var slideNodeKey = note.id + '#' + nj;
+          if (game.judged[slideNodeKey]) continue;
+          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed);
+          var np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
+          if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj });
+          /* Projection guide for slide head only (children inherit head's path). */
+          if (nj === 0) drawProjection({ type: 'slide', timeSec: allNodes[nj].timeSec, x: allNodes[nj].x, y: allNodes[nj].y }, nc, vScale, curTime);
+        }
+      } else {
+        /* tap / touch */
+        var tkey = note.id;
+        if (game.judged[tkey]) continue;
+        var tz = noteZPos(note.timeSec, curTime, baseSpeed);
+        var tp = project(note.x, note.y, tz, spawnLimit);
+        if (tp) {
+          toDrawNotes.push({ p: tp, kind: note.type, color: nc, noteId: note.id, wx: note.x, wy: note.y, timeSec: note.timeSec });
+          /* Landing projection guide at the judge plane. */
+          drawProjection(note, nc, vScale, curTime);
+        }
+      }
+    }
+
+    if (_toggles.gridLines !== false) {
+      drawJudgePlane();
+    }
+
+    for (var d = 0; d < toDrawNotes.length; d++) {
+      var item = toDrawNotes[d];
+      if (item.kind === 'tap') drawTap(item.p, item.color, vScale);
+      else if (item.kind === 'touch') drawTouch(item.p, item.color, vScale);
+      else {
+        /* Red-warn slide nodes (bound pointer off-node) flash red. */
+        var rt = game.slideStates[item.noteId];
+        var isRed = rt && rt.nodes[item.nodeIdx] && rt.nodes[item.nodeIdx].redWarn;
+        drawSlideNode(item.p, isRed ? SLIDE_RED : item.color, vScale, item.isHead);
+      }
+    }
+
+    drawBursts();
+    drawComboBursts();
+    drawTimingBar();
+
+    /* Event text display (mirrors PolytoneCanvas event text overlay) */
+    if (game.currentText) {
+      ctx.save();
+      var fontSize = Math.round(view.h * 0.05);
+      ctx.font = 'bold ' + fontSize + 'px "Rajdhani", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = chart.metadata.bgScheme ? (chart.metadata.bgScheme.accentColor || '#00f0ff') : '#00f0ff';
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 10;
+      ctx.fillText(game.currentText, view.w / 2, view.h * 0.35);
+      ctx.restore();
+    }
+
+    /* Song-end check */
+    if (game.state === STATE.PLAYING && !game.songEnded && game.totalNotes > 0) {
+      if (game.judgedCount >= game.totalNotes || curTime > game.lastNoteTime + 1.5) {
+        game.songEnded = true;
+        var self = game;
+        window.setTimeout(function () { endSong(self); }, 600);
+      }
+    }
+  }
+
+  function updateHUD() {
+    document.getElementById('hud-score').textContent = formatInt(game.score);
+    var judged = game.judgedCount;
+    var acc = judged > 0
+      ? ((game.counts['S-Perfect'] + game.counts['Perfect'] + game.counts['Good'] * 0.5) / judged) * 100
+      : 100;
+    /* ACC: 2 decimal places (mirrors App.tsx L530). */
+    document.getElementById('hud-acc').textContent = acc.toFixed(2) + '%';
+    /* RANK: shows the HIGHEST rank still achievable, not current rank.
+     * Assumes all remaining notes will be S-Perfect — mirrors App.tsx L399-402:
+     *   potentialRank = calculateRank(score + remainingNotes * sPerfectScore) */
+    var totalNotes = game.totalNotes || 1;
+    var remaining = Math.max(0, totalNotes - judged);
+    var sPerfectScore = calculateNoteScore('S-Perfect', Math.max(1, totalNotes));
+    var potentialScore = game.score + remaining * sPerfectScore;
+    document.getElementById('hud-rank').textContent = calculateRank(potentialScore);
+    /* Progress bar — mirrors full version's TimingBar */
+    var dur = game.lastNoteTime + 1.5;
+    var pct = dur > 0 ? Math.max(0, Math.min(1, game.curTime / dur)) * 100 : 0;
+    document.getElementById('hud-progress-fill').style.width = pct + '%';
+  }
+
+  /* Combo number + wireframe burst are drawn on canvas by drawCombo/drawComboBursts
+   * (called from render). Judgment feedback is the rainbow timing bar at the top,
+   * also drawn on canvas. The old text popup (hud-judge-text) has been removed. */
+
+  var animId = 0;
+  var manualClock = { time: 0, lastStamp: 0, paused: true };
+  function getGameTime() {
+    if (audio.useHtml5 && audio.isPlaying) return audio.getCurrentTime();
+    if (!audio.disabled && audio.ctx && audio.isPlaying) {
+      return audio.getCurrentTime();
+    }
+    return manualClock.time;
+  }
+  function loop() {
+    if (game.state === STATE.PLAYING) {
+      var t = now();
+      if (!manualClock.lastStamp) manualClock.lastStamp = t;
+      var dt = (t - manualClock.lastStamp) / 1000;
+      manualClock.lastStamp = t;
+      if (dt > 0 && dt < 1) manualClock.time += dt;
+      game.curTime = getGameTime();
+      /* Apply coalesced multi-touch moves once per frame, right before the
+       * per-frame judgment pass (processAllNotes) reads game.pointers. This
+       * is the single flush point for the IE11 pointermove buffer. */
+      flushPointerMoves();
+      render();
+      updateHUD();
+    }
+    animId = rAF(loop);
+  }
+
+  /* === 6.5 Input handling — pointer/touch/mouse unified ===
+   * Mirrors PolytoneCanvas.tsx hit detection. Inverse of project() at z=0:
+   *   depth = cd (since z=0)
+   *   ndcX = 2*sx/W - 1   →   wx = ndcX * TAN_HALF_FOV * aspect * depth
+   *   ndcY = 1 - 2*sy/H   →   wy = ndcY * TAN_HALF_FOV * depth + CAMERA_AXIS_Y
+   * For tap/touch: nearest unjudged note within (HIT_WINDOW_MS, hitRadius).
+   * For slide: once a pointer enters a slide's head zone, it "owns" that slide
+   * and subsequent nodes are judged by proximity along the drag path. */
+  function screenToWorld(sx, sy) {
+    var depth = view.cd;
+    var ndcX = (2 * sx / view.w) - 1;
+    var ndcY = 1 - (2 * sy / view.h);
+    return {
+      x: ndcX * TAN_HALF_FOV * view.aspect * depth,
+      y: ndcY * TAN_HALF_FOV * depth + CAMERA_AXIS_Y
+    };
+  }
+
+  /* Find the best TAP note to hit at (wx,wy) near curTime (pointerdown only).
+   * Touch notes are hover-triggered and handled per-frame by processTouchNote,
+   * NOT by tap. Returns the note object or null. Picks earliest in time. */
+  function findHitTapNote(wx, wy, curTime) {
+    var best = null;
+    var win = findWindow(curTime, -game.renderDist);
+    for (var i = win.first; i < win.last; i++) {
+      var n = game.notes[i];
+      if (n.type !== 'tap') continue;
+      if (game.judged[n.id]) continue;
+      var dtMs = Math.abs((curTime - n.timeSec) * 1000);
+      if (dtMs > HIT_WINDOW_MS) continue;
+      var dx = n.x - wx, dy = n.y - wy;
+      if (Math.abs(dx) < TAP_HIT_HALF && Math.abs(dy) < TAP_HIT_HALF && (!best || n.timeSec < best.timeSec)) best = n;
+    }
+    return best;
+  }
+
+  /* Is any active pointer within square half-size `half` of (x,y)?
+   * Uses `active` (not `down`): mouse pointers are active on hover (no click),
+   * touch/pen pointers are active only while pressed — matches full version's
+   * `active = isTouchLike ? down : true`. Used for touch notes (hover-trigger). */
+  function isAnyPointerInside(x, y, half) {
+    for (var pid in game.pointers) {
+      if (!game.pointers.hasOwnProperty(pid)) continue;
+      var p = game.pointers[pid];
+      if (!p.active) continue;
+      if (Math.abs(p.x - x) < half && Math.abs(p.y - y) < half) return true;
+    }
+    return false;
+  }
+
+  /* Slide chain state helpers — mirror PolytoneCanvas slideStateRef. */
+  function getAllSlideNodes(note) {
+    var nodes = [{ x: note.x, y: note.y, timeSec: note.timeSec }];
+    if (note.resolvedNodes) for (var s = 0; s < note.resolvedNodes.length; s++) nodes.push(note.resolvedNodes[s]);
+    return nodes;
+  }
+  function getSlideRt(noteId, nodeCount) {
+    var rt = game.slideStates[noteId];
+    if (!rt || rt.nodes.length !== nodeCount) {
+      rt = { boundPointerIds: {}, nodes: [] };
+      for (var i = 0; i < nodeCount; i++) {
+        rt.nodes.push({
+          judged: false, missLocked: false, everInZone: false,
+          lastInsideTime: null, lastInsidePointerId: null,
+          arrivalChecked: false, redWarn: false, tailLockedSPerfect: false
+        });
+      }
+      game.slideStates[noteId] = rt;
+    }
+    return rt;
+  }
+
+  /* Per-frame slide judgment — faithful port of PolytoneCanvas.processSlide.
+   * Key rule: nodes are judged ONLY when dt>=0 (node reached the plane),
+   * never early on proximity alone. This fixes the "early judgment" bug. */
+  function processSlide(note, curTime) {
+    var allNodes = getAllSlideNodes(note);
+    var rt = getSlideRt(note.id, allNodes.length);
+
+    /* 1) Late-miss every unjudged node past +160ms (incl. missLocked ones) */
+    for (var i = 0; i < allNodes.length; i++) {
+      var ns = rt.nodes[i];
+      if (ns.judged) continue;
+      var dtI = (curTime - allNodes[i].timeSec) * 1000;
+      if (dtI > HIT_WINDOW_MS) {
+        ns.judged = true; ns.redWarn = false;
+        commitJudge(note.id + '#' + i, 'Miss', dtI, allNodes[i].x, allNodes[i].y, 'slide');
+      }
+    }
+
+    /* 2) Release detection: ALL bound pointers released → next unjudged node missLocked
+     * EXCEPTION: tail node with tailLockedSPerfect already set → skip missLocked. */
+    var hasBinding = false;
+    for (var bpid in rt.boundPointerIds) {
+      if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
+      hasBinding = true;
+      var bp = game.pointers[bpid];
+      if (!bp || !bp.down) delete rt.boundPointerIds[bpid];
+    }
+    if (hasBinding) {
+      /* Check if any bindings remain after cleanup */
+      var anyRemaining = false;
+      for (var bpid2 in rt.boundPointerIds) {
+        if (rt.boundPointerIds.hasOwnProperty(bpid2)) { anyRemaining = true; break; }
+      }
+      if (!anyRemaining) {
+        var rNextIdx = -1;
+        for (var k = 0; k < rt.nodes.length; k++) { if (!rt.nodes[k].judged) { rNextIdx = k; break; } }
+        if (rNextIdx >= 0 && !rt.nodes[rNextIdx].tailLockedSPerfect) { rt.nodes[rNextIdx].missLocked = true; rt.nodes[rNextIdx].redWarn = false; }
+      }
+    }
+
+    /* 3) Interact with the current next node */
+    var nextIdx = -1;
+    for (var k2 = 0; k2 < rt.nodes.length; k2++) { if (!rt.nodes[k2].judged) { nextIdx = k2; break; } }
+    if (nextIdx < 0) return;
+    var cns = rt.nodes[nextIdx];
+    var cnd = allNodes[nextIdx];
+    var dt = (curTime - cnd.timeSec) * 1000;
+
+    if (game.autoPlay) {
+      if (dt >= 0 && !cns.judged) {
+        cns.judged = true;
+        commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
+        audio.playHitSound('slide');
+        spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
+      }
+      cns.redWarn = false;
+      return;
+    }
+
+    if (cns.missLocked) { cns.redWarn = false; return; }
+
+    /* --- Tail-node special rule ---
+     * The last slide node has relaxed judgement: if ANY bound pointer is still
+     * on screen (anywhere) when the node enters the hit window (-160ms), lock
+     * it for S-Perfect. Player just needs to hold through the end. */
+    var isTail = nextIdx === allNodes.length - 1;
+    if (isTail && !cns.tailLockedSPerfect && dt >= -HIT_WINDOW_MS) {
+      var hasBound = false;
+      for (var tpid0 in rt.boundPointerIds) {
+        if (!rt.boundPointerIds.hasOwnProperty(tpid0)) continue;
+        hasBound = true;
+        var bpp0 = game.pointers[tpid0];
+        if (bpp0 && bpp0.down) { cns.tailLockedSPerfect = true; break; }
+      }
+      if (!hasBound) {
+        for (var tpid in game.pointers) {
+          if (!game.pointers.hasOwnProperty(tpid)) continue;
+          if (game.pointers[tpid].down) { cns.tailLockedSPerfect = true; break; }
+        }
+      }
+    }
+
+    /* Which pointer may judge this node? Bound → any bound pointer; free → any held. */
+    var insideId = null;
+    var hasBound2 = false;
+    for (var bpid3 in rt.boundPointerIds) {
+      if (!rt.boundPointerIds.hasOwnProperty(bpid3)) continue;
+      hasBound2 = true;
+      var p = game.pointers[bpid3];
+      if (p && p.down) {
+        if (Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) { insideId = bpid3; break; }
+      }
+    }
+    if (!hasBound2) {
+      for (var pid in game.pointers) {
+        if (!game.pointers.hasOwnProperty(pid)) continue;
+        var p2 = game.pointers[pid];
+        if (!p2.down) continue;
+        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) { insideId = pid; break; }
+      }
+    }
+
+    var hasBound3 = false;
+    for (var bpid4 in rt.boundPointerIds) {
+      if (rt.boundPointerIds.hasOwnProperty(bpid4)) { hasBound3 = true; break; }
+    }
+    if (hasBound3 && insideId !== null) cns.everInZone = true;
+
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && insideId !== null) {
+      cns.lastInsideTime = curTime;
+      cns.lastInsidePointerId = insideId;
+    }
+
+    if (dt >= 0 && !cns.judged) {
+      /* Tail-node locked S-Perfect: any bound pointer is on screen → instant S-Perfect.
+       * Doesn't require being in the spatial zone, just holding through the end. */
+      if (isTail && cns.tailLockedSPerfect) {
+        cns.judged = true;
+        var hasBound4 = false;
+        for (var bpid5 in rt.boundPointerIds) {
+          if (rt.boundPointerIds.hasOwnProperty(bpid5)) { hasBound4 = true; break; }
+        }
+        if (!hasBound4) {
+          for (var tpid2 in game.pointers) {
+            if (!game.pointers.hasOwnProperty(tpid2)) continue;
+            if (game.pointers[tpid2].down) rt.boundPointerIds[tpid2] = true;
+          }
+        }
+        commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
+        audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
+      } else if (!cns.arrivalChecked) {
+        cns.arrivalChecked = true;
+        if (insideId !== null) {
+          cns.judged = true; rt.boundPointerIds[insideId] = true;
+          commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
+          audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
+        }
+      } else if (insideId !== null && dt <= HIT_WINDOW_MS) {
+        var j2 = evaluateJudgement(dt);
+        if (j2) {
+          cns.judged = true; rt.boundPointerIds[insideId] = true;
+          commitJudge(note.id + '#' + nextIdx, j2, dt);
+          audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide');
+        }
+      }
+    }
+
+    /* 4) Red warning: NONE of the bound pointers are on node but another held pointer is on it */
+    cns.redWarn = false;
+    var hasBound5 = false;
+    for (var bpid6 in rt.boundPointerIds) {
+      if (rt.boundPointerIds.hasOwnProperty(bpid6)) { hasBound5 = true; break; }
+    }
+    if (!cns.judged && hasBound5 && insideId === null && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
+      for (var pid2 in game.pointers) {
+        if (!game.pointers.hasOwnProperty(pid2)) continue;
+        if (rt.boundPointerIds.hasOwnProperty(pid2)) continue;
+        var p3 = game.pointers[pid2];
+        if (!p3.down) continue;
+        if (Math.abs(p3.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p3.y - cnd.y) < SLIDE_HIT_HALF) { cns.redWarn = true; break; }
+      }
+    }
+  }
+
+  /* Per-frame touch note judgment — faithful port of PolytoneCanvas L1296-1316.
+   * Touch notes are hover-triggered: any held pointer inside the zone during
+   * the timing window counts. No tap/click required. */
+  function processTouchNote(note, curTime) {
+    var dt = (curTime - note.timeSec) * 1000;
+    var inside = isAnyPointerInside(note.x, note.y, TOUCH_HIT_HALF);
+    var track = game.touchStates[note.id];
+    if (!track) { track = { lastInsideTime: null, arrivalChecked: false }; game.touchStates[note.id] = track; }
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && inside) track.lastInsideTime = curTime;
+    if (game.autoPlay && dt >= 0) {
+      commitJudge(note.id, 'S-Perfect', dt);
+      audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch');
+      return;
+    }
+    if (dt >= 0) {
+      if (!track.arrivalChecked) {
+        track.arrivalChecked = true;
+        if (inside) {
+          commitJudge(note.id, 'S-Perfect', dt);
+          audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch'); return;
+        }
+        if (track.lastInsideTime !== null) {
+          var earlyDt = (track.lastInsideTime - note.timeSec) * 1000;
+          var j = evaluateJudgement(earlyDt);
+          if (j) { commitJudge(note.id, j, earlyDt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j, 'touch'); return; }
+        }
+      }
+      if (inside && dt <= HIT_WINDOW_MS) {
+        var j2 = evaluateJudgement(dt);
+        if (j2) { commitJudge(note.id, j2, dt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j2, 'touch'); return; }
+      }
+      if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x, note.y, 'touch');
+    }
+  }
+
+  /* Per-frame judgment pass for ALL notes (slides + touch + tap miss).
+   * Replaces the inline AutoPlay/miss logic that was in render(). Tap notes
+   * are still hit via findHitTapNote on pointerdown; here we only detect misses. */
+  /* Process events that have occurred up to curTime. Mirrors PolytoneCanvas event loop.
+   * Handles speed_change, text_display, note_color_change. bg_change is stubbed (per user spec). */
+  function processEvents(curTime) {
+    var evts = game.events;
+    if (!evts || evts.length === 0) return;
+    while (game.nextEventIdx < evts.length && evts[game.nextEventIdx].timeSec <= curTime) {
+      var evt = evts[game.nextEventIdx];
+      if (evt.eventType === 'speed_change' && typeof evt.speed === 'number') {
+        /* Note: visual spacing is precomputed via scroll distance, so speedMul here
+         * only affects future movement speed, not current note positions. */
+        game.currentSpeedMul = evt.speed;
+      } else if (evt.eventType === 'text_display') {
+        game.currentText = evt.text || '';
+        var dur = typeof evt.textDuration === 'number' ? evt.textDuration : 2;
+        game.currentTextTimeout = curTime + dur;
+      } else if (evt.eventType === 'note_color_change' && evt.noteColor) {
+        game.currentNoteColor = evt.noteColor;
+      }
+      /* bg_change: stubbed per user spec — background color switching left for later */
+      game.nextEventIdx++;
+    }
+    /* Clear text if timeout expired */
+    if (game.currentText && curTime > game.currentTextTimeout) {
+      game.currentText = null;
+    }
+  }
+
+  function processAllNotes(curTime) {
+    var win = findWindow(curTime, -game.renderDist);
+    for (var i = win.first; i < win.last; i++) {
+      var n = game.notes[i];
+      if (n.type === 'slide') {
+        processSlide(n, curTime);
+      } else if (n.type === 'touch') {
+        if (!game.judged[n.id]) processTouchNote(n, curTime);
+      } else {
+        /* tap: only miss detection here; hits via findHitTapNote on pointerdown */
+        if (!game.autoPlay && !game.judged[n.id] && curTime > n.timeSec + HIT_WINDOW_MS / 1000) {
+          commitJudge(n.id, 'Miss', 0, n.x, n.y, 'tap');
+        } else if (game.autoPlay && !game.judged[n.id] && curTime >= n.timeSec) {
+          var dt = (curTime - n.timeSec) * 1000;
+          commitJudge(n.id, 'S-Perfect', dt);
+          audio.playHitSound('tap'); spawnBurst(n.x, n.y, 'S-Perfect', 'tap');
+        }
+      }
+    }
+  }
+
+  /* `type` is 'mouse'/'touch'/'pen'. For mouse, active=true always (hover works
+   * for touch notes); for touch/pen, active = down (must be pressed). This
+   * mirrors the full version's updatePointer active logic. */
+  function handleTapInput(sx, sy, pid, type) {
+    if (game.state !== STATE.PLAYING || game.autoPlay) return;
+    var w = screenToWorld(sx, sy);
+    var isMouse = type === 'mouse';
+    game.pointers[pid] = { x: w.x, y: w.y, down: true, active: true, type: type };
+    var curTime = game.curTime;
+    /* Tap notes are click-triggered (immediate judgment on pointerdown).
+     * Slide/touch are hover-triggered and handled per-frame by processAllNotes. */
+    var n = findHitTapNote(w.x, w.y, curTime);
+    if (!n) return;
+    var dtMs = (curTime - n.timeSec) * 1000;
+    var j = evaluateJudgement(dtMs);
+    if (!j) j = 'Good'; /* within radius but borderline timing */
+    commitJudge(n.id, j, dtMs);
+    audio.playHitSound('tap'); spawnBurst(n.x, n.y, j, 'tap');
+  }
+  function handleMoveInput(sx, sy, pid, type) {
+    if (game.state !== STATE.PLAYING) return;
+    /* Always track pointer position — slides (check down) & touch notes (check
+     * active) read it per-frame. For mouse we track even when not pressing, so
+     * hover can trigger touch notes (mirrors full version mouse active=true). */
+    var existing = game.pointers[pid];
+    var w = screenToWorld(sx, sy);
+    var isMouse = type === 'mouse';
+    var down = existing ? existing.down : false;
+    game.pointers[pid] = { x: w.x, y: w.y, down: down, active: isMouse ? true : down, type: type };
+  }
+  function handleReleaseInput(pid) { delete game.pointers[pid]; }
+
+  /* Per-frame coalesced pointer-move buffer. IE11 does NOT coalesce pointermove
+   * events (no getCoalescedEvents API), so multi-touch floods the main thread
+   * with one event per hardware touch sample per finger. pointermove writes
+   * only the latest position here; flushPointerMoves() applies them once per
+   * rAF frame before render(). Render reads pointer state once per frame, so
+   * coalescing loses no precision. Used only by the PointerEvent path. */
+  var pendingMoves = {};
+  function flushPointerMoves() {
+    for (var pid in pendingMoves) {
+      var pm = pendingMoves[pid];
+      var ex = game.pointers[pid];
+      if (ex) { ex.x = pm.x; ex.y = pm.y; ex.down = pm.down; ex.active = pm.active; ex.type = pm.type; }
+      else game.pointers[pid] = { x: pm.x, y: pm.y, down: pm.down, active: pm.active, type: pm.type };
+    }
+  }
+
+  /* Unified pointer/touch/mouse binding. Pointer Events cover most modern
+   * browsers; fall back to Touch Events then Mouse Events for IE11/Safari<13. */
+  function bindInput() {
+    var canvasEl = document.getElementById('game-canvas');
+    /* Cached canvas rect. Recomputing getBoundingClientRect() on every
+     * pointermove is expensive on IE11: updateHUD() dirties layout each frame
+     * (progress bar style.width + score/acc/rank textContent), so each per-event
+     * getBoundingClientRect forces a synchronous layout reflow. With IE11
+     * firing one pointermove per hardware touch sample per finger (no
+     * coalescing — IE11 has no getCoalescedEvents), multi-touch produced
+     * hundreds of forced reflows/sec → framerate collapse on weak CPUs like
+     * the Atom Z3735G. Cache the rect; invalidate on resize/scroll/orientation. */
+    var cachedRect = null;
+    function rect() { if (!cachedRect) cachedRect = canvasEl.getBoundingClientRect(); return cachedRect; }
+    function invalidateRect() { cachedRect = null; }
+    window.addEventListener('resize', invalidateRect);
+    window.addEventListener('scroll', invalidateRect, true);
+    window.addEventListener('orientationchange', invalidateRect);
+    function offset(e) { var r = rect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+    function touchOffset(t) { var r = rect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; }
+
+    if (window.PointerEvent) {
+      /* IE11 (and modern) Pointer Events. pointerdown judges taps immediately
+       * (timing-critical). pointermove only updates the per-frame coalesced
+       * buffer (pendingMoves) — flushed once per rAF frame via
+       * flushPointerMoves() in loop(). Collapses N_fingers × ~100Hz events
+       * down to one update per pointer per frame, with no precision loss
+       * (render reads pointer state once per frame anyway). */
+      canvasEl.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        var p = offset(e);
+        handleTapInput(p.x, p.y, e.pointerId, e.pointerType || 'mouse');
+        var w = screenToWorld(p.x, p.y);
+        var type = e.pointerType || 'mouse';
+        pendingMoves[e.pointerId] = { x: w.x, y: w.y, down: true, active: true, type: type };
+      });
+      canvasEl.addEventListener('pointermove', function (e) {
+        var p = offset(e);
+        var w = screenToWorld(p.x, p.y);
+        var prev = pendingMoves[e.pointerId];
+        if (prev) { prev.x = w.x; prev.y = w.y; }       /* mutate in place — no per-event allocation */
+        else {
+          var type = e.pointerType || 'mouse';
+          pendingMoves[e.pointerId] = { x: w.x, y: w.y, down: false, active: type === 'mouse', type: type };
+        }
+      });
+      /* Function *expression*, not a declaration: IE11 strict mode forbids
+       * function declarations nested inside a block (SCRIPT1044). */
+      var release = function (pid) { delete pendingMoves[pid]; handleReleaseInput(pid); };
+      canvasEl.addEventListener('pointerup', function (e) { release(e.pointerId); });
+      canvasEl.addEventListener('pointercancel', function (e) { release(e.pointerId); });
+      canvasEl.addEventListener('pointerleave', function (e) { release(e.pointerId); });
+      return;
+    }
+    /* Touch fallback (old Safari — IE11 uses Pointer Events above). Cached
+     * rect still applies, so no per-event reflow here either. */
+    canvasEl.addEventListener('touchstart', function (e) {
+      e.preventDefault();
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        var p = touchOffset(e.changedTouches[i]);
+        handleTapInput(p.x, p.y, e.changedTouches[i].identifier, 'touch');
+      }
+    }, false);
+    canvasEl.addEventListener('touchmove', function (e) {
+      e.preventDefault();
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        var p = touchOffset(e.changedTouches[i]);
+        handleMoveInput(p.x, p.y, e.changedTouches[i].identifier, 'touch');
+      }
+    }, false);
+    canvasEl.addEventListener('touchend', function (e) {
+      for (var i = 0; i < e.changedTouches.length; i++) handleReleaseInput(e.changedTouches[i].identifier);
+    }, false);
+    canvasEl.addEventListener('touchcancel', function (e) {
+      for (var i = 0; i < e.changedTouches.length; i++) handleReleaseInput(e.changedTouches[i].identifier);
+    }, false);
+    /* Mouse fallback (no touch at all). Track movement even when not pressing
+     * so hover can trigger touch notes (active=true for mouse). */
+    var mouseDown = false;
+    canvasEl.addEventListener('mousedown', function (e) {
+      mouseDown = true;
+      var p = offset(e);
+      handleTapInput(p.x, p.y, 'mouse', 'mouse');
+    });
+    canvasEl.addEventListener('mousemove', function (e) {
+      var p = offset(e);
+      handleMoveInput(p.x, p.y, 'mouse', 'mouse');
+    });
+    canvasEl.addEventListener('mouseleave', function () { handleReleaseInput('mouse'); });
+    document.addEventListener('mouseup', function () { mouseDown = false; handleReleaseInput('mouse'); });
+  }
+  bindInput();
+
+  /* === 7. UI wiring === */
+  var menuScreen = document.getElementById('menu-screen');
+  var pauseScreen = document.getElementById('pause-screen');
+  var resultScreen = document.getElementById('result-screen');
+  var resultCard = document.getElementById('result-card');
+  var hud = document.getElementById('hud');
+  var chartListEl = document.getElementById('chart-list');
+  var settingsModal = document.getElementById('settings-modal');
+  var editorModal = document.getElementById('editor-modal');
+  var editorTextarea = document.getElementById('editor-textarea');
+  var editorError = document.getElementById('editor-error');
+  var selectedKey = null;
+  var selectedDiffIdx = 0;
+  var customChartKey = null; /* key of currently-loaded custom chart, if any */
+
+  /* Beatmaps manifest state */
+  var manifestItems = []; /* top-level items: albums + songs */
+  var currentAlbumId = null; /* null = root, string = album id */
+  var currentSongItem = null; /* currently selected song item (from manifest) */
+  var loadedChartCache = {}; /* cache for loaded chart JSON: songId_diffIdx → chart */
+  var loadingChart = false;
+
+  /* XHR helper (IE11-compatible, no fetch/Promise needed) */
+  function loadJson(url, onSuccess, onError) {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url + '?t=' + Date.now(), true);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            var data = JSON.parse(xhr.responseText);
+            onSuccess && onSuccess(data);
+          } catch (e) { onError && onError(e); }
+        } else {
+          onError && onError(new Error('HTTP ' + xhr.status));
+        }
+      };
+      xhr.onerror = function () { onError && onError(new Error('Network error')); };
+      xhr.send();
+    } catch (e) { onError && onError(e); }
+  }
+
+  /* Load beatmaps.json manifest. Includes built-in DEMO_CHARTS as "Built-in" album. */
+  function loadBeatmapsManifest(callback) {
+    loadJson('../beatmaps/beatmaps.json', function (data) {
+      var items = [];
+      /* Built-in album first */
+      var builtinSongs = [];
+      for (var k in DEMO_CHARTS) {
+        if (!DEMO_CHARTS.hasOwnProperty(k)) continue;
+        var ch = DEMO_CHARTS[k];
+        builtinSongs.push({
+          type: 'song', id: k, title: ch.metadata.title, artist: ch.metadata.artist,
+          bpm: ch.metadata.bpm, difficulties: [{ name: ch.metadata.difficulty, level: 0, chartFile: null }],
+          isBuiltin: true
+        });
+      }
+      items.push({ type: 'album', id: 'builtin', title: 'Built-in', artist: 'Various Artists', songs: builtinSongs });
+      /* External items from beatmaps.json */
+      if (data && data.items && data.items.length) {
+        for (var i = 0; i < data.items.length; i++) items.push(data.items[i]);
+      }
+      manifestItems = items;
+      callback && callback(null, items);
+    }, function (err) {
+      /* Failed to load beatmaps.json — just use built-in */
+      console.warn('[Lite] Failed to load beatmaps.json:', err);
+      var items = [];
+      var builtinSongs = [];
+      for (var k in DEMO_CHARTS) {
+        if (!DEMO_CHARTS.hasOwnProperty(k)) continue;
+        var ch = DEMO_CHARTS[k];
+        builtinSongs.push({
+          type: 'song', id: k, title: ch.metadata.title, artist: ch.metadata.artist,
+          bpm: ch.metadata.bpm, difficulties: [{ name: ch.metadata.difficulty, level: 0, chartFile: null }],
+          isBuiltin: true
+        });
+      }
+      items.push({ type: 'album', id: 'builtin', title: 'Built-in', artist: 'Various Artists', songs: builtinSongs });
+      manifestItems = items;
+      callback && callback(null, items);
+    });
+  }
+
+  /* Get current list of items to display (depends on currentAlbumId) */
+  function getCurrentListItems() {
+    if (currentAlbumId === null) return manifestItems;
+    for (var i = 0; i < manifestItems.length; i++) {
+      if (manifestItems[i].id === currentAlbumId && manifestItems[i].songs) return manifestItems[i].songs;
+    }
+    return [];
+  }
+
+  function showMenu() {
+    audio.stop();
+    game.state = STATE.MENU;
+    menuScreen.classList.remove('hidden');
+    resultScreen.classList.add('hidden');
+    pauseScreen.classList.add('hidden');
+    hud.classList.remove('active');
+  }
+  function startGame() {
+    if (!selectedKey) return;
+
+    /* Built-in chart: use DEMO_CHARTS directly */
+    if (DEMO_CHARTS[selectedKey]) {
+      startGameWithChart(DEMO_CHARTS[selectedKey]);
+      return;
+    }
+
+    /* Online chart: load from chartFile + audio */
+    if (!currentSongItem) return;
+    var diff = currentSongItem.difficulties && currentSongItem.difficulties[selectedDiffIdx];
+    if (!diff || !diff.chartFile) return;
+
+    var cacheKey = currentSongItem.id + '_' + selectedDiffIdx;
+    if (loadedChartCache[cacheKey]) {
+      startGameWithChart(loadedChartCache[cacheKey], currentSongItem);
+      return;
+    }
+
+    /* Show loading state */
+    loadingChart = true;
+    loadJson('../beatmaps/' + diff.chartFile, function (chart) {
+      loadingChart = false;
+      if (!chart || !chart.metadata || !chart.notes) {
+        alert('谱面格式错误');
+        return;
+      }
+      loadedChartCache[cacheKey] = chart;
+      startGameWithChart(chart, currentSongItem);
+    }, function (err) {
+      loadingChart = false;
+      alert('加载谱面失败: ' + (err.message || err));
+    });
+  }
+
+  function startGameWithChart(chart, songItem) {
+    Theme.apply(chart.metadata.bgScheme);
+    resetGame(chart);
+    game.autoPlay = document.getElementById('autoplay-toggle').checked;
+    audio.init();
+    audio.setMusicVolume(settings.musicVolume);
+    audio.setEffectVolume(settings.effectVolume);
+    audio.setOffset(settings.audioOffsetMs / 1000);
+
+    /* Reset audio state before loading new song to avoid playing previous song's audio.
+     * If the new song has no audio file, we must NOT reuse the old buffer.
+     * Exception: if user uploaded an audio file in the editor, keep it. */
+    if (!audio.hasUploadedAudio) {
+      audio.bgmBuffer = null;
+      if (audio.htmlAudioEl) {
+        try { audio.htmlAudioEl.pause(); audio.htmlAudioEl.src = ''; } catch (e) {}
+        audio.htmlAudioEl = null;
+      }
+    }
+    audio.forceSynth = false;
+    audio.stop();
+
+    /* In-game difficulty display uses the chart file's own metadata.difficulty;
+       manifest (beatmaps.json) difficulty names are for the song-select menu only */
+    var diffName = chart.metadata.difficulty || '';
+
+    var firstNoteTime = getFirstNoteTime(chart);
+    var userOffsetSec = settings.audioOffsetMs / 1000;
+    var leadIn = Math.max(0, 2 - firstNoteTime + userOffsetSec);
+
+    var startPlaying = function () {
+      manualClock.time = 0; manualClock.lastStamp = 0;
+      game.state = STATE.PLAYING;
+      menuScreen.classList.add('hidden');
+      pauseScreen.classList.add('hidden');
+      resultScreen.classList.add('hidden');
+      hud.classList.add('active');
+      document.getElementById('hud-chart-info').innerHTML =
+        '<div class="ci-title">' + chart.metadata.title + '</div>' +
+        '<div>' + diffName + ' · BPM ' + chart.metadata.bpm + '</div>';
+      audio.play(0, leadIn);
+    };
+
+    /* Load audio if song has audio file — wait for it to finish loading before starting.
+     * This prevents notes from being judged before audio is ready, and avoids the
+     * "snapping back" effect when audio time syncs in.
+     * If user uploaded an audio file in the editor, use that directly. */
+    if (songItem && songItem.audio) {
+      var startBtn = document.getElementById('btn-start');
+      var origBtnText = startBtn.textContent;
+      startBtn.textContent = '加载中...';
+      startBtn.disabled = true;
+
+      audio.loadAudioUrl('../beatmaps/' + songItem.audio, function () {
+        startBtn.textContent = origBtnText;
+        startBtn.disabled = false;
+        startPlaying();
+      }, function (err) {
+        console.warn('[Lite] Audio load failed, using synth:', err);
+        startBtn.textContent = origBtnText;
+        startBtn.disabled = false;
+        audio.hasUploadedAudio = false;
+        audio.forceSynth = true;
+        audio.setSynthesizedTrack(chart.metadata.bpm);
+        startPlaying();
+      });
+    } else if (audio.hasUploadedAudio && audio.bgmBuffer) {
+      // User uploaded audio file in the editor — use it directly
+      startPlaying();
+    } else {
+      audio.setSynthesizedTrack(chart.metadata.bpm);
+      startPlaying();
+    }
+  }
+  function pauseGame() {
+    if (game.state !== STATE.PLAYING) return;
+    audio.pause();
+    game.state = STATE.PAUSED;
+    pauseScreen.classList.remove('hidden');
+  }
+  function resumeGame() {
+    if (game.state !== STATE.PAUSED) return;
+    var t = audio.pauseTime;
+    audio.play(t);
+    game.state = STATE.PLAYING;
+    pauseScreen.classList.add('hidden');
+  }
+  function endSong(g) {
+    g.state = STATE.RESULT;
+    audio.stop();
+    hud.classList.remove('active');
+    var rank = calculateRank(g.score);
+    var acc = g.judgedCount > 0
+      ? ((g.counts['S-Perfect'] + g.counts['Perfect'] + g.counts['Good'] * 0.5) / g.judgedCount) * 100 : 0;
+    /* Song metadata — mirrors ResultModal.tsx L55-60:
+     *   title, artist // difficulty. (BPM badge removed per user spec.) */
+    var meta = g.chart ? g.chart.metadata : null;
+    var metaHtml = '';
+    if (meta) {
+      metaHtml = '<h2 class="result-title">' + (meta.title || 'Unknown') + '</h2>' +
+        '<p class="result-meta">' + (meta.artist || '') + ' // ' + (meta.difficulty || '') + '</p>';
+    }
+    /* S-Perfect is merged into Perfect per user spec: display the combined
+     * count, with an orange "(+N)" suffix showing how many were S-Perfect.
+     * Example: 21 S-Perfect + 17 Perfect → "Perfect: 38(+21)".
+     * Mirrors ResultModal.tsx L21-23 (perfectTotal / sPerfectExtra). */
+    var totalPerfect = g.counts['S-Perfect'] + g.counts['Perfect'];
+    var sPerfectHtml = g.counts['S-Perfect'] > 0
+      ? '<span class="s-perfect-indicator">(+' + g.counts['S-Perfect'] + ')</span>'
+      : '';
+    resultCard.innerHTML =
+      metaHtml +
+      '<div class="result-rank">' + rank + '</div>' +
+      '<p class="result-score">' + formatInt(g.score) + '</p>' +
+      '<div class="result-row"><span class="p">Perfect</span><span>' + totalPerfect + sPerfectHtml + '</span></div>' +
+      '<div class="result-row"><span class="g">Good</span><span>' + g.counts['Good'] + '</span></div>' +
+      '<div class="result-row"><span class="m">Miss</span><span>' + g.counts['Miss'] + '</span></div>' +
+      '<div class="result-row"><span>Max Combo</span><span>' + g.maxCombo + '</span></div>' +
+      '<div class="result-row"><span>Accuracy</span><span>' + acc.toFixed(2) + '%</span></div>' +
+      '<div class="result-actions"><button class="btn-tool" id="btn-retry">重试</button>' +
+      '<button class="btn-tool" id="btn-back-menu">返回菜单</button></div>';
+    resultScreen.classList.remove('hidden');
+    document.getElementById('btn-retry').onclick = function () { resultScreen.classList.add('hidden'); startGame(); };
+    document.getElementById('btn-back-menu').onclick = function () { resultScreen.classList.add('hidden'); showMenu(); };
+  }
+
+  function buildMenu() {
+    chartListEl.innerHTML = '';
+    var items = getCurrentListItems();
+
+    /* Back button when inside an album */
+    if (currentAlbumId !== null) {
+      var backCard = document.createElement('div');
+      backCard.className = 'chart-card';
+      backCard.style.borderStyle = 'dashed';
+      backCard.innerHTML = '<p class="chart-title">← 返回上一级</p><p class="chart-meta">返回专辑列表</p>';
+      backCard.onclick = function () {
+        currentAlbumId = null;
+        currentSongItem = null;
+        selectedKey = null;
+        buildMenu();
+      };
+      chartListEl.appendChild(backCard);
+    }
+
+    for (var i = 0; i < items.length; i++) {
+      (function (item) {
+        var card = document.createElement('div');
+        card.className = 'chart-card';
+        var title = item.title || 'Unknown';
+        var meta = '';
+        if (item.type === 'album') {
+          meta = (item.artist || 'Various Artists') + ' · ' + (item.songs ? item.songs.length : 0) + '首';
+          title = '📁 ' + title;
+        } else {
+          meta = (item.artist || 'Unknown');
+          if (item.bpm) meta += ' · BPM ' + item.bpm;
+        }
+        var selected = false;
+        if (item.type === 'song' && currentSongItem && currentSongItem.id === item.id) selected = true;
+
+        var cardHtml = '<p class="chart-title">' + title + '</p>' +
+          '<p class="chart-meta">' + meta + '</p>';
+
+        /* Difficulty selector — shown when song is selected */
+        if (selected && item.type === 'song' && item.difficulties && item.difficulties.length > 0) {
+          var diffButtons = '<div class="diff-selector" style="margin-top:8px;display:-ms-flexbox;display:flex;-ms-flex-wrap:wrap;flex-wrap:wrap;gap:4px;">';
+          for (var di = 0; di < item.difficulties.length; di++) {
+            var diff = item.difficulties[di];
+            var isCurDiff = di === selectedDiffIdx;
+            var diffLevel = typeof diff.level === 'number' ? ' Lv.' + diff.level : '';
+            /* Glass style, accent-aware (inline because these are built per render) */
+            var dAcc = Theme.accent();
+            var diffStyle = isCurDiff
+              ? 'background:' + withAlpha(dAcc, 0.28) + ';border-color:' + withAlpha(dAcc, 0.75) +
+                ';color:' + adjustBrightness(dAcc, 1.5) + ';box-shadow:0 0 12px ' + withAlpha(dAcc, 0.3) +
+                ',inset 0 1px 0 rgba(255,255,255,0.16);'
+              : 'background:' + withAlpha(dAcc, 0.08) + ';border-color:' + withAlpha(dAcc, 0.35) +
+                ';color:' + adjustBrightness(dAcc, 1.2) + ';box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);';
+            diffButtons += '<button class="diff-btn" data-idx="' + di + '" style="' + diffStyle +
+              'padding:2px 8px;border-radius:6px;border:1px solid;font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;">' +
+              (diff.name || '难度 ' + (di + 1)) + diffLevel + '</button>';
+          }
+          diffButtons += '</div>';
+          cardHtml += diffButtons;
+        }
+
+        card.innerHTML = cardHtml;
+
+        card.onclick = function (e) {
+          /* If clicking a difficulty button, handle it instead of selecting the card */
+          if (e && e.target && e.target.className && e.target.className.indexOf('diff-btn') >= 0) {
+            var idx = parseInt(e.target.getAttribute('data-idx'), 10);
+            if (!isNaN(idx)) {
+              selectedDiffIdx = idx;
+              buildMenu(); /* re-render to update selected diff button */
+            }
+            return;
+          }
+          if (item.type === 'album') {
+            currentAlbumId = item.id;
+            currentSongItem = null;
+            selectedKey = null;
+            buildMenu();
+          } else {
+          currentSongItem = item;
+          selectedDiffIdx = 0;
+          selectedKey = item.id;
+          var _scheme = (DEMO_CHARTS[item.id] && DEMO_CHARTS[item.id].metadata && DEMO_CHARTS[item.id].metadata.bgScheme) || item.bgScheme || null;
+          if (_scheme) Theme.apply(_scheme);
+          buildMenu(); /* re-render to show difficulty selector */
+          }
+        };
+
+        if (selected) card.classList.add('selected');
+        chartListEl.appendChild(card);
+      })(items[i]);
+    }
+  }
+
+  /* --- Settings modal --- */
+  function openSettings() {
+    /* Sync slider values from settings */
+    var map = [
+      ['set-speed', settings.speedMul, 'val-speed', function (v) { return v.toFixed(1) + 'x'; }],
+      ['set-size', settings.sizeScale, 'val-size', function (v) { return v.toFixed(1) + 'x'; }],
+      ['set-render', settings.renderDist, 'val-render', function (v) { return String(v); }],
+      ['set-offset', settings.audioOffsetMs, 'val-offset', function (v) { return v + 'ms'; }],
+      ['set-proj', settings.projectionLeadMs, 'val-proj', function (v) { return v + 'ms'; }],
+      ['set-music', settings.musicVolume, 'val-music', function (v) { return Math.round(v * 100) + '%'; }],
+      ['set-sfx', settings.effectVolume, 'val-sfx', function (v) { return Math.round(v * 100) + '%'; }]
+    ];
+    for (var i = 0; i < map.length; i++) {
+      document.getElementById(map[i][0]).value = map[i][1];
+      document.getElementById(map[i][2]).textContent = map[i][3](map[i][1]);
+    }
+    settingsModal.classList.add('active');
+  }
+  function closeSettings() { settingsModal.classList.remove('active'); }
+  /* Range slider live binding */
+  (function () {
+    var cfg = [
+      ['set-speed', 'val-speed', 'speedMul', function (v) { return v.toFixed(1) + 'x'; }, function (v) { game.speedMul = parseFloat(v); }],
+      ['set-size', 'val-size', 'sizeScale', function (v) { return v.toFixed(1) + 'x'; }, function (v) { game.sizeScale = parseFloat(v); }],
+      ['set-render', 'val-render', 'renderDist', function (v) { return String(v); }, function (v) { game.renderDist = parseFloat(v); }],
+      ['set-offset', 'val-offset', 'audioOffsetMs', function (v) { return v + 'ms'; }, function (v) { audio.setOffset(parseFloat(v) / 1000); }],
+      ['set-proj', 'val-proj', 'projectionLeadMs', function (v) { return v + 'ms'; }, function (v) {}],
+      ['set-music', 'val-music', 'musicVolume', function (v) { return Math.round(v * 100) + '%'; }, function (v) { audio.setMusicVolume(parseFloat(v)); }],
+      ['set-sfx', 'val-sfx', 'effectVolume', function (v) { return Math.round(v * 100) + '%'; }, function (v) { audio.setEffectVolume(parseFloat(v)); }]
+    ];
+    for (var i = 0; i < cfg.length; i++) {
+      (function (sliderId, valId, key, fmt, applyFn) {
+        var el = document.getElementById(sliderId);
+        var valEl = document.getElementById(valId);
+        /* Read min/max/step from HTML attributes so IE9 (which renders
+         * type=range as a plain text input) still has range constraints. */
+        var mn = parseFloat(el.getAttribute('min'));
+        var mx = parseFloat(el.getAttribute('max'));
+        var st = parseFloat(el.getAttribute('step'));
+        function clamp(v) {
+          if (isNaN(v)) v = settings[key];   /* preserve old value on garbage */
+          if (!isNaN(mn) && v < mn) v = mn;
+          if (!isNaN(mx) && v > mx) v = mx;
+          if (!isNaN(st) && st > 0) {
+            /* Quantize to nearest step, anchored at min. */
+            var base = isNaN(mn) ? 0 : mn;
+            v = base + Math.round((v - base) / st) * st;
+            /* Round tiny floating point artifacts back to step precision */
+            var decimals = (String(st).split('.')[1] || '').length;
+            v = parseFloat(v.toFixed(decimals));
+          }
+          return v;
+        }
+        function update() {
+          var raw = parseFloat(el.value);
+          var v = clamp(raw);
+          /* If clamp changed it (e.g. IE9 text user typed out of range),
+           * write the corrected value back so the user sees it. */
+          if (el.value !== '' && (isNaN(raw) || raw !== v)) {
+            try { el.value = String(v); } catch (e) {}
+          }
+          settings[key] = v;
+          valEl.textContent = fmt(v);
+          applyFn(v);
+          saveSettings();
+        }
+        /* IE9 (text input): fires 'change' on blur; 'input' may fire on keystroke.
+         * IE11+ (real range): 'input' continuous + 'change' on release.
+         * Bind both to cover all browsers. */
+        el.addEventListener('input', update);
+        el.addEventListener('change', update);
+        /* IE9 only: if the user pressed Enter in the text box, commit immediately
+         * (without waiting for blur → change). */
+        el.addEventListener('keydown', function (e) {
+          if (e && (e.keyCode === 13 || e.key === 'Enter')) {
+            try { e.preventDefault(); } catch (err) {}
+            update();
+            el.blur();
+          }
+        });
+      })(cfg[i][0], cfg[i][1], cfg[i][2], cfg[i][3], cfg[i][4]);
+    }
+  })();
+
+  /* --- Chart editor (text JSON) --- */
+  /* Validates a parsed chart object. Returns {ok, chart, error}. */
+  function validateChart(obj) {
+    if (!obj || typeof obj !== 'object') return { ok: false, error: '根对象必须为对象' };
+    var md = obj.metadata;
+    if (!md || typeof md !== 'object') return { ok: false, error: '缺少 metadata' };
+    if (typeof md.bpm !== 'number' || md.bpm <= 0) return { ok: false, error: 'metadata.bpm 必须为正数' };
+    if (typeof md.title !== 'string' || !md.title) return { ok: false, error: 'metadata.title 不能为空' };
+    if (!md.bgScheme) md.bgScheme = { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' };
+    if (!md.noteColor) md.noteColor = md.bgScheme.accentColor || '#00f0ff';
+    if (typeof md.offset !== 'number') md.offset = 0;
+    if (!md.difficulty) md.difficulty = 'Custom';
+    if (!md.artist) md.artist = 'Unknown';
+    if (!Array.isArray(obj.notes)) return { ok: false, error: 'notes 必须为数组' };
+    for (var i = 0; i < obj.notes.length; i++) {
+      var n = obj.notes[i];
+      if (typeof n.beat !== 'number') return { ok: false, error: 'note #' + i + ' 缺少 beat' };
+      if (typeof n.x !== 'number' || typeof n.y !== 'number') return { ok: false, error: 'note #' + i + ' 缺少 x/y' };
+      if (n.type !== 'tap' && n.type !== 'touch' && n.type !== 'slide') return { ok: false, error: 'note #' + i + ' type 非法' };
+      if (n.type === 'slide' && !Array.isArray(n.nodes)) return { ok: false, error: 'slide note #' + i + ' 缺少 nodes' };
+      if (!n.id) n.id = 'ed-' + i + '-' + Date.now().toString(36);
+    }
+    return { ok: true, chart: obj };
+  }
+  function openEditor() {
+    editorError.textContent = '';
+    /* Pre-fill with the currently-selected chart if textarea is empty */
+    if (!editorTextarea.value && selectedKey && DEMO_CHARTS[selectedKey]) {
+      editorTextarea.value = JSON.stringify(DEMO_CHARTS[selectedKey], null, 2);
+    }
+    editorModal.classList.add('active');
+  }
+  function closeEditor() { editorModal.classList.remove('active'); }
+  function loadChartFromEditor() {
+    var txt = editorTextarea.value;
+    var obj;
+    try { obj = JSON.parse(txt); }
+    catch (e) { editorError.textContent = 'JSON 解析失败：' + e.message; return; }
+    var res = validateChart(obj);
+    if (!res.ok) { editorError.textContent = res.error; return; }
+    var key = customChartKey || ('custom-' + Date.now());
+    DEMO_CHARTS[key] = res.chart;
+    customChartKey = key;
+    selectedKey = key;
+    buildMenu();
+    editorError.style.color = '#10b981';
+    editorError.textContent = '已加载：' + res.chart.metadata.title + '（共 ' + res.chart.notes.length + ' 个音符）';
+    window.setTimeout(function () { editorError.style.color = ''; closeEditor(); }, 800);
+  }
+  /* File import */
+  document.getElementById('editor-file').addEventListener('change', function (e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      editorTextarea.value = String(reader.result || '');
+      editorError.textContent = '已读取 ' + file.name + '，点击「加载谱面」生效';
+    };
+    reader.onerror = function () { editorError.textContent = '文件读取失败'; };
+    reader.readAsText(file);
+    e.target.value = ''; /* allow re-selecting same file */
+  });
+
+  /* Audio file import — mirrors full version's loadAudioFile.
+   * decodeAudioData is async; show status on the upload button label. */
+  var editorAudioLabel = document.getElementById('editor-audio-label');
+  document.getElementById('editor-audio-file').addEventListener('change', function (e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    editorAudioLabel.textContent = '解码中…';
+    audio.loadAudioFile(file, function (buffer) {
+      editorAudioLabel.textContent = '音频已加载(' + Math.round(buffer.duration) + 's)';
+    }, function (err) {
+      editorAudioLabel.textContent = '导入失败';
+      window.setTimeout(function () { editorAudioLabel.textContent = '导入音频'; }, 2000);
+    });
+    e.target.value = ''; /* allow re-selecting same file */
+  });
+
+  /* --- Button wiring --- */
+  document.getElementById('btn-start').onclick = startGame;
+  document.getElementById('btn-switch-full').onclick = function () { window.location.href = '/'; };
+  document.getElementById('btn-pause').onclick = pauseGame;
+  document.getElementById('btn-resume').onclick = resumeGame;
+  document.getElementById('btn-restart').onclick = function () { pauseScreen.classList.add('hidden'); startGame(); };
+  document.getElementById('btn-pause-menu').onclick = showMenu;
+  document.getElementById('btn-settings').onclick = openSettings;
+  document.getElementById('btn-settings-close').onclick = closeSettings;
+  document.getElementById('btn-editor').onclick = openEditor;
+  document.getElementById('btn-editor-close').onclick = closeEditor;
+  document.getElementById('btn-editor-load').onclick = loadChartFromEditor;
+
+  /* --- Keyboard shortcuts --- */
+  document.addEventListener('keydown', function (e) {
+    /* Escape / 'P' toggles pause during gameplay. Modals (settings/editor)
+     * swallow Escape themselves via their close buttons, so only act when no
+     * modal is active. Enter starts a game from the menu. */
+    var modalActive = settingsModal.classList.contains('active') || editorModal.classList.contains('active');
+    if (modalActive) {
+      if (e.key === 'Escape' || e.keyCode === 27) {
+        closeSettings(); closeEditor();
+      }
+      return;
+    }
+    var k = e.key || String.fromCharCode(e.keyCode || 0);
+    if (k === 'Escape' || k === 'Esc' || k === 'p' || k === 'P') {
+      if (game.state === STATE.PLAYING) { e.preventDefault(); pauseGame(); }
+      else if (game.state === STATE.PAUSED) { e.preventDefault(); resumeGame(); }
+    } else if (k === 'Enter') {
+      if (game.state === STATE.MENU) { e.preventDefault(); startGame(); }
+    }
+  });
+
+  /* === 8. Demo charts (synced from src/data/demoCharts.ts) === */
+  var DEMO_CHARTS = {
+    'neon-cyberspace': {
+      metadata: {
+        title: 'Neon Cyberspace', artist: 'K3-CYBER // SYNTH', difficulty: 'Master [Lv.14]',
+        bpm: 140, offset: 0.05,
+        bgScheme: { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' },
+        noteColor: '#00f0ff'
+      },
+      notes: [
+        { id: 'nc-1', beat: 2, x: -1.2, y: -0.6, type: 'tap' },
+        { id: 'nc-2', beat: 3, x: 1.2, y: -0.6, type: 'tap' },
+        { id: 'nc-3', beat: 4, x: -0.6, y: 0.6, type: 'touch', color: '#ff2df7' },
+        { id: 'nc-4', beat: 5, x: 0.6, y: 0.6, type: 'touch', color: '#ff2df7' },
+        { id: 'nc-5', beat: 6, x: 0.0, y: 0.0, type: 'tap', color: '#ffb703' },
+        { id: 'nc-6', beat: 7, x: -1.4, y: 0.8, type: 'tap' },
+        { id: 'nc-7', beat: 8, x: 1.4, y: 0.8, type: 'tap' },
+        { id: 'nc-8', beat: 9, x: 0.0, y: -0.9, type: 'touch' },
+        { id: 'nc-9', beat: 10, x: -1.0, y: -0.3, type: 'tap' },
+        { id: 'nc-10', beat: 10.5, x: -0.5, y: 0.3, type: 'tap' },
+        { id: 'nc-11', beat: 11, x: 0.5, y: 0.3, type: 'tap' },
+        { id: 'nc-12', beat: 11.5, x: 1.0, y: -0.3, type: 'tap' },
+        { id: 'nc-13', beat: 12, x: 0.0, y: 0.8, type: 'touch' },
+        { id: 'nc-14', beat: 13, x: -1.3, y: -0.7, type: 'tap' },
+        { id: 'nc-15', beat: 14, x: 1.3, y: -0.7, type: 'tap' },
+        { id: 'nc-16', beat: 15, x: 0.0, y: -0.4, type: 'touch' },
+        { id: 'nc-17', beat: 16, x: -0.9, y: 0.5, type: 'tap' },
+        { id: 'nc-18', beat: 17, x: 0.9, y: 0.5, type: 'tap' },
+        { id: 'nc-19', beat: 18, x: -1.5, y: 0.0, type: 'touch' },
+        { id: 'nc-20', beat: 19, x: 1.5, y: 0.0, type: 'touch' },
+        { id: 'nc-21', beat: 20, x: -0.8, y: -0.8, type: 'tap' },
+        { id: 'nc-22', beat: 20.5, x: 0.0, y: -0.8, type: 'tap' },
+        { id: 'nc-23', beat: 21, x: 0.8, y: -0.8, type: 'tap' },
+        { id: 'nc-24', beat: 22, x: 0.0, y: 0.6, type: 'touch' },
+        { id: 'nc-25', beat: 23, x: -1.2, y: 0.4, type: 'tap' },
+        { id: 'nc-26', beat: 24, x: 1.2, y: 0.4, type: 'tap' },
+        { id: 'nc-27', beat: 25, x: 0.0, y: -0.2, type: 'touch' },
+        { id: 'nc-28', beat: 26, x: -1.1, y: -0.6, type: 'tap' },
+        { id: 'nc-29', beat: 27, x: 1.1, y: -0.6, type: 'tap' },
+        { id: 'nc-30', beat: 28, x: 0.0, y: 0.7, type: 'tap' },
+        { id: 'nc-s1', beat: 29, x: -1.4, y: -0.8, type: 'slide', nodes: [
+          { beat: 30, x: 0.0, y: 0.5 }, { beat: 31, x: 1.4, y: -0.8 }
+        ] }
+      ]
+    },
+    'quantum-horizon': {
+      metadata: {
+        title: 'Quantum Horizon', artist: 'AETHER FLIGHT', difficulty: 'Standard [Lv.7]',
+        bpm: 128, offset: 0.0,
+        bgScheme: { gradientStart: '#081120', gradientEnd: '#0a1d37', accentColor: '#38bdf8' },
+        noteColor: '#38bdf8'
+      },
+      notes: [
+        { id: 'qh-1', beat: 2, x: -1.0, y: -0.5, type: 'tap' },
+        { id: 'qh-2', beat: 4, x: 1.0, y: -0.5, type: 'tap' },
+        { id: 'qh-3', beat: 6, x: 0.0, y: 0.5, type: 'touch' },
+        { id: 'qh-4', beat: 8, x: -0.8, y: 0.3, type: 'tap' },
+        { id: 'qh-5', beat: 10, x: 0.8, y: 0.3, type: 'tap' },
+        { id: 'qh-6', beat: 12, x: 0.0, y: -0.6, type: 'touch' },
+        { id: 'qh-7', beat: 14, x: -1.2, y: 0.0, type: 'tap' },
+        { id: 'qh-8', beat: 16, x: 1.2, y: 0.0, type: 'tap' },
+        { id: 'qh-9', beat: 18, x: 0.0, y: 0.7, type: 'touch' },
+        { id: 'qh-10', beat: 20, x: -0.7, y: -0.5, type: 'tap' },
+        { id: 'qh-11', beat: 22, x: 0.7, y: -0.5, type: 'tap' },
+        { id: 'qh-12', beat: 24, x: 0.0, y: 0.0, type: 'touch' },
+        { id: 'qh-13', beat: 26, x: -1.1, y: 0.6, type: 'tap' },
+        { id: 'qh-14', beat: 28, x: 1.1, y: 0.6, type: 'tap' },
+        { id: 'qh-15', beat: 30, x: 0.0, y: -0.8, type: 'tap' },
+        { id: 'qh-s1', beat: 31, x: -1.0, y: 0.0, type: 'slide', nodes: [
+          { beat: 32, x: 0.0, y: 0.6 }, { beat: 33, x: 1.0, y: 0.0 }
+        ] }
+      ]
+    },
+    'starlight-pulse': {
+      metadata: {
+        title: 'Starlight Pulse', artist: 'HYPER-DRIVE 174', difficulty: 'Expert [Lv.11]',
+        bpm: 174, offset: 0.02,
+        bgScheme: { gradientStart: '#041712', gradientEnd: '#132c1c', accentColor: '#10b981' },
+        noteColor: '#10b981'
+      },
+      notes: [
+        { id: 'sp-1', beat: 2, x: -1.3, y: -0.7, type: 'tap' },
+        { id: 'sp-2', beat: 3, x: -0.6, y: -0.2, type: 'touch' },
+        { id: 'sp-3', beat: 4, x: 0.6, y: 0.2, type: 'touch' },
+        { id: 'sp-4', beat: 5, x: 1.3, y: 0.7, type: 'tap' },
+        { id: 'sp-5', beat: 6, x: 0.0, y: -0.8, type: 'tap' },
+        { id: 'sp-6', beat: 7, x: -1.1, y: 0.6, type: 'tap' },
+        { id: 'sp-7', beat: 8, x: 1.1, y: 0.6, type: 'tap' },
+        { id: 'sp-8', beat: 9, x: 0.0, y: 0.0, type: 'touch' },
+        { id: 'sp-9', beat: 10, x: -1.4, y: -0.4, type: 'tap' },
+        { id: 'sp-10', beat: 11, x: 1.4, y: -0.4, type: 'tap' },
+        { id: 'sp-11', beat: 12, x: -0.7, y: 0.7, type: 'touch' },
+        { id: 'sp-12', beat: 13, x: 0.7, y: 0.7, type: 'touch' },
+        { id: 'sp-13', beat: 14, x: 0.0, y: -0.5, type: 'tap' },
+        { id: 'sp-14', beat: 15, x: -1.2, y: 0.2, type: 'tap' },
+        { id: 'sp-15', beat: 16, x: 1.2, y: 0.2, type: 'tap' },
+        { id: 'sp-16', beat: 17, x: 0.0, y: 0.8, type: 'tap' },
+        { id: 'sp-17', beat: 18, x: -0.8, y: -0.8, type: 'touch' },
+        { id: 'sp-18', beat: 19, x: 0.8, y: -0.8, type: 'touch' },
+        { id: 'sp-s1', beat: 20, x: -1.2, y: 0.0, type: 'slide', nodes: [
+          { beat: 21, x: -0.4, y: 0.6 }, { beat: 22, x: 0.4, y: -0.6 }, { beat: 23, x: 1.2, y: 0.0 }
+        ] }
+      ]
+    }
+  };
+
+  /* === Init === */
+  resize();
+  /* IE9: install click-forwarding layer so overlay/hud (pointer-events:none
+   * in CSS, which IE9 ignores) don't block clicks to the canvas. */
+  installPointerEventsFallback();
+  /* Load beatmaps manifest, then build menu */
+  loadBeatmapsManifest(function () {
+    buildMenu();
+  });
+  showMenu();
+  /* Detect IE11 (no Web Audio API) early — without creating an AudioContext.
+   * In HTML5 mode, demo tracks are silent (no synth). Show a hint on the
+   * upload button so the user knows to import an audio file for sound. */
+  if (!(window.AudioContext || window.webkitAudioContext)) {
+    audio.useHtml5 = true;
+    var _upLabel = document.getElementById('editor-audio-label');
+    if (_upLabel) _upLabel.textContent = '导入音频';
+  }
+  /* UI click sound — delegated from the document so every button/card gets it
+   * without touching each handler. Walks a few levels up from the event target
+   * because buttons may contain inline elements. */
+  (function () {
+    var UI_HIT = /(^|\s)(btn-tool|btn-start|upload-btn|pause-btn|chart-card|diff-btn)(\s|$)/;
+    document.addEventListener('click', function (e) {
+      var el = e.target || e.srcElement;
+      for (var depth = 0; el && el.nodeType === 1 && depth < 4; depth++) {
+        var cn = el.className;
+        /* SVG elements expose an SVGAnimatedString here, hence the typeof guard */
+        if (typeof cn === 'string' && UI_HIT.test(cn)) { audio.playUiSound(); return; }
+        el = el.parentNode;
+      }
+    }, false);
+  })();
+
+  Theme.apply(FALLBACK_SCHEME);
+  loop();
+})();
+</script>
+</body>
+</html>

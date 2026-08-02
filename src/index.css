@@ -1,0 +1,296 @@
+@import "tailwindcss";
+
+/* "short" variant: viewports with limited height (landscape phones etc.)
+   Used by the song-card result overlay for a compact layout. */
+@custom-variant short (@media (max-height: 620px));
+
+@layer utilities {
+  .font-orbitron {
+    font-family: 'Orbitron', monospace, sans-serif;
+  }
+  .font-rajdhani {
+    font-family: 'Rajdhani', sans-serif;
+  }
+}
+
+/* =========================================================================
+   FROSTED-GLASS + LIGHT DESIGN SYSTEM
+   -------------------------------------------------------------------------
+   Centralized design tokens + reusable glass utility classes.
+   Components reference these via Tailwind arbitrary-value syntax
+   (e.g. bg-[var(--surface-1)], border-[var(--glass-border)]) or via the
+   .glass-* utility classes. The per-chart accent color is still driven by
+   the --hud-accent* CSS vars set inline on the HUD root in App.tsx.
+   ========================================================================= */
+:root {
+  /* Neutral base surfaces (cool charcoal — replaces the old navy palette) */
+  --bg-base: #0a0d12;
+  --bg-base-2: #0e1218;
+
+  /* Translucent glass layers (over backdrop-blur) */
+  --surface-1: rgba(255, 255, 255, 0.045);   /* default panel */
+  --surface-2: rgba(255, 255, 255, 0.075);   /* elevated panel */
+  --surface-3: rgba(255, 255, 255, 0.11);    /* hover / strong */
+  --surface-tint: rgba(255, 255, 255, 0.03); /* subtle wash */
+
+  /* Glass edge (1px light border = the "glass rim") */
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-border-strong: rgba(255, 255, 255, 0.22);
+  --glass-border-soft: rgba(255, 255, 255, 0.07);
+
+  /* Glass shadows & inner highlights */
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --glass-shadow-sm: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  --glass-rim-soft: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --glass-press: inset 0 2px 6px rgba(0, 0, 0, 0.4);
+
+  /* Blur radius (kept moderate for GPU performance) */
+  --glass-blur: 16px;
+  --glass-blur-lg: 22px;
+
+  /* Text hierarchy (white at decreasing alpha) */
+  --text-1: rgba(255, 255, 255, 0.92);
+  --text-2: rgba(255, 255, 255, 0.70);
+  --text-3: rgba(255, 255, 255, 0.50);
+  --text-4: rgba(255, 255, 255, 0.36);
+
+  /* Input surface */
+  --input-bg: rgba(255, 255, 255, 0.04);
+  --input-border: rgba(255, 255, 255, 0.12);
+}
+
+/* ---- Reusable glass utility classes ---------------------------------- */
+.glass-panel {
+  background: var(--surface-1);
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-rim);
+}
+.glass-panel-strong {
+  background: var(--surface-2);
+  backdrop-filter: blur(var(--glass-blur-lg)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(150%);
+  border: 1px solid var(--glass-border-strong);
+  box-shadow: var(--glass-shadow), var(--glass-rim);
+}
+/* Lightweight glass for nested / small elements (less GPU cost) */
+.glass-sub {
+  background: var(--surface-tint);
+  border: 1px solid var(--glass-border-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.glass-input {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-1);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+.glass-input:focus {
+  outline: none;
+  border-color: var(--glass-border-strong);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+.glass-input::placeholder {
+  color: var(--text-4);
+}
+
+/* Glass button — neutral by default, accent-tinted when .is-accent */
+.glass-btn {
+  background: var(--surface-1);
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
+  border: 1px solid var(--glass-border);
+  color: var(--text-1);
+  box-shadow: var(--glass-shadow-sm), var(--glass-rim-soft);
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+}
+.glass-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--glass-border-strong);
+  box-shadow: var(--glass-shadow), var(--glass-rim);
+}
+.glass-btn:active {
+  transform: scale(0.97);
+  box-shadow: var(--glass-press);
+}
+
+/* Accent-tinted glass (uses --hud-accent set by App.tsx, falls back to cyan) */
+.glass-accent {
+  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--hud-accent, #22d3ee) 45%, transparent);
+  color: var(--text-1);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--hud-accent, #22d3ee) 22%, transparent),
+              var(--glass-rim-soft);
+  transition: background 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+}
+.glass-accent:hover {
+  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 24%, transparent);
+  box-shadow: 0 0 26px color-mix(in srgb, var(--hud-accent, #22d3ee) 38%, transparent),
+              var(--glass-rim);
+}
+.glass-accent:active {
+  transform: scale(0.97);
+}
+
+/* Primary CTA — frosted glass + accent glow (the "light" of the design language).
+   Uses --hud-accent (per-chart in App.tsx) with a cyan brand fallback; set
+   --hud-accent inline to recolor (e.g. emerald for album-enter, amber for alt
+   actions). No transform here so Tailwind hover/active scale utilities win. */
+.glass-btn-primary {
+  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 18%, transparent);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--hud-accent, #22d3ee) 50%, transparent);
+  color: var(--text-1);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--hud-accent, #22d3ee) 30%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.20);
+}
+.glass-btn-primary:hover {
+  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 28%, transparent);
+  box-shadow: 0 0 34px color-mix(in srgb, var(--hud-accent, #22d3ee) 45%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.26);
+}
+
+/* Soft ambient light wash behind top UI (gives glass something to refract) */
+.ambient-light-top::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 38%;
+  background: radial-gradient(120% 100% at 50% 0%,
+              rgba(255, 255, 255, 0.08) 0%,
+              rgba(255, 255, 255, 0.02) 35%,
+              transparent 75%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Custom glow utility classes (judgement feedback — kept, retinted neutral) */
+.glow-s-perfect {
+  box-shadow: 0 0 25px rgba(255, 140, 0, 0.8), inset 0 0 15px rgba(255, 140, 0, 0.4);
+}
+
+.glow-perfect {
+  box-shadow: 0 0 20px rgba(255, 220, 0, 0.8), inset 0 0 12px rgba(255, 220, 0, 0.4);
+}
+
+.glow-good {
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.8), inset 0 0 10px rgba(56, 189, 248, 0.4);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(6, 182, 212, 0.5);
+}
+
+/* Prevent touch gestures interfering with game input */
+canvas {
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ADOFAI-style timing marker: instant pop-in, gradual fade-out */
+@keyframes timingMarkerAnim {
+  0% { transform: translate(-50%, -50%) scale(0.3); opacity: 0; }
+  14% { transform: translate(-50%, -50%) scale(1.4); opacity: 1; }
+  30% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  70% { transform: translate(-50%, -50%) scale(1); opacity: 0.95; }
+  100% { transform: translate(-50%, -50%) scale(0.75); opacity: 0; }
+}
+
+/* Combo milestone burst ring (every 10 combo) */
+@keyframes comboBurstAnim {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+@keyframes fadeIn {
+  0% { opacity: 0; transform: scale(1.02); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 300ms ease-out forwards;
+}
+
+/* Sibling song cards sliding back in after leaving the result card. */
+@keyframes cardFadeIn {
+  0% { opacity: 0; transform: translateY(28px) scale(0.92); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.slide-in-card {
+  animation: cardFadeIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes clearBannerEnter {
+  0% { transform: scale(0.6) translateY(30px); opacity: 0; filter: blur(10px); }
+  60% { transform: scale(1.08) translateY(0); opacity: 1; filter: blur(0); }
+  100% { transform: scale(1) translateY(0); opacity: 1; filter: blur(0); }
+}
+
+@keyframes clearBannerExit {
+  0% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1.2); opacity: 0; filter: blur(8px); }
+}
+
+/* Responsive viewport adaptation for small devices (e.g., iPhone SE) */
+@media (max-width: 640px) or (max-height: 720px) {
+  html {
+    font-size: 13px; /* scale down standard text sizes slightly */
+  }
+  .max-h-\[60vh\] {
+    max-h: 46vh !important; /* give carousel more breathing room on short screens */
+  }
+  .max-w-5xl {
+    max-width: 92vw !important;
+  }
+  .p-5 {
+    padding: 1rem !important;
+  }
+  .p-6 {
+    padding: 1.25rem !important;
+  }
+  .md\:p-10 {
+    padding: 1.25rem !important;
+  }
+  .w-80 {
+    width: 17rem !important; /* slightly slimmer sidebar */
+  }
+}
+
+@media (max-width: 480px) {
+  html {
+    font-size: 12px;
+  }
+  .grid-cols-3 {
+    grid-cols: 1 !important; /* Stack selector grid on narrow screens */
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 0.75rem !important;
+  }
+  .max-h-\[46vh\] {
+    max-h: 40vh !important;
+    overflow-y: auto !important;
+  }
+}
+
+/* Custom scrollbars — neutral glass style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}

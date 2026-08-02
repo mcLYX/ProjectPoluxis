@@ -1,0 +1,213 @@
+import { ChartData, ResolvedNote, ResolvedEvent, BpmPoint } from '../types/game';
+
+/** A point where scroll speed changes, in absolute seconds + speed multiplier */
+export interface SpeedPoint {
+  timeSec: number;
+  speed: number;
+}
+
+/**
+ * Pre-compute scroll speed change points from chart events.
+ * Returns speed points sorted by time, with an implicit initial speed of 1 at t=0.
+ */
+export function extractSpeedPoints(chart: ChartData): SpeedPoint[] {
+  const events = resolveEvents(chart);
+  const points: SpeedPoint[] = [];
+  for (const e of events) {
+    if (e.eventType === 'speed_change' && e.speed != null) {
+      points.push({ timeSec: e.timeSec, speed: e.speed });
+    }
+  }
+  points.sort((a, b) => a.timeSec - b.timeSec);
+  return points;
+}
+
+/**
+ * Get the cumulative scroll distance from t=0 up to t=timeSec.
+ * This is the integral of scroll speed over time, where speed changes
+ * are defined by speedPoints. Distance unit: "1x-seconds" (at 1x speed, 1s = 1 unit of distance).
+ *
+ * Notes always sit at a fixed "scroll distance" from the judge line;
+ * as time advances, the judge line's distance increases, making notes appear to move toward it.
+ * This approach avoids "teleportation" artifacts when speed changes trigger:
+ * note spacing is already correct before the speed change visually arrives.
+ */
+export function getScrollDistance(timeSec: number, speedPoints: SpeedPoint[]): number {
+  if (speedPoints.length === 0) {
+    return timeSec;
+  }
+  let dist = 0;
+  let currentTime = 0;
+  let currentSpeed = 1;
+  for (const p of speedPoints) {
+    if (p.timeSec <= 0) {
+      currentSpeed = p.speed;
+      continue;
+    }
+    if (p.timeSec >= timeSec) break;
+    dist += (p.timeSec - currentTime) * currentSpeed;
+    currentTime = p.timeSec;
+    currentSpeed = p.speed;
+  }
+  dist += (timeSec - currentTime) * currentSpeed;
+  return dist;
+}
+
+/**
+ * Convert a beat number to absolute seconds with constant BPM.
+ * 1 beat at BPM=60 → 1 second, BPM=120 → 0.5 second, etc.
+ */
+export function beatToSeconds(beat: number, bpm: number, offset: number): number {
+  return offset + (beat * 60) / bpm;
+}
+
+/**
+ * Convert a beat number to absolute seconds, supporting BPM changes via bpmlist.
+ * Walks through BPM segments and accumulates time per segment.
+ *
+ * Algorithm:
+ * - Start at beat 0 with baseBpm
+ * - For each BPM point at beat b_i with bpm v_i:
+ *   - Add time for segment [currentBeat, b_i) using current BPM
+ *   - Switch to new BPM
+ * - Add time for remaining beats from last BPM change to target beat
+ */
+export function beatToSecondsMultiBpm(
+  beat: number,
+  baseBpm: number,
+  offset: number,
+  bpmlist?: BpmPoint[]
+): number {
+  if (!bpmlist || bpmlist.length === 0) {
+    return beatToSeconds(beat, baseBpm, offset);
+  }
+
+  let currentBeat = 0;
+  let currentBpm = baseBpm;
+  let accumulatedTime = 0;
+
+  for (const point of bpmlist) {
+    if (point.beat <= 0) continue;
+    if (point.beat >= beat) break;
+
+    const segmentBeats = point.beat - currentBeat;
+    accumulatedTime += (segmentBeats * 60) / currentBpm;
+    currentBeat = point.beat;
+    currentBpm = point.bpm;
+  }
+
+  const remainingBeats = beat - currentBeat;
+  accumulatedTime += (remainingBeats * 60) / currentBpm;
+
+  return offset + accumulatedTime;
+}
+
+/**
+ * Get the BPM value at a specific beat, considering BPM changes.
+ */
+export function getBpmAtBeat(beat: number, baseBpm: number, bpmlist?: BpmPoint[]): number {
+  if (!bpmlist || bpmlist.length === 0) return baseBpm;
+  let bpm = baseBpm;
+  for (const point of bpmlist) {
+    if (point.beat > beat) break;
+    bpm = point.bpm;
+  }
+  return bpm;
+}
+
+/**
+ * Resolve all notes in a chart from beat-based to absolute seconds.
+ * Slide child nodes are resolved as well.
+ *
+ * The output is sorted by `timeSec` (ascending) so that the render loop in
+ * GameCanvas can use a binary search to find the visible window of notes
+ * each frame, instead of iterating the full chart (which can be 1000+ notes).
+ * The sort is stable for equal timeSec values, preserving original order
+ * among same-time notes (matters for editor determinism).
+ */
+export function resolveChart(chart: ChartData): ResolvedNote[] {
+  const { bpm, offset, bpmlist } = chart.metadata;
+  const resolved = chart.notes.map((n) => ({
+    ...n,
+    timeSec: beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist),
+    resolvedNodes:
+      n.type === 'slide'
+        ? (n.nodes ?? []).map((sn) => ({ ...sn, timeSec: beatToSecondsMultiBpm(sn.beat, bpm, offset, bpmlist) }))
+        : undefined,
+  }));
+  resolved.sort((a, b) => a.timeSec - b.timeSec);
+  return resolved;
+}
+
+/**
+ * Resolve all events in a chart from beat-based to absolute seconds.
+ * Returns empty array if no events defined.
+ */
+export function resolveEvents(chart: ChartData): ResolvedEvent[] {
+  const { bpm, offset, bpmlist } = chart.metadata;
+  if (!chart.events || chart.events.length === 0) {
+    // Migrate legacy speedEvents to event format
+    if (chart.speedEvents && chart.speedEvents.length > 0) {
+      return chart.speedEvents
+        .map((se, idx) => ({
+          id: `legacy-speed-${idx}`,
+          type: 'event' as const,
+          eventType: 'speed_change' as const,
+          beat: se.beat,
+          speed: se.speed,
+          timeSec: beatToSecondsMultiBpm(se.beat, bpm, offset, bpmlist),
+        }))
+        .sort((a, b) => a.timeSec - b.timeSec);
+    }
+    return [];
+  }
+  const resolved = chart.events.map((e) => ({
+    ...e,
+    timeSec: beatToSecondsMultiBpm(e.beat, bpm, offset, bpmlist),
+  }));
+  resolved.sort((a, b) => a.timeSec - b.timeSec);
+  return resolved;
+}
+
+/** Max beat across all notes, including slide child nodes. */
+export function getMaxBeat(chart: ChartData): number {
+  let max = 0;
+  chart.notes.forEach((n) => {
+    max = Math.max(max, n.beat);
+    n.nodes?.forEach((sn) => {
+      max = Math.max(max, sn.beat);
+    });
+  });
+  return max;
+}
+
+/** Earliest note time in seconds (including offset and slide child nodes). */
+export function getFirstNoteTime(chart: ChartData): number {
+  if (chart.notes.length === 0) return 0;
+  const { bpm, offset, bpmlist } = chart.metadata;
+  let minBeat = Infinity;
+  chart.notes.forEach((n) => {
+    minBeat = Math.min(minBeat, n.beat);
+    n.nodes?.forEach((sn) => {
+      minBeat = Math.min(minBeat, sn.beat);
+    });
+  });
+  return beatToSecondsMultiBpm(minBeat, bpm, offset, bpmlist);
+}
+
+/** Total duration (seconds) of a chart: last node time + 1.5s buffer. */
+export function getChartDuration(chart: ChartData): number {
+  if (chart.notes.length === 0) return 5;
+  const { bpm, offset, bpmlist } = chart.metadata;
+  return beatToSecondsMultiBpm(getMaxBeat(chart), bpm, offset, bpmlist) + 1.5;
+}
+
+/**
+ * Count all scoreable notes: tap/touch = 1 each; slide = head + each child node (1 each).
+ */
+export function countPlayableNotes(chart: ChartData): number {
+  return chart.notes.reduce(
+    (acc, n) => acc + 1 + (n.type === 'slide' ? (n.nodes?.length ?? 0) : 0),
+    0
+  );
+}
