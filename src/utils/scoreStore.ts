@@ -1,6 +1,6 @@
 import { GameStats } from '../types/game';
 
-const STORAGE_KEY = 'polybeat_highscores_v1';
+const STORAGE_KEY = 'poluxis_highscores_v1';
 
 export type ClearBadge = 'FC' | 'AP' | 'AP+';
 

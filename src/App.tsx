@@ -60,7 +60,7 @@ const DEFAULT_SETTINGS = {
 
 function loadSettings(): typeof DEFAULT_SETTINGS {
   try {
-    const saved = window.localStorage.getItem('polybeat-settings');
+    const saved = window.localStorage.getItem('poluxis-settings');
     if (!saved) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(saved);
     const result: typeof DEFAULT_SETTINGS = { ...DEFAULT_SETTINGS };
@@ -82,7 +82,7 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
 
 function saveSettings(settings: typeof DEFAULT_SETTINGS) {
   try {
-    window.localStorage.setItem('polybeat-settings', JSON.stringify(settings));
+    window.localStorage.setItem('poluxis-settings', JSON.stringify(settings));
   } catch (e) { /* ignore quota / private mode errors */ }
 }
 

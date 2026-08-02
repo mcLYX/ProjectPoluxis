@@ -34,7 +34,7 @@
   var html =
     '<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">' +
-    '<title>浏览器不兼容 - PolyBeat</title><style>' +
+    '<title>浏览器不兼容 - Project:Poluxis</title><style>' +
     '*{box-sizing:border-box;}' +
     'html,body{margin:0;padding:0;height:100%;width:100%;background:#0a0d12;color:#e8edf4;' +
     'font-family:"Segoe UI",Roboto,Arial,sans-serif;}' +

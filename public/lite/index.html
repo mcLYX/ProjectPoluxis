@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Project Polygon (Lite)</title>
+  <title>Project:Poluxis (Lite)</title>
   <style>
     /* === Visual style aligned with the full version (IE11 compatible) ===
      * All modern-only properties have IE11 fallbacks:
@@ -302,7 +302,7 @@
     <!-- Menu -->
     <div class="screen" id="menu-screen">
       <div>
-        <h1 class="menu-title">Proj:POLYGON Lite</h1>
+        <h1 class="menu-title"><span style="font-size: 11px;">Project</span>Poluxis Lite</h1>
       </div>
       <div class="chart-list" id="chart-list"></div>
       <div class="menu-footer">
@@ -403,7 +403,7 @@
 
 <script>
 /* ============================================================
- * Polytone Lite — lightweight Canvas-2D build
+ * Poluxis Lite — lightweight Canvas-2D build
  * ES5 only (Chrome 30+ / IE 11+ compatible). No build step.
  * Sections: 1.Polyfill 2.Constants 3.Core logic 4.LiteAudio
  *           5.Renderer 6.GameLoop 6.5.Input 7.UI 8.Demo charts
@@ -1625,7 +1625,7 @@
     effectVolume: 0.9
   };
   try {
-    var saved = window.localStorage && localStorage.getItem('polytone-lite-settings');
+    var saved = window.localStorage && localStorage.getItem('poluxis-lite-settings');
     if (saved) {
       var parsed = JSON.parse(saved);
       if (parsed) for (var sk in parsed) if (Object.prototype.hasOwnProperty.call(settings, sk))
@@ -1633,7 +1633,7 @@
     }
   } catch (e) { /* private mode / old browser — keep defaults */ }
   function saveSettings() {
-    try { window.localStorage && localStorage.setItem('polytone-lite-settings', JSON.stringify(settings)); } catch (e) {}
+    try { window.localStorage && localStorage.setItem('poluxis-lite-settings', JSON.stringify(settings)); } catch (e) {}
   }
 
   function resetGame(chart) {

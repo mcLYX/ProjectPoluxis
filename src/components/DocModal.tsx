@@ -19,7 +19,7 @@ export const DocModal: React.FC<DocModalProps> = ({ isOpen, onClose }) => {
             </div>
             <div>
               <h2 className="text-xl font-bold font-orbitron tracking-wider text-white/90">
-                Project Polygon 说明
+                Project:Poluxis 说明
               </h2>
               <p className="text-xs text-white/50">Gameplay Mechanics, Note Types & Chart Format Specifications</p>
             </div>

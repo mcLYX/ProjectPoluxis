@@ -447,32 +447,30 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
       {/* Top Bar (hidden in result mode) */}
       {!result && (
-      <div className="relative z-10 flex items-center justify-between px-6 py-4">
-        <div className="flex items-center gap-3">
+      <div className="relative z-10 flex items-center justify-between px-6 py-4 min-h-[60px]">
+        <div className="flex items-center gap-3 min-w-0">
           {viewDepth === 'album' && (
             <button
               onClick={handleBackToRoot}
-              className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
+              className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shrink-0"
             >
               <ArrowLeft size={14} /> 返回
             </button>
           )}
           {currentAlbum && (
-            <div className="text-white font-orbitron font-bold tracking-wider">
+            <div className="text-white font-orbitron font-bold tracking-wider truncate">
               {currentAlbum.title}
             </div>
           )}
           {viewDepth === 'root' && (
-            <>
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-cyan-400 to-blue-500 flex items-center justify-center text-white shadow-lg shadow-cyan-500/30 font-orbitron font-black text-xl">
-                P
-              </div>
-              <div>
-                <h1 className="text-xl font-black font-orbitron tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 to-white">
-                  Project Polygon
-                </h1>
-              </div>
-            </>
+            <h1 className="flex items-baseline leading-none">
+              <span className="text-2xl sm:text-3xl font-black font-orbitron tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-sky-200 to-amber-300">
+                Poluxis
+              </span>
+              <span className="text-[10px] font-bold font-orbitron uppercase tracking-[0.35em] text-white/40 mr-2 mt-1 self-start">
+                Project
+              </span>
+            </h1>
           )}
         </div>
 
