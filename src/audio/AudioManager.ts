@@ -151,10 +151,10 @@ export class AudioManager {
   private async loadBuiltinSounds(): Promise<void> {
     if (!this.ctx) return;
     const list: Array<{ key: NoteType | 'ui'; url: string }> = [
-      { key: 'tap',   url: '/sounds/tap.ogg'   },
-      { key: 'touch', url: '/sounds/touch.ogg' },
-      { key: 'slide', url: '/sounds/slide.ogg' },
-      { key: 'ui',    url: '/sounds/ui.ogg'    },
+      { key: 'tap',   url: 'sounds/tap.ogg'   },
+      { key: 'touch', url: 'sounds/touch.ogg' },
+      { key: 'slide', url: 'sounds/slide.ogg' },
+      { key: 'ui',    url: 'sounds/ui.ogg'    },
     ];
     await Promise.all(
       list.map(async ({ key, url }) => {

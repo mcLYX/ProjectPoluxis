@@ -1323,7 +1323,7 @@ export function App() {
             onOpenSettings={() => setShowSettings(true)}
             onOpenEditor={handleOpenVisualEditor}
             onOpenFileManager={() => setShowFileManager(true)}
-            onSwitchLite={() => { window.location.href = '/lite/index.html'; }}
+            onSwitchLite={() => { window.location.href = 'lite/index.html'; }}
             onStartGame={(chart, hasAudio, songId, diffName) => handleStartGame(chart, hasAudio, songId, diffName)}
             onStateChange={handleSongSelectStateChange}
           />

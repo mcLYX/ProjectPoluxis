@@ -16,6 +16,7 @@
 - [添加自己的谱面 / 封面 / 音乐（beatmaps）](#添加自己的谱面--封面--音乐beatmaps)
 - [谱面编辑器](#谱面编辑器)
 - [如何部署](#如何部署)
+- [作为 PWA 安装 / 离线可用](#作为-pwa-安装--离线可用)
 - [自定义 UI 与打击音效（sounds）](#自定义-ui-与打击音效sounds)
 - [项目结构（简览）](#项目结构简览)
 - [常见问题](#常见问题)
@@ -274,6 +275,41 @@ npx cap open android      # 用 Android Studio 打开并构建 / 运行
 ### 4. Lite 版与回退
 
 项目内置 **Lite 版**（精简 / 兼容回退逻辑），用于低性能设备、部分旧版浏览器，或网络受限场景。当主资源（如外部谱面、音频）加载失败时，游戏会自动回退到代码内**硬编码的内置示范谱面**与**合成器音效**，保证始终可玩。
+
+---
+
+## 作为 PWA 安装 / 离线可用
+
+项目已通过 `vite-plugin-pwa` 接入 Progressive Web App：**构建后自动生成 `manifest.webmanifest` 与 Service Worker（`sw.js`），全版本与 Lite 版均可「添加到主屏幕」并离线打开。**
+
+### 构建后你会看到
+
+```
+dist/
+├── manifest.webmanifest   # PWA 清单（名称、图标、主题色、start_url）
+├── sw.js                  # Service Worker（由 workbox 生成）
+├── registerSW.js          # SW 注册脚本（已自动注入到 index.html 与 lite/index.html）
+├── icons/                 # PWA 图标（icon.svg / icon-maskable.svg）
+└── ...
+```
+
+### 部署注意
+
+1. **必须用 HTTPS（或 localhost）**：PWA 仅在安全上下文下生效，否则「安装」按钮不会出现。
+2. **根目录部署**：默认 `base: './'`，`start_url` / `scope` 均为相对路径，直接把 `dist/` 挂到站点根即可，无需额外配置。
+3. **子目录部署**（如 `https://域名/poluxis/`）：只需把 `vite.config.ts` 的 `base` 改成 `'/poluxis/'`，其余 PWA 配置（manifest 路径、SW 注册路径、scope）都会被插件按 `base` 自动处理，**无需逐处手动加前缀**。Lite 版的 manifest / SW 引用已使用相对路径（`../manifest.webmanifest`、`../registerSW.js`），在 `/poluxis/lite/` 下会正确指向 `/poluxis/`。
+4. **服务器需正确返回 `sw.js` / `manifest.webmanifest`**（MIME：`application/manifest+json`、`text/javascript`），且对这两个文件不要强缓存（便于更新）。
+
+### 缓存策略
+
+- **应用外壳**（JS / CSS / HTML / 字体 / 图标）走 workbox **预缓存**，离线可打开。
+- **谱面 `beatmaps/`、音效 `sounds/`** 为可选外部内容且体积可能较大，走 **运行时缓存**（`CacheFirst`，最多保留 200 / 50 条，30 天），不会一次性塞进预缓存。
+
+### 替换为你自己的图标
+
+当前 `public/icons/` 下是占位 SVG（`icon.svg` 标准图标、`icon-maskable.svg` 带安全边距的满版图标，用于不同设备的遮罩裁剪）。正式发布前建议替换为你的设计：
+
+- 想用 PNG：在 `public/icons/` 放 `icon-192.png` / `icon-512.png` / `icon-512-maskable.png`，并在 `vite.config.ts` 的 `manifest.icons` 里把 `src` / `type: 'image/png'` / `sizes` 改对应值即可（SVG 在部分旧安卓上支持有限，PNG 兼容性最好）。
 
 ---
 

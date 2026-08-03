@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0b1120">
+  <!-- PWA manifest (relative so it works under a sub-path like /poluxis/lite/) -->
+  <link rel="manifest" href="../manifest.webmanifest">
   <title>Project:Poluxis (Lite)</title>
   <style>
     /* === Visual style aligned with the full version (IE11 compatible) ===
@@ -400,6 +403,9 @@
     </div>
   </div>
 </div>
+
+<!-- Register the PWA service worker (relative path so it works under a sub-path like /poluxis/lite/) -->
+<script type="module" src="../registerSW.js"></script>
 
 <script>
 /* ============================================================
@@ -1018,10 +1024,10 @@
     if (!window.fetch || !this.ctx.decodeAudioData) return;
     var self = this;
     var files = [
-      { type: 'tap', url: '/sounds/tap.ogg' },
-      { type: 'touch', url: '/sounds/touch.ogg' },
-      { type: 'slide', url: '/sounds/slide.ogg' },
-      { type: 'ui', url: '/sounds/ui.ogg' }
+      { type: 'tap', url: '../sounds/tap.ogg' },
+      { type: 'touch', url: '../sounds/touch.ogg' },
+      { type: 'slide', url: '../sounds/slide.ogg' },
+      { type: 'ui', url: '../sounds/ui.ogg' }
     ];
     files.forEach(function (item) {
       try {
@@ -3211,7 +3217,7 @@
 
   /* --- Button wiring --- */
   document.getElementById('btn-start').onclick = startGame;
-  document.getElementById('btn-switch-full').onclick = function () { window.location.href = '/'; };
+  document.getElementById('btn-switch-full').onclick = function () { window.location.href = '../index.html'; };
   document.getElementById('btn-pause').onclick = pauseGame;
   document.getElementById('btn-resume').onclick = resumeGame;
   document.getElementById('btn-restart').onclick = function () { pauseScreen.classList.add('hidden'); startGame(); };

@@ -2,7 +2,7 @@ import { BeatmapsManifest, BeatmapItem, SongItem, AlbumItem } from '../types/bea
 import { ChartData } from '../types/game';
 import { DEMO_CHARTS } from './demoCharts';
 
-const BASE_URL = '/beatmaps/';
+const BASE_URL = 'beatmaps/';
 
 const audioCache = new Map<string, AudioBuffer>();
 const chartCache = new Map<string, ChartData>();
