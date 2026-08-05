@@ -60,7 +60,7 @@ const SLIDE_RED = '#ff0000';
 
 const CAMERA_VFOV = 52;
 const FIT_HALF = 2.42;
-const CAMERA_AXIS_Y = -0.18;
+const CAMERA_AXIS_Y = 0;
 function fitCameraDistance(aspect: number): number {
   const tanHalf = Math.tan(THREE.MathUtils.degToRad(CAMERA_VFOV / 2));
   const dVertical = FIT_HALF / tanHalf;

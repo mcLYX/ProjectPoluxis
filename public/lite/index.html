@@ -432,7 +432,7 @@ if (!Object.assign) {
  * ES5 only (Chrome 30+ / IE 11+ compatible). No build step.
  * Sections: 1.Polyfill 2.Constants 3.Core logic 4.LiteAudio
  *           5.Renderer 6.GameLoop 6.5.Input 7.UI 8.Demo charts
- * Mirrors src/components/PolytoneCanvas.tsx + src/audio/AudioManager.ts
+ * Mirrors src/components/GameCanvas.tsx + src/audio/AudioManager.ts
  * + src/utils/{scoring,beatTime,chartParser}.ts in plain ES5.
  * ============================================================ */
 (function () {
@@ -727,7 +727,7 @@ if (!Object.assign) {
     return sign + out;
   }
 
-  /* === 2. Constants (mirrors src/components/PolytoneCanvas.tsx L30-51) === */
+  /* === 2. Constants (mirrors src/components/GameCanvas.tsx L30-51) === */
   var TAP_SIZE = 1.6;
   var TOUCH_SIZE = TAP_SIZE * 0.707;
   var SLIDE_SIZE = TAP_SIZE * 0.707;
@@ -741,7 +741,7 @@ if (!Object.assign) {
   var SLIDE_RED = '#ff0000';
   var CAMERA_VFOV = 52;
   var FIT_HALF = 2.42;
-  var CAMERA_AXIS_Y = -0.18;
+  var CAMERA_AXIS_Y = 0;
   var TAN_HALF_FOV = Math.tan(CAMERA_VFOV * Math.PI / 180 / 2); /* ≈0.4877 */
   var FADE_ZONE = 12;
   /* Judge plane border (mirrors full version tunnel plane corners ±3.8/±2.5).
@@ -1515,9 +1515,21 @@ if (!Object.assign) {
     view.w = w; view.h = h; view.aspect = w / h;
     view.cd = fitCameraDistance(view.aspect);
     view.pxPerUnit = h / (2 * TAN_HALF_FOV * view.cd); /* world→px at z=0 */
-    canvas.width = Math.round(w * view.dpr);
-    canvas.height = Math.round(h * view.dpr);
-    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    /* IE11 canvas backing-store leak: assigning canvas.width/height allocates a
+     * NEW bitmap and discards the old one, but IE11's GPU compositor does NOT
+     * promptly reclaim the discarded bitmap. On IE11 tablets, resize/orientation
+     * changes (and touch-scroll-induced layout jitter) fire repeatedly during
+     * play, so the canvas bitmap gets re-allocated over and over → GPU/compositor
+     * memory grows without bound → gameplay steadily slows down, worse with
+     * multi-touch, and survives a normal page refresh (same GPU process). Only
+     * fix is a new tab / browser restart. Guard the assignment so the bitmap is
+     * only (re)allocated when the pixel size actually changes. */
+    var newW = Math.round(w * view.dpr), newH = Math.round(h * view.dpr);
+    if (canvas.width !== newW || canvas.height !== newH) {
+      canvas.width = newW;
+      canvas.height = newH;
+      ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    }
   }
   window.addEventListener('resize', resize);
 
@@ -1595,7 +1607,7 @@ if (!Object.assign) {
    * constant-width line cannot. Edges are outlined for definition.
    * `brightness` scales fill/stroke opacity: 1.0=normal, ~2.3=held (brighter).
    * Mirrors the full version's placeDiamondPipe diamond cross-section + holding
-   * opacity boost (PolytoneCanvas.tsx L1226-1230).
+   * opacity boost (GameCanvas.tsx L1226-1230).
    *
    * PER-END ALPHA (fixes "pipe vanishes when next node is off-screen"):
    *   alphaA/alphaB are independent. When the next node is beyond the far render
@@ -1706,7 +1718,7 @@ if (!Object.assign) {
     ];
     ctx.save();
     ctx.globalAlpha = 0.18;
-    ctx.strokeStyle = Theme.accent(); /* mirrors gridColor in PolytoneCanvas L671 */
+    ctx.strokeStyle = Theme.accent(); /* mirrors gridColor in GameCanvas L671 */
     ctx.lineWidth = 1;
     for (var i = 0; i < 4; i++) {
       var near = project(corners[i][0], corners[i][1], 0, -1000);
@@ -1740,14 +1752,14 @@ if (!Object.assign) {
     curTime: 0, judged: {}, judgedCount: 0,
     score: 0, combo: 0, maxCombo: 0, counts: { 'S-Perfect': 0, 'Perfect': 0, 'Good': 0, 'Miss': 0 },
     bursts: [], songEnded: false,
-    /* Pointer tracking (mirrors PolytoneCanvas pointersRef). pid → {x,y,down,active}.
+    /* Pointer tracking (mirrors GameCanvas pointersRef). pid → {x,y,down,active}.
      * Used by per-frame processSlide/processTouchNote to detect hover-style hits. */
     pointers: {},
-    /* Slide chain state (mirrors PolytoneCanvas slideStateRef): noteId → SlideRt.
+    /* Slide chain state (mirrors GameCanvas slideStateRef): noteId → SlideRt.
      * Each SlideRt tracks boundPointerIds (multiple) + per-node flags so nodes are judged
      * only when they reach the plane (dt>=0), not early on pointer proximity. */
     slideStates: {},
-    /* Touch note state (mirrors PolytoneCanvas touchTrackRef): noteId →
+    /* Touch note state (mirrors GameCanvas touchTrackRef): noteId →
      * {lastInsideTime, arrivalChecked}. Touch notes are hover-triggered. */
     touchStates: {}
   };
@@ -1822,7 +1834,7 @@ if (!Object.assign) {
    * baseSize = the note's projected size at the judge plane (z=0).
    * scaleTarget = per-judgment growth factor (1.2/1.1/1.05/1.0) from JUDGE_SCALE.
    * Animation: size = baseSize * (1 + (scaleTarget-1) * sin(p*π/2)), 300ms, linear fade.
-   * Mirrors PolytoneCanvas.tsx L1338-1343 exactly. */
+   * Mirrors GameCanvas.tsx L1338-1343 exactly. */
   function spawnBurst(wx, wy, jType, nt) {
     var p = project(wx, wy, 0, -1000);
     if (!p) return;
@@ -1852,7 +1864,7 @@ if (!Object.assign) {
    *   tap → square, touch → circle, slide → diamond.
    * Size: starts at baseSize (note size at judge plane), grows to
    *   baseSize * scaleTarget via sine curve (1.2× max for S-Perfect).
-   *   Mirrors PolytoneCanvas.tsx L1338-1343. */
+   *   Mirrors GameCanvas.tsx L1338-1343. */
   function drawBursts() {
     var t = now();
     var kept = [];
@@ -2087,7 +2099,7 @@ if (!Object.assign) {
     return { first: first, last: lo };
   }
 
-  /* Compute z position using scroll distance integral (mirrors PolytoneCanvas).
+  /* Compute z position using scroll distance integral (mirrors GameCanvas).
    * This ensures note spacing reflects speed changes before the event visually arrives,
    * preventing teleportation artifacts when speed_change events trigger. */
   function noteZPos(noteTimeSec, curTime, baseSpeed) {
@@ -2195,7 +2207,7 @@ if (!Object.assign) {
           var fadeA = Math.max(0, Math.min(1, (rZA - spawnLimit) / FADE_ZONE));
           var fadeB = Math.max(0, Math.min(1, (rZB - spawnLimit) / FADE_ZONE));
 
-          /* --- Slide pipe color/brightness effects (mirrors PolytoneCanvas.tsx
+          /* --- Slide pipe color/brightness effects (mirrors GameCanvas.tsx
            *   L1220-1230) ---
            * 1. Red: destination node has redWarn (pointer left zone) or
            *    missLocked (pointer released early) → pipe turns SLIDE_RED.
@@ -2286,7 +2298,7 @@ if (!Object.assign) {
     drawComboBursts();
     drawTimingBar();
 
-    /* Event text display (mirrors PolytoneCanvas event text overlay) */
+    /* Event text display (mirrors GameCanvas event text overlay) */
     if (game.currentText) {
       ctx.save();
       var fontSize = Math.round(view.h * 0.05);
@@ -2364,7 +2376,7 @@ if (!Object.assign) {
   }
 
   /* === 6.5 Input handling — pointer/touch/mouse unified ===
-   * Mirrors PolytoneCanvas.tsx hit detection. Inverse of project() at z=0:
+   * Mirrors GameCanvas.tsx hit detection. Inverse of project() at z=0:
    *   depth = cd (since z=0)
    *   ndcX = 2*sx/W - 1   →   wx = ndcX * TAN_HALF_FOV * aspect * depth
    *   ndcY = 1 - 2*sy/H   →   wy = ndcY * TAN_HALF_FOV * depth + CAMERA_AXIS_Y
@@ -2454,7 +2466,7 @@ if (!Object.assign) {
     return false;
   }
 
-  /* Slide chain state helpers — mirror PolytoneCanvas slideStateRef. */
+  /* Slide chain state helpers — mirror GameCanvas slideStateRef. */
   function getAllSlideNodes(note) {
     var nodes = [{ x: note.x, y: note.y, timeSec: note.timeSec }];
     if (note.resolvedNodes) for (var s = 0; s < note.resolvedNodes.length; s++) nodes.push(note.resolvedNodes[s]);
@@ -2476,7 +2488,7 @@ if (!Object.assign) {
     return rt;
   }
 
-  /* Per-frame slide judgment — faithful port of PolytoneCanvas.processSlide.
+  /* Per-frame slide judgment — faithful port of GameCanvas.processSlide.
    * Key rule: nodes are judged ONLY when dt>=0 (node reached the plane),
    * never early on proximity alone. This fixes the "early judgment" bug. */
   function processSlide(note, curTime) {
@@ -2640,7 +2652,7 @@ if (!Object.assign) {
     }
   }
 
-  /* Per-frame touch note judgment — faithful port of PolytoneCanvas L1296-1316.
+  /* Per-frame touch note judgment — faithful port of GameCanvas L1296-1316.
    * Touch notes are hover-triggered: any held pointer inside the zone during
    * the timing window counts. No tap/click required. */
   function processTouchNote(note, curTime) {
@@ -2678,7 +2690,7 @@ if (!Object.assign) {
   /* Per-frame judgment pass for ALL notes (slides + touch + tap miss).
    * Replaces the inline AutoPlay/miss logic that was in render(). Tap notes
    * are still hit via findHitTapNote on pointerdown; here we only detect misses. */
-  /* Process events that have occurred up to curTime. Mirrors PolytoneCanvas event loop.
+  /* Process events that have occurred up to curTime. Mirrors GameCanvas event loop.
    * Handles speed_change, text_display, note_color_change. bg_change is stubbed (per user spec). */
   function processEvents(curTime) {
     var evts = game.events;
@@ -2768,9 +2780,11 @@ if (!Object.assign) {
   function flushPointerMoves() {
     for (var pid in pendingMoves) {
       var pm = pendingMoves[pid];
+      /* Convert screen→world ONCE per frame per pointer (not per event). */
+      var w = screenToWorld(pm.sx, pm.sy);
       var ex = game.pointers[pid];
-      if (ex) { ex.x = pm.x; ex.y = pm.y; ex.down = pm.down; ex.active = pm.active; ex.type = pm.type; }
-      else game.pointers[pid] = { x: pm.x, y: pm.y, down: pm.down, active: pm.active, type: pm.type };
+      if (ex) { ex.x = w.x; ex.y = w.y; ex.down = pm.down; ex.active = pm.active; ex.type = pm.type; }
+      else game.pointers[pid] = { x: w.x, y: w.y, down: pm.down, active: pm.active, type: pm.type };
     }
   }
 
@@ -2803,12 +2817,24 @@ if (!Object.assign) {
        * down to one update per pointer per frame, with no precision loss
        * (render reads pointer state once per frame anyway). */
       canvasEl.addEventListener('pointerdown', function (e) {
-        e.preventDefault();
         var p = offset(e);
+        if (e.preventDefault) e.preventDefault();
+        /* setPointerCapture routes ALL subsequent events for this pointer
+         * straight to canvasEl, so IE11's touch-input stack stops hit-testing
+         * every ancestor on every move. This cuts per-move routing cost (a real
+         * multiplier under 2+ fingers on weak Atoms). Also stops pointerleave
+         * firing as the finger slides across child/edge regions. */
+        try { canvasEl.setPointerCapture(e.pointerId); } catch (err) {}
         handleTapInput(p.x, p.y, e.pointerId, e.pointerType || 'mouse');
-        var w = screenToWorld(p.x, p.y);
-        var type = e.pointerType || 'mouse';
-        pendingMoves[e.pointerId] = { x: w.x, y: w.y, down: true, active: true, type: type };
+        /* Store raw SCREEN coords in pendingMoves — defer screenToWorld to the
+         * once-per-frame flush. On IE11 (no coalesced events) multi-touch floods
+         * pointermove at ~100Hz/finger, and screenToWorld costs a matrix multiply
+         * per event. Doing it per-frame-per-pointer instead of per-event is a
+         * large CPU win for 2+ fingers on weak Atoms (the "multi-touch slows
+         * down over time" symptom). */
+        var prev = pendingMoves[e.pointerId];
+        if (prev) { prev.sx = p.x; prev.sy = p.y; prev.down = true; prev.active = true; prev.type = e.pointerType || 'mouse'; }
+        else pendingMoves[e.pointerId] = { sx: p.x, sy: p.y, down: true, active: true, type: e.pointerType || 'mouse' };
       });
       /* Disable the right-click context menu — long-press on IE / touch also
        * fires contextmenu, which would pop a menu mid-play. */
@@ -2818,17 +2844,19 @@ if (!Object.assign) {
       });
       canvasEl.addEventListener('pointermove', function (e) {
         var p = offset(e);
-        var w = screenToWorld(p.x, p.y);
         var prev = pendingMoves[e.pointerId];
-        if (prev) { prev.x = w.x; prev.y = w.y; }       /* mutate in place — no per-event allocation */
+        if (prev) { prev.sx = p.x; prev.sy = p.y; }       /* mutate in place — no per-event allocation, no per-event world transform */
         else {
           var type = e.pointerType || 'mouse';
-          pendingMoves[e.pointerId] = { x: w.x, y: w.y, down: false, active: type === 'mouse', type: type };
+          pendingMoves[e.pointerId] = { sx: p.x, sy: p.y, down: false, active: type === 'mouse', type: type };
         }
       });
       /* Function *expression*, not a declaration: IE11 strict mode forbids
        * function declarations nested inside a block (SCRIPT1044). */
-      var release = function (pid) { delete pendingMoves[pid]; handleReleaseInput(pid); };
+      var release = function (pid) {
+        try { canvasEl.releasePointerCapture(pid); } catch (err) {}
+        delete pendingMoves[pid]; handleReleaseInput(pid);
+      };
       canvasEl.addEventListener('pointerup', function (e) { release(e.pointerId); });
       canvasEl.addEventListener('pointercancel', function (e) { release(e.pointerId); });
       canvasEl.addEventListener('pointerleave', function (e) { release(e.pointerId); });

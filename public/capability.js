@@ -2,8 +2,9 @@
 // loads. Browsers that cannot run the full version (IE11, old Chrome
 // without WebGL, etc.) get a fallback card with a link to the Lite build.
 // Kept ES5-only so it executes even on IE11.
-// NOTE: kept as a separate file (not inlined in index.html) so Vite's HTML
-// asset injection does not corrupt the fallback HTML string.
+// NOTE: referenced from index.html as /capability.js (a public asset, served
+// as-is, NOT bundled as a module) so it can run synchronously before the
+// module and still use document.write() for the fallback.
 (function () {
   var reason = '';
   // 1. ES6 syntax (arrow fn, let/const, class, template strings)
