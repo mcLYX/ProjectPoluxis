@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, BpmPoint } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, BpmPoint, HitRegion } from '../types/game';
 import { evaluateJudgement, calculateNoteScore, JUDGEMENT_COLORS } from '../utils/scoring';
 import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance } from '../utils/beatTime';
 import { globalAudio } from '../audio/AudioManager';
@@ -607,6 +607,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     activeBurstsRef.current = [];
     judgedNotesRef.current.clear();
     songEndedRef.current = false;
+    // Clear per-play overlap-merge hit regions so a replay starts fresh.
+    for (const n of resolvedRef.current) n.extraHitRegions = undefined;
     // Invalidate the previous frame's window so the cleanup pass doesn't try
     // to hide notes from the old chart (their meshes are already cleared above).
     lastWindowRef.current = { firstIdx: 0, lastIdx: 0, notes: null };
@@ -1688,18 +1690,53 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // so judgement and visuals are perfectly synchronized.
     const curTime = globalAudio.getCurrentTime();
     const notes = resolvedRef.current;
-    let best: ResolvedNote | null = null;
+    // 方案二: overlap-aware tap judgment.
+    // A tap is "hittable" if the touch point falls inside its own box OR any of
+    // its merged extra hit regions. Among all hittable same-time taps, pick the
+    // one closest to the touch point (tie-break by id) and consume it; then merge
+    // the consumed tap's own box into every other hittable tap the point overlapped,
+    // so subsequent presses on the overlap can still reach them.
+    const overlapSet: ResolvedNote[] = [];
     for (const n of notes) {
       if (judgedNotesRef.current.has(n.id) || n.type !== 'tap') continue;
       const dt = Math.abs((curTime - n.timeSec) * 1000);
       if (dt >= HIT_WINDOW_MS) continue;
-      const dx = px - n.x; const dy = py - n.y;
-      if (Math.abs(dx) < TAP_HIT_HALF && Math.abs(dy) < TAP_HIT_HALF && (!best || n.timeSec < best.timeSec)) best = n;
+      const inOwn = Math.abs(px - n.x) < TAP_HIT_HALF && Math.abs(py - n.y) < TAP_HIT_HALF;
+      const inExtra = (n.extraHitRegions ?? []).some(
+        (r) => Math.abs(px - r.x) < r.half && Math.abs(py - r.y) < r.half
+      );
+      if (inOwn || inExtra) overlapSet.push(n);
+    }
+    let best: ResolvedNote | null = null;
+    let bestDist = Infinity;
+    // Closer to touch point wins; on exact tie pick the EARLIER note (smaller
+    // timeSec). We must NOT compare ids: chart ids are arbitrary strings the
+    // author can reorder or make non-numeric (e.g. "note-10" < "note-9" as a
+    // string), so use the numeric timeSec instead — stable and id-independent.
+    for (const n of overlapSet) {
+      const d = Math.hypot(px - n.x, py - n.y);
+      if (d < bestDist || (d === bestDist && best !== null && n.timeSec < best.timeSec)) {
+        best = n;
+        bestDist = d;
+      }
     }
     if (best) {
       const dt = (curTime - best.timeSec) * 1000;
       const j = evaluateJudgement(dt);
-      if (j) commitJudgement(best, j, dt);
+      if (j) {
+        commitJudgement(best, j, dt);
+        // Merge the consumed tap's own box ONLY into other taps at the SAME
+        // timeSec (方案二). Never cross time windows: a tap at a different beat
+        // must keep its own hitbox, otherwise its hit area would be polluted and
+        // trigger false/early hits later (e.g. note-9 / note-10 same position).
+        const merged: HitRegion = { x: best.x, y: best.y, half: TAP_HIT_HALF };
+        for (const other of overlapSet) {
+          if (other === best || other.timeSec !== best.timeSec) continue;
+          const regions = other.extraHitRegions ?? (other.extraHitRegions = []);
+          const dup = regions.some((r) => r.x === merged.x && r.y === merged.y && r.half === merged.half);
+          if (!dup) regions.push(merged);
+        }
+      }
     }
   };
 

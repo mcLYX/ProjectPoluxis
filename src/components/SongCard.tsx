@@ -4,6 +4,7 @@ import { resolveBeatmapUrl, isFallbackSong } from '../data/beatmapLoader';
 import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft } from 'lucide-react';
 import { getHighScore, HighScoreEntry, ClearBadge } from '../utils/scoreStore';
 import { GameStats } from '../types/game';
+import { useI18n } from '../i18n';
 
 /** Play-result payload shown on the enlarged "result" variant of the card. */
 export interface SongCardResultData {
@@ -104,6 +105,7 @@ export const SongCard: React.FC<SongCardProps> = ({
   className = '',
   centerWhenExpanded = false,
 }) => {
+  const { t } = useI18n();
   const [coverError, setCoverError] = useState(false);
   const [showDiffMenu, setShowDiffMenu] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -296,7 +298,7 @@ export const SongCard: React.FC<SongCardProps> = ({
             <div className="flex items-center justify-center gap-1.5 text-white mb-1 short:mb-0.5">
               <Award size={13} />
               <span className="text-[10px] font-bold font-orbitron tracking-[0.3em] uppercase">
-                Track Cleared
+                {t('songcard.trackCleared')}
               </span>
             </div>
 
@@ -322,10 +324,10 @@ export const SongCard: React.FC<SongCardProps> = ({
             {(resultData.isNewHighScore || resultData.isNewBadge) && (
               <div className="text-amber-300 text-[10px] font-bold font-orbitron tracking-widest animate-pulse mb-0.5">
                 {resultData.isNewHighScore && resultData.isNewBadge
-                  ? '★ NEW RECORD & NEW BADGE ★'
+                  ? t('songcard.newRecordAndBadge')
                   : resultData.isNewHighScore
-                  ? '★ NEW RECORD ★'
-                  : '★ NEW BADGE ★'}
+                  ? t('songcard.newRecord')
+                  : t('songcard.newBadge')}
               </div>
             )}
 
@@ -372,11 +374,11 @@ export const SongCard: React.FC<SongCardProps> = ({
         {isLoading ? (
           <div className="px-5 py-2.5 rounded-xl bg-black/40 backdrop-blur-sm border border-white/20 flex items-center gap-2 text-white/60">
             <Loader2 size={16} className="animate-spin" />
-            <span className="text-sm font-bold">加载中</span>
+            <span className="text-sm font-bold">{t('songcard.loading')}</span>
           </div>
         ) : !available ? (
           <div className="px-5 py-2.5 rounded-xl bg-white/[0.05] backdrop-blur-md border border-white/10 text-white/40 text-sm font-bold cursor-not-allowed">
-            To be continued...
+            {t('songcard.toBeContinued')}
           </div>
         ) : item.type === 'album' ? (
           <button
@@ -385,7 +387,7 @@ export const SongCard: React.FC<SongCardProps> = ({
             className="px-5 py-2.5 rounded-xl glass-btn-primary font-bold text-sm hover:scale-105 active:scale-95 transition flex items-center gap-1.5"
             style={{ ['--hud-accent' as any]: '#10b981' }}
           >
-            Enter
+            {t('songcard.enter')}
             <ChevronRight size={16} />
           </button>
         ) : (
@@ -400,7 +402,7 @@ export const SongCard: React.FC<SongCardProps> = ({
                 className="px-4 py-2.5 rounded-xl bg-black/40 backdrop-blur-sm border border-white/25 text-white/85 hover:bg-white/10 hover:scale-105 active:scale-95 font-bold text-sm transition flex items-center gap-1.5"
               >
                 <ArrowLeft size={14} />
-                返回
+                {t('songcard.back')}
               </button>
             )}
             <button
@@ -409,7 +411,7 @@ export const SongCard: React.FC<SongCardProps> = ({
               className="px-5 py-2.5 rounded-xl glass-btn-primary font-bold text-sm hover:scale-105 active:scale-95 transition flex items-center gap-1.5"
             >
               <Play size={14} className="fill-white" />
-              {inResult ? '重试' : 'Start'}
+              {inResult ? t('songcard.retry') : t('songcard.start')}
             </button>
           </div>
         )}
@@ -505,7 +507,7 @@ export const SongCard: React.FC<SongCardProps> = ({
       {/* Album-type badge (collapsed: small tag at top) */}
       {item.type === 'album' && !isExpanded && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-black/50 backdrop-blur-sm border border-white/20 text-[9px] font-bold text-white/70 font-orbitron tracking-wider">
-          ALBUM
+          {t('songcard.album')}
         </div>
       )}
 
@@ -519,7 +521,7 @@ export const SongCard: React.FC<SongCardProps> = ({
           `}
         >
           <div className="text-white/60 text-xs font-bold font-orbitron tracking-wider">
-            {item.songs.length} {item.songs.length === 1 ? 'TRACK' : 'TRACKS'}
+            {item.songs.length} {item.songs.length === 1 ? t('songcard.track') : t('songcard.tracks')}
           </div>
         </div>
       )}

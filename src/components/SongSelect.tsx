@@ -11,6 +11,7 @@ import {
   resolveBeatmapUrl
 } from '../data/beatmapLoader';
 import { globalAudio } from '../audio/AudioManager';
+import { useI18n } from '../i18n';
 import { ArrowLeft, Loader2, BookOpen, Sliders, FileCode, Upload, Smartphone, Tv } from 'lucide-react';
 
 /** Default accent color used when a beatmap item defines none. */
@@ -81,6 +82,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   onStartGame,
   onStateChange,
 }) => {
+  const { t } = useI18n();
   const [manifest, setManifest] = useState<BeatmapsManifest | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -479,25 +481,25 @@ export const SongSelect: React.FC<SongSelectProps> = ({
             onClick={onOpenDocs}
             className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
           >
-            <BookOpen size={15} /> 说明
+            <BookOpen size={15} /> {t('songselect.doc')}
           </button>
           <button
             onClick={onOpenFileManager}
             className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
           >
-            <Upload size={15} /> 上传
+            <Upload size={15} /> {t('songselect.upload')}
           </button>
           <button
             onClick={onOpenEditor}
             className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
           >
-            <FileCode size={15} /> 编辑
+            <FileCode size={15} /> {t('songselect.edit')}
           </button>
           <button
             onClick={onSwitchLite}
             className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
           >
-            <Smartphone size={14} /> Lite 版
+            <Smartphone size={14} /> {t('songselect.lite')}
           </button>
         </div>
       </div>
@@ -566,7 +568,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           if (renderList.length === 0 && !result) {
             return (
               <div className="w-full flex justify-center text-white/55 text-sm">
-                {loadError ? `加载失败: ${loadError}` : '暂无曲目'}
+                {loadError ? t('songselect.loadError', { err: loadError }) : t('songselect.empty')}
               </div>
             );
           }
@@ -650,13 +652,13 @@ export const SongSelect: React.FC<SongSelectProps> = ({
             onClick={onOpenSettings}
             className="glass-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold"
           >
-            <Sliders size={14} /> 设置
+            <Sliders size={14} /> {t('songselect.settings')}
           </button>
         </div>
 
         {expandedId && (
           <div className="text-white/45 text-xs font-bold font-orbitron tracking-wider">
-            点击卡片外区域收起
+            {t('songselect.collapseHint')}
           </div>
         )}
       </div>

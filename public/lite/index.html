@@ -297,7 +297,7 @@
     <div class="hud-acc" id="hud-acc">100.00%</div>
     <div class="hud-rank" id="hud-rank">EX+</div>
     <div class="hud-pause-btn">
-      <button class="pause-btn" id="btn-pause">暂停</button>
+      <button class="pause-btn" id="btn-pause" data-i18n="pause">暂停</button>
     </div>
     <div class="hud-progress"><div class="hud-progress-fill" id="hud-progress-fill"></div></div>
   </div>
@@ -310,10 +310,10 @@
       <div class="chart-list" id="chart-list"></div>
       <div class="menu-footer">
         <div class="toolbar">
-          <label><input type="checkbox" id="autoplay-toggle"> Auto-Play</label>
-          <button class="btn-tool" id="btn-settings">设置</button>
-          <button class="btn-tool" id="btn-editor">导入和编辑</button>
-          <button class="btn-tool" id="btn-switch-full">切换完整版</button>
+          <label><input type="checkbox" id="autoplay-toggle"> <span data-i18n="autoplay">Auto-Play</span></label>
+          <button class="btn-tool" id="btn-settings" data-i18n="settings">设置</button>
+          <button class="btn-tool" id="btn-editor" data-i18n="editor">导入和编辑</button>
+          <button class="btn-tool" id="btn-switch-full" data-i18n="switchFull">切换完整版</button>
         </div>
         <button class="btn-start" id="btn-start">START GAME</button>
       </div>
@@ -321,11 +321,11 @@
     <!-- Pause -->
     <div class="screen hidden" id="pause-screen">
       <div class="pause-card">
-        <h2 class="pause-title">已暂停</h2>
+        <h2 class="pause-title" data-i18n="paused">已暂停</h2>
         <div class="pause-actions">
-          <button class="btn-start" id="btn-resume">继续</button>
-          <button class="btn-tool" id="btn-restart">重新开始</button>
-          <button class="btn-tool" id="btn-pause-menu">返回菜单</button>
+          <button class="btn-start" id="btn-resume" data-i18n="resume">继续</button>
+          <button class="btn-tool" id="btn-restart" data-i18n="restart">重新开始</button>
+          <button class="btn-tool" id="btn-pause-menu" data-i18n="backMenu">返回菜单</button>
         </div>
       </div>
     </div>
@@ -337,52 +337,60 @@
   <!-- Settings Modal -->
   <div class="modal-backdrop" id="settings-modal">
     <div class="modal-card">
-      <h3 class="modal-title">设置</h3>
+      <h3 class="modal-title" data-i18n="setTitle">设置</h3>
       <div class="modal-row">
-        <label>下落速度</label>
+        <label data-i18n="setSpeed">下落速度</label>
         <input type="range" id="set-speed" min="0.5" max="4" step="0.1">
         <span class="val" id="val-speed">1.0x</span>
       </div>
       <div class="modal-row">
-        <label>音符缩放</label>
+        <label data-i18n="setSize">音符缩放</label>
         <input type="range" id="set-size" min="0.6" max="1" step="0.05">
         <span class="val" id="val-size">1.0x</span>
       </div>
       <div class="modal-row">
-        <label>渲染距离</label>
+        <label data-i18n="setRender">渲染距离</label>
         <input type="range" id="set-render" min="20" max="120" step="5">
         <span class="val" id="val-render">70</span>
       </div>
       <div class="modal-row">
-        <label>音频偏移</label>
+        <label data-i18n="setOffset">音频偏移</label>
         <input type="range" id="set-offset" min="-600" max="600" step="5">
         <span class="val" id="val-offset">0ms</span>
       </div>
       <div class="modal-row">
-        <label>判定框浮现</label>
+        <label data-i18n="setProj">判定框浮现</label>
         <input type="range" id="set-proj" min="0" max="1000" step="50">
         <span class="val" id="val-proj">500ms</span>
       </div>
       <div class="modal-row">
-        <label>音乐音量</label>
+        <label data-i18n="setMusic">音乐音量</label>
         <input type="range" id="set-music" min="0" max="1" step="0.01">
         <span class="val" id="val-music">80%</span>
       </div>
       <div class="modal-row">
-        <label>音效音量</label>
+        <label data-i18n="setSfx">音效音量</label>
         <input type="range" id="set-sfx" min="0" max="1" step="0.01">
         <span class="val" id="val-sfx">90%</span>
       </div>
+      <div class="modal-row" style="align-items:center;">
+        <label data-i18n="lang" style="margin-right:8px;">语言</label>
+        <div id="lang-switch" style="display:flex;gap:6px;">
+          <button type="button" data-lang="zh">中文</button>
+          <button type="button" data-lang="en">English</button>
+          <button type="button" data-lang="ja">日本語</button>
+        </div>
+      </div>
       <div class="modal-actions">
-        <button class="btn-tool" id="btn-settings-close">关闭</button>
+        <button class="btn-tool" id="btn-settings-close" data-i18n="setClose">关闭</button>
       </div>
     </div>
   </div>
   <!-- Chart Editor Modal -->
   <div class="modal-backdrop" id="editor-modal">
     <div class="modal-card">
-      <h3 class="modal-title">导入和编辑</h3>
-      <p class="editor-hint">
+      <h3 class="modal-title" data-i18n="edTitle">导入和编辑</h3>
+      <p class="editor-hint" data-i18n="edHint">
         粘贴 JSON 格式的谱面。结构：<code>{ metadata: {...}, notes: [...] }</code>。
         notes 支持 type: <code>tap</code> / <code>touch</code> / <code>slide</code>（slide 带 nodes 数组）。
       </p>
@@ -391,14 +399,14 @@
       <div class="modal-actions">
         <label class="file-input-wrap">
           <input type="file" id="editor-file" accept=".json,application/json">
-          <span class="upload-btn">导入谱面</span>
+          <span class="upload-btn" data-i18n="edImportChart">导入谱面</span>
         </label>
         <label class="file-input-wrap">
           <input type="file" id="editor-audio-file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac">
-          <span class="upload-btn" id="editor-audio-label">导入音频</span>
+          <span class="upload-btn" id="editor-audio-label" data-i18n="edImportAudio">导入音频</span>
         </label>
-        <button class="btn-tool" id="btn-editor-load">加载谱面</button>
-        <button class="btn-tool" id="btn-editor-close">关闭</button>
+        <button class="btn-tool" id="btn-editor-load" data-i18n="edLoad">加载谱面</button>
+        <button class="btn-tool" id="btn-editor-close" data-i18n="edClose">关闭</button>
       </div>
     </div>
   </div>
@@ -408,6 +416,17 @@
 <script type="module" src="../registerSW.js"></script>
 
 <script>
+/* ES5 polyfills MUST be defined before any usage (e.g. the I18N
+ * Object.assign calls below). IE lacks Object.assign entirely. */
+if (!Object.assign) {
+  Object.assign = function (target) {
+    for (var i = 1; i < arguments.length; i++) {
+      var src = arguments[i];
+      if (src) for (var k in src) if (Object.prototype.hasOwnProperty.call(src, k)) target[k] = src[k];
+    }
+    return target;
+  };
+}
 /* ============================================================
  * Poluxis Lite — lightweight Canvas-2D build
  * ES5 only (Chrome 30+ / IE 11+ compatible). No build step.
@@ -418,6 +437,102 @@
  * ============================================================ */
 (function () {
   'use strict';
+
+  /* === 0.5 i18n (self-contained; Lite is a standalone build) === */
+  var I18N = {
+    zh: {
+      pause: '暂停', paused: '已暂停', resume: '继续', restart: '重新开始', backMenu: '返回菜单',
+      settings: '设置', editor: '导入和编辑', switchFull: '切换完整版',
+      autoplay: 'Auto-Play',
+      setTitle: '设置', setSpeed: '下落速度', setSize: '音符缩放', setRender: '渲染距离',
+      setOffset: '音频偏移', setProj: '判定框浮现', setMusic: '音乐音量', setSfx: '音效音量', setClose: '关闭',
+      edTitle: '导入和编辑', edHint: '粘贴 JSON 格式的谱面。结构：{ metadata: {...}, notes: [...] }。notes 支持 type: tap / touch / slide（slide 带 nodes 数组）。',
+      edImportChart: '导入谱面', edImportAudio: '导入音频', edLoad: '加载谱面', edClose: '关闭',
+      resultAcc: 'Accuracy', resultRetry: '重试', resultBack: '返回菜单',
+      chartErrFormat: '谱面格式错误', chartLoadFail: '加载谱面失败: ', loading: '加载中...',
+      backUp: '← 返回上一级', backAlbum: '返回专辑列表', diff: '难度 ',
+      errImport: '不支持文件导入', errAudioDecode: '音频解码失败（请尝试MP3格式）',
+      errRead: '读取失败', errDecode: '解码失败', errAudioLoad: '音频加载失败', errNet: '网络错误',
+      lang: '语言', songsSuffix: '首'
+    },
+    en: {
+      pause: 'Pause', paused: 'Paused', resume: 'Resume', restart: 'Restart', backMenu: 'Back to Menu',
+      settings: 'Settings', editor: 'Import & Edit', switchFull: 'Switch to Full',
+      autoplay: 'Auto-Play',
+      setTitle: 'Settings', setSpeed: 'Scroll Speed', setSize: 'Note Scale', setRender: 'Render Distance',
+      setOffset: 'Audio Offset', setProj: 'Hitbox Lead', setMusic: 'Music Volume', setSfx: 'SFX Volume', setClose: 'Close',
+      edTitle: 'Import & Edit', edHint: 'Paste a JSON chart. Structure: { metadata: {...}, notes: [...] }. notes support type: tap / touch / slide (slide carries a nodes array).',
+      edImportChart: 'Import Chart', edImportAudio: 'Import Audio', edLoad: 'Load Chart', edClose: 'Close',
+      resultAcc: 'Accuracy', resultRetry: 'Retry', resultBack: 'Back to Menu',
+      chartErrFormat: 'Chart format error', chartLoadFail: 'Chart load failed: ', loading: 'Loading...',
+      backUp: '← Back', backAlbum: 'Back to album list', diff: 'Diff ',
+      errImport: 'File import unsupported', errAudioDecode: 'Audio decode failed (try MP3)',
+      errRead: 'Read failed', errDecode: 'Decode failed', errAudioLoad: 'Audio load failed', errNet: 'Network error',
+      lang: 'Language', songsSuffix: ' songs'
+    },
+    ja: {
+      pause: '一時停止', paused: '停止中', resume: '再開', restart: '最初から', backMenu: 'メニューへ戻る',
+      settings: '設定', editor: 'インポートと編集', switchFull: '完全版へ',
+      autoplay: 'Auto-Play',
+      setTitle: '設定', setSpeed: '落下速度', setSize: 'ノーツ倍率', setRender: '描画距離',
+      setOffset: '音声オフセット', setProj: '判定枠リード', setMusic: '音楽音量', setSfx: '効果音量', setClose: '閉じる',
+      edTitle: 'インポートと編集', edHint: 'JSON 譜面を貼り付け。構造: { metadata: {...}, notes: [...] }。notes は type: tap / touch / slide に対応（slide は nodes 配列を持つ）。',
+      edImportChart: '譜面をインポート', edImportAudio: '音声をインポート', edLoad: '譜面を読込', edClose: '閉じる',
+      resultAcc: '精度', resultRetry: 'リトライ', resultBack: 'メニューへ戻る',
+      chartErrFormat: '譜面形式エラー', chartLoadFail: '譜面読込失敗: ', loading: '読込中...',
+      backUp: '← 上へ戻る', backAlbum: 'アルバム一覧へ', diff: '難易度 ',
+      errImport: 'ファイル入力非対応', errAudioDecode: '音声デコード失敗（MP3を試してください）',
+      errRead: '読取り失敗', errDecode: 'デコード失敗', errAudioLoad: '音声読込失敗', errNet: 'ネットワークエラー',
+      lang: '言語', songsSuffix: '曲'
+    }
+  };
+  var LANG_KEY = 'poluxis-lite-lang';
+  function getLang() {
+    try { var s = localStorage.getItem(LANG_KEY); if (s === 'zh' || s === 'en' || s === 'ja') return s; } catch (e) {}
+    var nav = (navigator.language || 'zh').toLowerCase();
+    if (nav.indexOf('ja') === 0) return 'ja';
+    if (nav.indexOf('en') === 0) return 'en';
+    return 'zh';
+  }
+  function setLang(l) { try { localStorage.setItem(LANG_KEY, l); } catch (e) {} }
+  function L(key, vars) {
+    var dict = I18N[getLang()] || I18N.zh;
+    var str = dict[key] != null ? dict[key] : (I18N.en[key] != null ? I18N.en[key] : key);
+    if (vars) { for (var k in vars) { if (vars.hasOwnProperty(k)) { str = str.split('{' + k + '}').join(String(vars[k])); } } }
+    return str;
+  }
+  function applyI18n() {
+    var nodes = document.querySelectorAll('[data-i18n]');
+    for (var i = 0; i < nodes.length; i++) {
+      var key = nodes[i].getAttribute('data-i18n');
+      nodes[i].textContent = L(key);
+    }
+  }
+
+  I18N.zh = Object.assign(I18N.zh, {
+    errRootObj: '根对象必须为对象', errNoMeta: '缺少 metadata', errBpm: 'metadata.bpm 必须为正数',
+    errTitle: 'metadata.title 不能为空', errNotesArr: 'notes 必须为数组',
+    errNoteBeat: 'note #{i} 缺少 beat', errNoteXY: 'note #{i} 缺少 x/y',
+    errNoteType: 'note #{i} type 非法', errSlideNodes: 'slide note #{i} 缺少 nodes',
+    errJsonParse: 'JSON 解析失败: ', errLoaded: '已加载: ', errReadFile: '已读取 ',
+    errDecoding: '解码中…', errAudioLoaded: '音频已加载(', errImportFail: '导入失败', errClickLoad: '，点击「加载谱面」生效'
+  });
+  I18N.en = Object.assign(I18N.en, {
+    errRootObj: 'Root object must be an object', errNoMeta: 'Missing metadata', errBpm: 'metadata.bpm must be positive',
+    errTitle: 'metadata.title must not be empty', errNotesArr: 'notes must be an array',
+    errNoteBeat: 'note #{i} missing beat', errNoteXY: 'note #{i} missing x/y',
+    errNoteType: 'note #{i} has invalid type', errSlideNodes: 'slide note #{i} missing nodes',
+    errJsonParse: 'JSON parse failed: ', errLoaded: 'Loaded: ', errReadFile: 'Read ',
+    errDecoding: 'Decoding…', errAudioLoaded: 'Audio loaded (', errImportFail: 'Import failed', errClickLoad: ', click "Load Chart" to apply'
+  });
+  I18N.ja = Object.assign(I18N.ja, {
+    errRootObj: 'ルートオブジェクトはオブジェクトである必要があります', errNoMeta: 'metadata がありません', errBpm: 'metadata.bpm は正の数である必要があります',
+    errTitle: 'metadata.title は空にできません', errNotesArr: 'notes は配列である必要があります',
+    errNoteBeat: 'note #{i} に beat がありません', errNoteXY: 'note #{i} に x/y がありません',
+    errNoteType: 'note #{i} の type が不正です', errSlideNodes: 'slide note #{i} に nodes がありません',
+    errJsonParse: 'JSON 解析失敗: ', errLoaded: '読込完了: ', errReadFile: '読取り完了 ',
+    errDecoding: 'デコード中…', errAudioLoaded: '音声読込完了(', errImportFail: 'インポート失敗', errClickLoad: '、「読込」をクリックして適用'
+  });
 
   /* === 1. Polyfill (only what old browsers lack) === */
 
@@ -579,13 +694,11 @@
     || window.webkitCancelAnimationFrame
     || window.mozCancelAnimationFrame
     || function (id) { window.clearTimeout(id); };
-  if (!Object.assign) {
-    Object.assign = function (target) {
-      for (var i = 1; i < arguments.length; i++) {
-        var src = arguments[i];
-        if (src) for (var k in src) if (Object.prototype.hasOwnProperty.call(src, k)) target[k] = src[k];
-      }
-      return target;
+  if (!Math.hypot) {
+    Math.hypot = function () {
+      var sum = 0;
+      for (var i = 0; i < arguments.length; i++) sum += arguments[i] * arguments[i];
+      return Math.sqrt(sum);
     };
   }
   if (!Array.isArray) {
@@ -1047,24 +1160,39 @@
   LiteAudio.prototype.playHitSound = function (type) {
     if (this.useHtml5) return; /* no hit sounds in HTML5 mode (no Web Audio API) */
     if (!this.ctx || !this.sfxGain || this.disabled) return;
+    var cleanup = function (node) { try { if (node) node.disconnect(); } catch (e) {} };
     var buf = this.hitSoundBuffers[type];
     if (buf) {
+      /* IMPORTANT: AudioBufferSourceNode is one-shot. Without an onended
+       * disconnect the node stays referenced by sfxGain and is never GC'd on
+       * IE11/EdgeHTML → nodes accumulate with every hit (multi-touch makes it
+       * worse) and the tab eventually chokes. Release it once it finishes. */
       var src = this.ctx.createBufferSource(); src.buffer = buf;
-      src.connect(this.sfxGain); src.start(); return;
+      src.connect(this.sfxGain);
+      src.onended = function () { cleanup(src); };
+      src.start();
+      return;
     }
     /* Oscillator fallback (pre-render not ready / failed). Per note type. */
     var t = this.ctx.currentTime, o, g, f;
+    var stopCleanup = function (nodes) {
+      for (var ni = 0; ni < nodes.length; ni++) {
+        try { if (nodes[ni]) nodes[ni].disconnect(); } catch (e) {}
+      }
+    };
     if (type === 'touch') {
       o = this.ctx.createOscillator(); g = this.ctx.createGain();
       o.type = 'sine'; o.frequency.setValueAtTime(740, t); o.frequency.exponentialRampToValueAtTime(1480, t + 0.1);
       g.gain.setValueAtTime(0.6, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
       o.connect(g); g.connect(this.sfxGain); o.start(t); o.stop(t + 0.14);
+      o.onended = function () { stopCleanup([o, g]); };
     } else if (type === 'slide') {
       o = this.ctx.createOscillator(); g = this.ctx.createGain(); f = this.ctx.createBiquadFilter();
       f.type = 'lowpass'; f.frequency.setValueAtTime(2200, t); f.frequency.linearRampToValueAtTime(800, t + 0.16);
       o.type = 'sawtooth'; o.frequency.setValueAtTime(480, t); o.frequency.exponentialRampToValueAtTime(880, t + 0.16);
       g.gain.setValueAtTime(0.32, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
       o.connect(f); f.connect(g); g.connect(this.sfxGain); o.start(t); o.stop(t + 0.16);
+      o.onended = function () { stopCleanup([o, f, g]); };
     } else { /* tap (default) */
       o = this.ctx.createOscillator(); var o2 = this.ctx.createOscillator(); g = this.ctx.createGain();
       o.type = 'triangle'; o.frequency.setValueAtTime(880, t); o.frequency.exponentialRampToValueAtTime(1760, t + 0.08);
@@ -1072,6 +1200,7 @@
       g.gain.setValueAtTime(0.7, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
       o.connect(g); o2.connect(g); g.connect(this.sfxGain);
       o.start(t); o2.start(t); o.stop(t + 0.18); o2.stop(t + 0.18);
+      o.onended = function () { stopCleanup([o, o2, g]); };
     }
   };
   /* Play the UI click sound (ui.ogg when shipped, synthesized plink otherwise).
@@ -1084,7 +1213,9 @@
     var buf = this.hitSoundBuffers['ui'];
     if (buf) {
       var src = this.ctx.createBufferSource(); src.buffer = buf;
-      src.connect(this.sfxGain); src.start(); return;
+      src.connect(this.sfxGain);
+      src.onended = function () { try { src.disconnect(); } catch (e) {} };
+      src.start(); return;
     }
     var t = this.ctx.currentTime;
     var o1 = this.ctx.createOscillator(), o2 = this.ctx.createOscillator(), g = this.ctx.createGain();
@@ -1093,6 +1224,7 @@
     g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
     o1.connect(g); o2.connect(g); g.connect(this.sfxGain);
     o1.start(t); o2.start(t); o1.stop(t + 0.06); o2.stop(t + 0.06);
+    o1.onended = function () { try { o1.disconnect(); o2.disconnect(); g.disconnect(); } catch (e) {} };
   };
   LiteAudio.prototype.setOffset = function (sec) { this.userOffset = sec; };
   /* Load an uploaded audio file (mp3/wav/ogg). Mirrors AudioManager.loadAudioFile.
@@ -1110,7 +1242,7 @@
     if (this.useHtml5) {
       var createURL = (window.URL && window.URL.createObjectURL)
         || (window.webkitURL && window.webkitURL.createObjectURL);
-      if (!createURL) { if (onError) onError(new Error('不支持文件导入')); return; }
+      if (!createURL) { if (onError) onError(new Error(L('errImport'))); return; }
       var url = createURL(file);
       var audioEl = document.createElement('audio');
       audioEl.src = url;
@@ -1128,19 +1260,19 @@
       audioEl.addEventListener('canplay', onReady);
       audioEl.addEventListener('error', function () {
         if (done) return; done = true;
-        if (onError) onError(new Error('音频解码失败（请尝试MP3格式）'));
+        if (onError) onError(new Error(L('errAudioDecode')));
       });
       return;
     }
     if (!this.ctx) { if (onError) onError(new Error('AudioContext unavailable')); return; }
     /* Shared decode function — works for both FileReader and XHR paths. */
     var decodeBuffer = function (arrayBuffer) {
-      if (!arrayBuffer) { if (onError) onError(new Error('读取失败')); return; }
+      if (!arrayBuffer) { if (onError) onError(new Error(L('errRead'))); return; }
       var success = function (buffer) {
         self.bgmBuffer = buffer; self.hasUploadedAudio = true; self.forceSynth = false;
         if (onLoad) onLoad(buffer);
       };
-      var failure = function (err) { if (onError) onError(err || new Error('解码失败')); };
+      var failure = function (err) { if (onError) onError(err || new Error(L('errDecode'))); };
       try {
         /* IE11-style callback signature: decodeAudioData(buf, successCb, failCb).
          * Modern signature returns a Promise — handle both. */
@@ -1152,19 +1284,19 @@
     var reader = new FileReader();
     if (typeof reader.readAsArrayBuffer === 'function') {
       reader.onload = function () { decodeBuffer(reader.result); };
-      reader.onerror = function () { if (onError) onError(new Error('文件读取失败')); };
+      reader.onerror = function () { if (onError) onError(new Error(L('errRead'))); };
       reader.readAsArrayBuffer(file);
     } else {
       /* Path 3: XHR + blob URL fallback (old Safari without readAsArrayBuffer) */
       var createURL2 = (window.URL && window.URL.createObjectURL)
         || (window.webkitURL && window.webkitURL.createObjectURL);
-      if (!createURL2) { if (onError) onError(new Error('不支持文件导入')); return; }
+      if (!createURL2) { if (onError) onError(new Error(L('errImport'))); return; }
       var url2 = createURL2(file);
       var xhr = new XMLHttpRequest();
       xhr.open('GET', url2, true);
       xhr.responseType = 'arraybuffer';
       xhr.onload = function () { decodeBuffer(xhr.response); };
-      xhr.onerror = function () { if (onError) onError(new Error('文件读取失败')); };
+      xhr.onerror = function () { if (onError) onError(new Error(L('errRead'))); };
       xhr.send();
     }
   };
@@ -1189,7 +1321,7 @@
       audioEl.addEventListener('canplay', onReady);
       audioEl.addEventListener('error', function () {
         if (done) return; done = true;
-        if (onError) onError(new Error('音频加载失败'));
+        if (onError) onError(new Error(L('errAudioLoad')));
       });
       return;
     }
@@ -1206,13 +1338,13 @@
         self.bgmBuffer = buffer; self.hasUploadedAudio = true; self.forceSynth = false;
         if (onLoad) onLoad(buffer);
       };
-      var failure = function (err) { if (onError) onError(err || new Error('解码失败')); };
+      var failure = function (err) { if (onError) onError(err || new Error(L('errDecode'))); };
       try {
         var r = self.ctx.decodeAudioData(xhr.response, success, failure);
         if (r && typeof r.then === 'function') r.then(success, failure);
       } catch (e) { if (onError) onError(e); }
     };
-    xhr.onerror = function () { if (onError) onError(new Error('网络错误')); };
+    xhr.onerror = function () { if (onError) onError(new Error(L('errNet'))); };
     xhr.send();
   };
 
@@ -2251,9 +2383,16 @@
 
   /* Find the best TAP note to hit at (wx,wy) near curTime (pointerdown only).
    * Touch notes are hover-triggered and handled per-frame by processTouchNote,
-   * NOT by tap. Returns the note object or null. Picks earliest in time. */
+   * NOT by tap. Returns the note object or null.
+   *
+   * Overlap-merge judgment (mirrors full version 方案二): a tap is hittable if the
+   * touch point is inside its own TAP_HIT_HALF box OR any merged extraHitRegions.
+   * Among all hittable same-time taps, pick the closest to the touch point
+   * (tie-break by id). After consuming `best`, merge its own box into the other
+   * hittable same-time taps so subsequent presses on the overlap can still reach
+   * them. Does NOT cross into later time windows. */
   function findHitTapNote(wx, wy, curTime) {
-    var best = null;
+    var overlapSet = [];
     var win = findWindow(curTime, -game.renderDist);
     for (var i = win.first; i < win.last; i++) {
       var n = game.notes[i];
@@ -2261,8 +2400,42 @@
       if (game.judged[n.id]) continue;
       var dtMs = Math.abs((curTime - n.timeSec) * 1000);
       if (dtMs > HIT_WINDOW_MS) continue;
-      var dx = n.x - wx, dy = n.y - wy;
-      if (Math.abs(dx) < TAP_HIT_HALF && Math.abs(dy) < TAP_HIT_HALF && (!best || n.timeSec < best.timeSec)) best = n;
+      var inOwn = Math.abs(n.x - wx) < TAP_HIT_HALF && Math.abs(n.y - wy) < TAP_HIT_HALF;
+      var extra = n.extraHitRegions;
+      var inExtra = false;
+      if (extra) {
+        for (var e = 0; e < extra.length; e++) {
+          if (Math.abs(extra[e].x - wx) < extra[e].half && Math.abs(extra[e].y - wy) < extra[e].half) { inExtra = true; break; }
+        }
+      }
+      if (inOwn || inExtra) overlapSet.push(n);
+    }
+    var best = null, bestDist = Infinity;
+    // Closer wins; on exact tie pick EARLIER note (smaller timeSec). Do NOT compare
+    // ids: chart ids are arbitrary strings the author can reorder or make
+    // non-numeric, so use numeric timeSec instead (stable, id-independent).
+    for (var k = 0; k < overlapSet.length; k++) {
+      var m = overlapSet[k];
+      var dxm = m.x - wx, dym = m.y - wy;
+      var d = Math.sqrt(dxm * dxm + dym * dym);
+      if (d < bestDist || (d === bestDist && best !== null && m.timeSec < best.timeSec)) { best = m; bestDist = d; }
+    }
+    if (best) {
+      var merged = { x: best.x, y: best.y, half: TAP_HIT_HALF };
+      for (var j = 0; j < overlapSet.length; j++) {
+        var other = overlapSet[j];
+        // 方案二: merge ONLY into taps at the SAME timeSec. Never cross time
+        // windows, otherwise a tap at a different beat would gain a polluted hit
+        // area and trigger false/early hits later (e.g. note-9 / note-10 same pos).
+        if (other === best || other.timeSec !== best.timeSec) continue;
+        if (!other.extraHitRegions) other.extraHitRegions = [];
+        var dup = false;
+        for (var r = 0; r < other.extraHitRegions.length; r++) {
+          var reg = other.extraHitRegions[r];
+          if (reg.x === merged.x && reg.y === merged.y && reg.half === merged.half) { dup = true; break; }
+        }
+        if (!dup) other.extraHitRegions.push(merged);
+      }
     }
     return best;
   }
@@ -2637,6 +2810,12 @@
         var type = e.pointerType || 'mouse';
         pendingMoves[e.pointerId] = { x: w.x, y: w.y, down: true, active: true, type: type };
       });
+      /* Disable the right-click context menu — long-press on IE / touch also
+       * fires contextmenu, which would pop a menu mid-play. */
+      canvasEl.addEventListener('contextmenu', function (e) {
+        if (e.preventDefault) e.preventDefault();
+        return false;
+      });
       canvasEl.addEventListener('pointermove', function (e) {
         var p = offset(e);
         var w = screenToWorld(p.x, p.y);
@@ -2821,14 +3000,14 @@
     loadJson('../beatmaps/' + diff.chartFile, function (chart) {
       loadingChart = false;
       if (!chart || !chart.metadata || !chart.notes) {
-        alert('谱面格式错误');
+        alert(L('chartErrFormat'));
         return;
       }
       loadedChartCache[cacheKey] = chart;
       startGameWithChart(chart, currentSongItem);
     }, function (err) {
       loadingChart = false;
-      alert('加载谱面失败: ' + (err.message || err));
+      alert(L('chartLoadFail') + (err.message || err));
     });
   }
 
@@ -2882,7 +3061,7 @@
     if (songItem && songItem.audio) {
       var startBtn = document.getElementById('btn-start');
       var origBtnText = startBtn.textContent;
-      startBtn.textContent = '加载中...';
+      startBtn.textContent = L('loading');
       startBtn.disabled = true;
 
       audio.loadAudioUrl('../beatmaps/' + songItem.audio, function () {
@@ -2950,9 +3129,9 @@
       '<div class="result-row"><span class="g">Good</span><span>' + g.counts['Good'] + '</span></div>' +
       '<div class="result-row"><span class="m">Miss</span><span>' + g.counts['Miss'] + '</span></div>' +
       '<div class="result-row"><span>Max Combo</span><span>' + g.maxCombo + '</span></div>' +
-      '<div class="result-row"><span>Accuracy</span><span>' + acc.toFixed(2) + '%</span></div>' +
-      '<div class="result-actions"><button class="btn-tool" id="btn-retry">重试</button>' +
-      '<button class="btn-tool" id="btn-back-menu">返回菜单</button></div>';
+      '<div class="result-row"><span>' + L('resultAcc') + '</span><span>' + acc.toFixed(2) + '%</span></div>' +
+      '<div class="result-actions"><button class="btn-tool" id="btn-retry">' + L('resultRetry') + '</button>' +
+      '<button class="btn-tool" id="btn-back-menu">' + L('resultBack') + '</button></div>';
     resultScreen.classList.remove('hidden');
     document.getElementById('btn-retry').onclick = function () { resultScreen.classList.add('hidden'); startGame(); };
     document.getElementById('btn-back-menu').onclick = function () { resultScreen.classList.add('hidden'); showMenu(); };
@@ -2967,7 +3146,7 @@
       var backCard = document.createElement('div');
       backCard.className = 'chart-card';
       backCard.style.borderStyle = 'dashed';
-      backCard.innerHTML = '<p class="chart-title">← 返回上一级</p><p class="chart-meta">返回专辑列表</p>';
+      backCard.innerHTML = '<p class="chart-title">' + L('backUp') + '</p><p class="chart-meta">' + L('backAlbum') + '</p>';
       backCard.onclick = function () {
         currentAlbumId = null;
         currentSongItem = null;
@@ -2984,7 +3163,7 @@
         var title = item.title || 'Unknown';
         var meta = '';
         if (item.type === 'album') {
-          meta = (item.artist || 'Various Artists') + ' · ' + (item.songs ? item.songs.length : 0) + '首';
+          meta = (item.artist || 'Various Artists') + ' · ' + (item.songs ? item.songs.length : 0) + L('songsSuffix');
           title = '📁 ' + title;
         } else {
           meta = (item.artist || 'Unknown');
@@ -3013,7 +3192,7 @@
                 ';color:' + adjustBrightness(dAcc, 1.2) + ';box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);';
             diffButtons += '<button class="diff-btn" data-idx="' + di + '" style="' + diffStyle +
               'padding:2px 8px;border-radius:6px;border:1px solid;font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;">' +
-              (diff.name || '难度 ' + (di + 1)) + diffLevel + '</button>';
+              (diff.name || (L('diff') + (di + 1))) + diffLevel + '</button>';
           }
           diffButtons += '</div>';
           cardHtml += diffButtons;
@@ -3139,23 +3318,23 @@
   /* --- Chart editor (text JSON) --- */
   /* Validates a parsed chart object. Returns {ok, chart, error}. */
   function validateChart(obj) {
-    if (!obj || typeof obj !== 'object') return { ok: false, error: '根对象必须为对象' };
+    if (!obj || typeof obj !== 'object') return { ok: false, error: L('errRootObj') };
     var md = obj.metadata;
-    if (!md || typeof md !== 'object') return { ok: false, error: '缺少 metadata' };
-    if (typeof md.bpm !== 'number' || md.bpm <= 0) return { ok: false, error: 'metadata.bpm 必须为正数' };
-    if (typeof md.title !== 'string' || !md.title) return { ok: false, error: 'metadata.title 不能为空' };
+    if (!md || typeof md !== 'object') return { ok: false, error: L('errNoMeta') };
+    if (typeof md.bpm !== 'number' || md.bpm <= 0) return { ok: false, error: L('errBpm') };
+    if (typeof md.title !== 'string' || !md.title) return { ok: false, error: L('errTitle') };
     if (!md.bgScheme) md.bgScheme = { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' };
     if (!md.noteColor) md.noteColor = md.bgScheme.accentColor || '#00f0ff';
     if (typeof md.offset !== 'number') md.offset = 0;
     if (!md.difficulty) md.difficulty = 'Custom';
     if (!md.artist) md.artist = 'Unknown';
-    if (!Array.isArray(obj.notes)) return { ok: false, error: 'notes 必须为数组' };
+    if (!Array.isArray(obj.notes)) return { ok: false, error: L('errNotesArr') };
     for (var i = 0; i < obj.notes.length; i++) {
       var n = obj.notes[i];
-      if (typeof n.beat !== 'number') return { ok: false, error: 'note #' + i + ' 缺少 beat' };
-      if (typeof n.x !== 'number' || typeof n.y !== 'number') return { ok: false, error: 'note #' + i + ' 缺少 x/y' };
-      if (n.type !== 'tap' && n.type !== 'touch' && n.type !== 'slide') return { ok: false, error: 'note #' + i + ' type 非法' };
-      if (n.type === 'slide' && !Array.isArray(n.nodes)) return { ok: false, error: 'slide note #' + i + ' 缺少 nodes' };
+      if (typeof n.beat !== 'number') return { ok: false, error: L('errNoteBeat', { i: i }) };
+      if (typeof n.x !== 'number' || typeof n.y !== 'number') return { ok: false, error: L('errNoteXY', { i: i }) };
+      if (n.type !== 'tap' && n.type !== 'touch' && n.type !== 'slide') return { ok: false, error: L('errNoteType', { i: i }) };
+      if (n.type === 'slide' && !Array.isArray(n.nodes)) return { ok: false, error: L('errSlideNodes', { i: i }) };
       if (!n.id) n.id = 'ed-' + i + '-' + Date.now().toString(36);
     }
     return { ok: true, chart: obj };
@@ -3173,7 +3352,7 @@
     var txt = editorTextarea.value;
     var obj;
     try { obj = JSON.parse(txt); }
-    catch (e) { editorError.textContent = 'JSON 解析失败：' + e.message; return; }
+    catch (e) { editorError.textContent = L('errJsonParse') + e.message; return; }
     var res = validateChart(obj);
     if (!res.ok) { editorError.textContent = res.error; return; }
     var key = customChartKey || ('custom-' + Date.now());
@@ -3182,7 +3361,7 @@
     selectedKey = key;
     buildMenu();
     editorError.style.color = '#10b981';
-    editorError.textContent = '已加载：' + res.chart.metadata.title + '（共 ' + res.chart.notes.length + ' 个音符）';
+    editorError.textContent = L('errLoaded') + res.chart.metadata.title + ' (' + res.chart.notes.length + ')';
     window.setTimeout(function () { editorError.style.color = ''; closeEditor(); }, 800);
   }
   /* File import */
@@ -3192,9 +3371,9 @@
     var reader = new FileReader();
     reader.onload = function () {
       editorTextarea.value = String(reader.result || '');
-      editorError.textContent = '已读取 ' + file.name + '，点击「加载谱面」生效';
+      editorError.textContent = L('errReadFile') + file.name + L('errClickLoad');
     };
-    reader.onerror = function () { editorError.textContent = '文件读取失败'; };
+    reader.onerror = function () { editorError.textContent = L('errRead'); };
     reader.readAsText(file);
     e.target.value = ''; /* allow re-selecting same file */
   });
@@ -3205,12 +3384,12 @@
   document.getElementById('editor-audio-file').addEventListener('change', function (e) {
     var file = e.target.files && e.target.files[0];
     if (!file) return;
-    editorAudioLabel.textContent = '解码中…';
+    editorAudioLabel.textContent = L('errDecoding');
     audio.loadAudioFile(file, function (buffer) {
-      editorAudioLabel.textContent = '音频已加载(' + Math.round(buffer.duration) + 's)';
+      editorAudioLabel.textContent = L('errAudioLoaded') + Math.round(buffer.duration) + 's)';
     }, function (err) {
-      editorAudioLabel.textContent = '导入失败';
-      window.setTimeout(function () { editorAudioLabel.textContent = '导入音频'; }, 2000);
+      editorAudioLabel.textContent = L('errImportFail');
+      window.setTimeout(function () { editorAudioLabel.textContent = L('edImportAudio'); }, 2000);
     });
     e.target.value = ''; /* allow re-selecting same file */
   });
@@ -3227,6 +3406,26 @@
   document.getElementById('btn-editor').onclick = openEditor;
   document.getElementById('btn-editor-close').onclick = closeEditor;
   document.getElementById('btn-editor-load').onclick = loadChartFromEditor;
+
+  /* --- Language switch (self-contained i18n) --- */
+  function highlightLang() {
+    var cur = getLang();
+    var btns = document.querySelectorAll('#lang-switch button');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].style.fontWeight = (btns[i].getAttribute('data-lang') === cur) ? '700' : '400';
+      btns[i].style.opacity = (btns[i].getAttribute('data-lang') === cur) ? '1' : '0.6';
+    }
+  }
+  var langBtns = document.querySelectorAll('#lang-switch button');
+  for (var li = 0; li < langBtns.length; li++) {
+    langBtns[li].onclick = function () {
+      setLang(this.getAttribute('data-lang'));
+      applyI18n();
+      highlightLang();
+    };
+  }
+  applyI18n();
+  highlightLang();
 
   /* --- Keyboard shortcuts --- */
   document.addEventListener('keydown', function (e) {
@@ -3371,7 +3570,7 @@
   if (!(window.AudioContext || window.webkitAudioContext)) {
     audio.useHtml5 = true;
     var _upLabel = document.getElementById('editor-audio-label');
-    if (_upLabel) _upLabel.textContent = '导入音频';
+    if (_upLabel) _upLabel.textContent = L('edImportAudio');
   }
   /* UI click sound — delegated from the document so every button/card gets it
    * without touching each handler. Walks a few levels up from the event target

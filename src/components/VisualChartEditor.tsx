@@ -20,7 +20,10 @@ import {
   Music,
   Box,
   LayoutGrid,
+  FlipHorizontal,
+  FlipVertical,
 } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
 
@@ -109,6 +112,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onSetViewMode,
   onApplyQuickCreateDelta: _onApplyQuickCreateDelta,
 }) => {
+  const { t, lang } = useI18n();
+  const beatUnit = lang === 'en' ? 'beat' : '拍';
   // onApplyQuickCreateDelta is wired up from the parent so GameCanvas can
   // push its batch-note payloads through the same prop surface even though
   // the overlay component itself never fires it. Silence "unused variable".
@@ -282,6 +287,28 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     onSelectNote(null);
   };
 
+  const handleBatchFlipX = () => {
+    if (!validBatchRange || notesInBatch.length === 0) return;
+    const flipIds = new Set(notesInBatch.map((n) => n.id));
+    const updatedNotes = chart.notes.map((n) =>
+      flipIds.has(n.id)
+        ? { ...n, x: -n.x, nodes: n.nodes?.map((sn) => ({ ...sn, x: -sn.x })) }
+        : n
+    );
+    onUpdateChart({ ...chart, notes: updatedNotes });
+  };
+
+  const handleBatchFlipY = () => {
+    if (!validBatchRange || notesInBatch.length === 0) return;
+    const flipIds = new Set(notesInBatch.map((n) => n.id));
+    const updatedNotes = chart.notes.map((n) =>
+      flipIds.has(n.id)
+        ? { ...n, y: -n.y, nodes: n.nodes?.map((sn) => ({ ...sn, y: -sn.y })) }
+        : n
+    );
+    onUpdateChart({ ...chart, notes: updatedNotes });
+  };
+
   const handleModifySelected = (patch: Partial<NoteData>) => {
     if (!selectedBaseId) return;
     const updatedNotes = chart.notes.map((n) => (n.id === selectedBaseId ? { ...n, ...patch } : n));
@@ -333,7 +360,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           onUpdateChart(res.chart);
           setFileError(null);
         } else {
-          setFileError(res.error || '谱面文件解析失败');
+          setFileError(res.error || t('editor.fileParseError'));
         }
       };
       reader.readAsText(file);
@@ -432,31 +459,31 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     switch (tool) {
       case 'select':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title="选择/移动 (Select)">
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.select')}>
             <Move size={16} />
           </button>
         );
       case 'place-tap':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title="放置 Tap">
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeTap')}>
             <span className="w-3.5 h-3.5 border-2 border-cyan-300 block" />
           </button>
         );
       case 'place-touch':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title="放置 Touch">
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeTouch')}>
             <span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" />
           </button>
         );
       case 'place-slide':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title="放置 Slide">
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeSlide')}>
             <span className="w-3 h-3 border-2 border-emerald-300 block rotate-45" />
           </button>
         );
       case 'quick-create':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title="快速制谱">
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.quickCreate')}>
             <Zap size={15} />
           </button>
         );
@@ -479,14 +506,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 ED
               </div>
               <span className="font-bold font-orbitron text-sm tracking-wider text-white/90">
-                谱面编辑器
+                {t('editor.editorTitle')}
               </span>
             </div>
           )}
           <button
             onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}
             className={`p-1 rounded-lg hover:bg-white/10 text-cyan-300 transition cursor-pointer ${isSidebarExpanded ? 'ml-auto' : 'mx-auto'}`}
-            title={isSidebarExpanded ? '收起侧边栏' : '展开侧边栏'}
+            title={isSidebarExpanded ? t('editor.collapseSidebar') : t('editor.expandSidebar')}
           >
             {isSidebarExpanded ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
           </button>
@@ -508,20 +535,20 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
             {/* Beat HUD */}
             <div className="p-3 rounded-xl glass-sub border-white/12" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)' }}>
-              <div className="text-[10px] uppercase font-bold text-white/50">当前节拍 (Current Beat)</div>
+              <div className="text-[10px] uppercase font-bold text-white/50">{t('editor.curBeat')}</div>
               <div className="text-3xl font-black font-orbitron text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 to-amber-300">
                 {currentBeat.toFixed(2)}
               </div>
               <div className="flex justify-between items-center text-[11px] text-white/70 mt-1 font-mono">
-                <span>时间: {currentTimeSec.toFixed(3)}s</span>
-                <span>{countPlayableNotes(chart)} 音符</span>
+                <span>{t('editor.time')}: {currentTimeSec.toFixed(3)}s</span>
+                <span>{countPlayableNotes(chart)} {t('editor.notes')}</span>
               </div>
             </div>
 
             {/* === View Section (3D / 2D) === */}
             <div className={sectionClass}>
               <button onClick={() => toggleSection('view')} className={sectionHeaderClass}>
-                <span className="flex items-center gap-1.5"><Box size={12} /> 视图</span>
+                <span className="flex items-center gap-1.5"><Box size={12} /> {t('editor.view')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.view ? '−' : '+'}</span>
               </button>
               {sectionOpen.view && (
@@ -531,20 +558,20 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                       onClick={() => onSetViewMode('3d')}
                       className={viewMode === '3d' ? viewBtnSelectedCls : viewBtnCls}
                     >
-                      <Box size={14} /><span>3D 视图</span>
+                      <Box size={14} /><span>{t('editor.view3d')}</span>
                     </button>
                     <button
                       onClick={() => onSetViewMode('2d')}
                       className={viewMode === '2d' ? viewBtnSelectedCls : viewBtnCls}
                     >
-                      <LayoutGrid size={14} /><span>2D 视图</span>
+                      <LayoutGrid size={14} /><span>{t('editor.view2d')}</span>
                     </button>
                   </div>
 
                   {viewMode === '2d' && (
                     <div className="pt-1 space-y-2 border-t border-white/10">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] text-white/70">吸附列数</span>
+                        <span className="text-[11px] text-white/70">{t('editor.snapCols')}</span>
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => onSetVlineCount(Math.max(3, vlineCount - 2))}
@@ -558,7 +585,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                         </div>
                       </div>
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] text-white/70">时间轴缩放</span>
+                        <span className="text-[11px] text-white/70">{t('editor.timelineZoom')}</span>
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => onSetPxPerBeat(Math.max(20, pxPerBeat - 8))}
@@ -579,36 +606,36 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('tools')} className={sectionHeaderClass}>
-                <span>编辑模式 / 放置工具</span>
+                <span>{t('editor.modeTools')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.tools ? '−' : '+'}</span>
               </button>
               {sectionOpen.tools && (
                 <div className="p-3 space-y-1.5 border-t border-white/10">
                   <div className="grid grid-cols-2 gap-1.5">
-                    <button onClick={() => onSetActiveTool('select')} className={toolBtnCls('select')}><Move size={14} /><span>选择/移动</span></button>
+                    <button onClick={() => onSetActiveTool('select')} className={toolBtnCls('select')}><Move size={14} /><span>{t('editor.select')}</span></button>
                     {viewMode !== '2d' && (
-                      <button onClick={() => onSetActiveTool('quick-create')} className={toolBtnCls('quick-create')}><Zap size={14} /><span>快速制谱</span></button>
+                      <button onClick={() => onSetActiveTool('quick-create')} className={toolBtnCls('quick-create')}><Zap size={14} /><span>{t('editor.quickCreate')}</span></button>
                     )}
-                    <button onClick={() => onSetActiveTool('place-tap')} className={toolBtnCls('place-tap')}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block" /><span>放置 Tap</span></button>
-                    <button onClick={() => onSetActiveTool('place-touch')} className={toolBtnCls('place-touch')}><span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" /><span>放置 Touch</span></button>
-                    <button onClick={() => onSetActiveTool('place-slide')} className={toolBtnCls('place-slide')}><span className="w-3.5 h-3.5 border-2 border-emerald-300 block rotate-45" /><span>放置 Slide</span></button>
+                    <button onClick={() => onSetActiveTool('place-tap')} className={toolBtnCls('place-tap')}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block" /><span>{t('editor.placeTap')}</span></button>
+                    <button onClick={() => onSetActiveTool('place-touch')} className={toolBtnCls('place-touch')}><span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" /><span>{t('editor.placeTouch')}</span></button>
+                    <button onClick={() => onSetActiveTool('place-slide')} className={toolBtnCls('place-slide')}><span className="w-3.5 h-3.5 border-2 border-emerald-300 block rotate-45" /><span>{t('editor.placeSlide')}</span></button>
                   </div>
                   {viewMode === '2d' ? (
                     <p className="text-[10px] text-white/50">
-                      上下=时间轴，左右=X 轴（放置音符按 y=0 处理）。方=TAP，圆=TOUCH，菱=SLIDE。
+                      {t('editor.explain2d')}
                       {activeTool === 'select'
-                        ? '点击音符/节点选中，拖动改变时间与位置；在空白处上下拖动可平移进度。'
-                        : '点击轨道在吸附网格处放置音符。'}
+                        ? t('editor.explainSelect2d')
+                        : t('editor.explainPlace2d')}
                     </p>
                   ) : (
                     <p className="text-[10px] text-white/50">
                       {activeTool === 'quick-create'
-                        ? '跟着音乐在屏幕上敲：短按=TAP，按住>1拍不移动=SLIDE，快速滑动=TOUCH串。所有音符自动吸附节拍。'
+                        ? t('editor.explainQuickCreate')
                         : activeTool === 'select'
-                        ? '点击音符/节点选中，拖动可实时改变位置'
+                        ? t('editor.explainSelect3d')
                         : activeTool === 'place-slide'
-                        ? '点击放置 Slide 头节点；保持选中可追加子节点'
-                        : '直接在 3D 判定平面点击放置新音符'}
+                        ? t('editor.explainSlide')
+                        : t('editor.explainPlace3d')}
                     </p>
                   )}
                 </div>
@@ -618,13 +645,13 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             {/* === Play Test Section === */}
             <div className={sectionClass}>
               <button onClick={() => toggleSection('playtest')} className={sectionHeaderClass}>
-                <span className="flex items-center gap-1.5"><Zap size={12} /> 试玩模式</span>
+                <span className="flex items-center gap-1.5"><Zap size={12} /> {t('editor.playTestMode')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.playtest ? '−' : '+'}</span>
               </button>
               {sectionOpen.playtest && (
                 <div className="p-3 space-y-2 border-t border-white/10">
                   <p className="text-[10px] text-white/50">
-                    进入实际游戏状态测试谱面。暂停或结算时自动返回编辑器。
+                    {t('editor.playTestDesc')}
                   </p>
                   <div className="grid grid-cols-2 gap-2">
                     <button
@@ -632,13 +659,13 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                       className="py-2 px-2 rounded glass-btn-primary text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                       style={{ ['--hud-accent' as any]: '#f59e0b' }}
                     >
-                      <Play size={12} /> 从当前位置
+                      <Play size={12} /> {t('editor.startHere')}
                     </button>
                     <button
                       onClick={() => onStartPlayTest(false)}
                       className="py-2 px-2 rounded glass-btn-primary text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
-                      <RotateCcw size={12} /> 从头开始
+                      <RotateCcw size={12} /> {t('editor.fromStart')}
                     </button>
                   </div>
                 </div>
@@ -648,38 +675,38 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             {/* === Events Section === */}
             <div className={sectionClass}>
               <button onClick={() => toggleSection('events')} className={sectionHeaderClass}>
-                <span className="flex items-center gap-1.5"><Music size={12} /> 事件编辑</span>
+                <span className="flex items-center gap-1.5"><Music size={12} /> {t('editor.events')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.events ? '−' : '+'}</span>
               </button>
               {sectionOpen.events && (
                 <div className="p-3 space-y-2 border-t border-white/10">
                   <div className="text-[10px] text-white/50">
-                    在当前拍 ({currentBeat.toFixed(2)}) 添加事件：
+                    {t('editor.addEventAtBeat')} ({currentBeat.toFixed(2)}):
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button onClick={() => handleAddEvent('speed_change')} className="py-1.5 px-2 rounded glass-btn border-purple-400/40 text-purple-300 hover:text-purple-200 text-[11px] transition cursor-pointer">
-                      变速
+                      {t('editor.evt.speed')}
                     </button>
                     <button onClick={() => handleAddEvent('text_display')} className="py-1.5 px-2 rounded glass-btn border-amber-400/40 text-amber-300 hover:text-amber-200 text-[11px] transition cursor-pointer">
-                      文字
+                      {t('editor.evt.text')}
                     </button>
                     <button onClick={() => handleAddEvent('note_color_change')} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 text-[11px] transition cursor-pointer">
-                      音符色
+                      {t('editor.evt.noteColor')}
                     </button>
                     <button onClick={() => handleAddEvent('bg_change')} className="py-1.5 px-2 rounded glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 text-[11px] transition cursor-pointer">
-                      背景色
+                      {t('editor.evt.bg')}
                     </button>
                   </div>
 
                   <div className="pt-2 border-t border-white/10 space-y-1.5 max-h-64 overflow-y-auto">
-                    <div className="text-[10px] text-white/50">
-                      事件列表 ({getEvents().length})
-                    </div>
-                    {getEvents().length === 0 && (
-                      <div className="text-[10px] text-white/40 italic py-2 text-center">
-                        暂无事件
+                      <div className="text-[10px] text-white/50">
+                        {t('editor.eventList')} ({getEvents().length})
                       </div>
-                    )}
+                      {getEvents().length === 0 && (
+                        <div className="text-[10px] text-white/40 italic py-2 text-center">
+                          {t('editor.noEvents')}
+                        </div>
+                      )}
                     {getEvents().map((evt) => (
                       <EventRow
                         key={evt.id}
@@ -696,20 +723,20 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('metadata')} className={sectionHeaderClass}>
-                <span>歌曲元数据编辑</span>
+                <span>{t('editor.metadata')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.metadata ? '−' : '+'}</span>
               </button>
               {sectionOpen.metadata && (
                 <div className="p-3 space-y-2 border-t border-white/10">
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">歌名</label><input type="text" value={chart.metadata.title} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, title: e.target.value || 'Untitled' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">艺术家</label><input type="text" value={chart.metadata.artist} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, artist: e.target.value || 'Unknown' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">难度标识</label><input type="text" value={chart.metadata.difficulty} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, difficulty: e.target.value || 'Custom' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">封面（已废弃）</label><input type="text" value={chart.metadata.jacket || ''} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, jacket: e.target.value || undefined } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fTitle')}</label><input type="text" value={chart.metadata.title} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, title: e.target.value || 'Untitled' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fArtist')}</label><input type="text" value={chart.metadata.artist} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, artist: e.target.value || 'Unknown' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fDifficulty')}</label><input type="text" value={chart.metadata.difficulty} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, difficulty: e.target.value || 'Custom' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fCover')}</label><input type="text" value={chart.metadata.jacket || ''} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, jacket: e.target.value || undefined } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
                   <div className="grid grid-cols-2 gap-2">
-                    <label className="text-[10px] text-white/50">全局音符色<input type="color" value={chart.metadata.noteColor || '#00f0ff'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, noteColor: e.target.value } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
-                    <label className="text-[10px] text-white/50">强调色<input type="color" value={chart.metadata.bgScheme.accentColor || '#00f0ff'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, accentColor: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
-                    <label className="text-[10px] text-white/50">背景起始<input type="color" value={chart.metadata.bgScheme.gradientStart || '#050c1e'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, gradientStart: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
-                    <label className="text-[10px] text-white/50">背景结束<input type="color" value={chart.metadata.bgScheme.gradientEnd || '#1b072c'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, gradientEnd: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
+                    <label className="text-[10px] text-white/50">{t('editor.fNoteColor')}<input type="color" value={chart.metadata.noteColor || '#00f0ff'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, noteColor: e.target.value } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
+                    <label className="text-[10px] text-white/50">{t('editor.fAccent')}<input type="color" value={chart.metadata.bgScheme.accentColor || '#00f0ff'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, accentColor: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
+                    <label className="text-[10px] text-white/50">{t('editor.fBgStart')}<input type="color" value={chart.metadata.bgScheme.gradientStart || '#050c1e'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, gradientStart: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
+                    <label className="text-[10px] text-white/50">{t('editor.fBgEnd')}<input type="color" value={chart.metadata.bgScheme.gradientEnd || '#1b072c'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, gradientEnd: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
                   </div>
                   <div className="grid grid-cols-2 gap-2 pt-1 text-[11px] text-white/70">
                     {(['bloom', 'particles', 'projection', 'gridLines'] as const).map((k) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" checked={!!chart.metadata.effectToggles[k]} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, effectToggles: { ...chart.metadata.effectToggles, [k]: e.target.checked } } })} className="accent-cyan-400" />{k}</label>)}
@@ -720,28 +747,28 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('timing')} className={sectionHeaderClass}>
-                <span>谱面参数设定</span>
+                <span>{t('editor.timing')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.timing ? '−' : '+'}</span>
               </button>
               {sectionOpen.timing && (
                 <div className="p-3 border-t border-white/10 space-y-3">
                   <div className="grid grid-cols-2 gap-2">
-                    <div><label className="text-[10px] text-white/50">BPM（基准）</label><input type="number" min="30" max="400" step="1" value={chart.metadata.bpm} onChange={(e) => handleUpdateMeta('bpm', parseFloat(e.target.value) || 120)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
-                    <div><label className="text-[10px] text-white/50">Offset (秒)</label><input type="number" step="0.01" value={chart.metadata.offset} onChange={(e) => handleUpdateMeta('offset', parseFloat(e.target.value) || 0)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
+                    <div><label className="text-[10px] text-white/50">{t('editor.bpmBase')}</label><input type="number" min="30" max="400" step="1" value={chart.metadata.bpm} onChange={(e) => handleUpdateMeta('bpm', parseFloat(e.target.value) || 120)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
+                    <div><label className="text-[10px] text-white/50">{t('editor.offsetSec')}</label><input type="number" step="0.01" value={chart.metadata.offset} onChange={(e) => handleUpdateMeta('offset', parseFloat(e.target.value) || 0)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
                   </div>
                   <div className="border-t border-white/10 pt-2">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-[11px] text-cyan-300 font-bold">BPM 变化点 (bpmlist)</span>
+                      <span className="text-[11px] text-cyan-300 font-bold">{t('editor.bpmChanges')}</span>
                       <button
                         onClick={handleAddBpmPoint}
                         disabled={currentBeat <= 0}
                         className="text-[10px] px-2 py-0.5 rounded bg-cyan-600/50 hover:bg-cyan-600 text-white font-bold transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                       >
-                        + 在当前拍添加
+                        {t('editor.addAtCurrentBeat')}
                       </button>
                     </div>
                     {getBpmList().length === 0 ? (
-                      <div className="text-[10px] text-white/40 italic">暂无 BPM 变化点，使用单一 BPM</div>
+                      <div className="text-[10px] text-white/40 italic">{t('editor.noBpmChange')}</div>
                     ) : (
                       <div className="space-y-1.5 max-h-40 overflow-y-auto">
                         {getBpmList().map((p, idx) => (
@@ -763,7 +790,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                             <button
                               onClick={() => handleDeleteBpmPoint(idx)}
                               className="ml-auto text-red-400 hover:text-red-300 text-xs cursor-pointer"
-                              title="删除"
+                              title={t('editor.delete')}
                             >
                               <Trash2 size={12} />
                             </button>
@@ -771,11 +798,11 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                         ))}
                       </div>
                     )}
-                    <div className="mt-2 text-[10px] text-white/40 font-mono">
-                      当前拍 BPM: {getBpmAtBeatLocal(currentBeat).toFixed(0)}
-                      {' | '}
-                      总时长: {beatToSecondsMultiBpm(getMaxBeat(chart), chart.metadata.bpm, chart.metadata.offset, getBpmList()).toFixed(2)}s
-                    </div>
+                      <div className="mt-2 text-[10px] text-white/40 font-mono">
+                        {t('editor.curBeatBpm')}: {getBpmAtBeatLocal(currentBeat).toFixed(0)}
+                        {' | '}
+                        {t('editor.totalDuration')}: {beatToSecondsMultiBpm(getMaxBeat(chart), chart.metadata.bpm, chart.metadata.offset, getBpmList()).toFixed(2)}s
+                      </div>
                   </div>
                 </div>
               )}
@@ -783,22 +810,22 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('batch')} className={sectionHeaderClass}>
-                <span>批量选择与操作</span>
+                <span>{t('editor.batch')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.batch ? '−' : '+'}</span>
               </button>
-              {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-emerald-400 font-mono">{notesInBatch.length} 个音符</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">起点: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : '未设'}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">终点: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : '未设'}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">区间: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> 克隆</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> 删除</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">确认?</button>}</div></div>}</div>}
+              {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-emerald-400 font-mono">{t('editor.batchNotes', { n: notesInBatch.length })}</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchStart')}: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : t('editor.batchUnset')}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchEnd')}: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : t('editor.batchUnset')}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">{t('editor.batchRange')}: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> {t('editor.clone')}</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> {t('editor.delete')}</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">{t('editor.confirmQ')}</button>}</div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={handleBatchFlipX} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipHorizontal size={12} /> {t('editor.flipX')}</button><button onClick={handleBatchFlipY} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipVertical size={12} /> {t('editor.flipY')}</button></div></div>}</div>}
             </div>
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('importExport')} className={sectionHeaderClass}>
-                <span>导入与导出</span>
+                <span>{t('editor.importExport')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.importExport ? '−' : '+'}</span>
               </button>
-              {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> 导入音频<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> 导入谱面 JSON<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> 导出 JSON</button></div>}
+              {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button></div>}
             </div>
 
             <button onClick={onExitEditor} className="glass-btn w-full py-2.5 rounded-xl text-white/80 font-bold">
-              退出编辑器
+              {t('editor.exitEditor')}
             </button>
           </div>
         )}
@@ -820,7 +847,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             onPointerMove={onPanelPointerMove}
             onPointerUp={onPanelPointerUp}
             className="w-5 h-8 flex items-center justify-center text-cyan-400/50 hover:text-cyan-400 active:text-cyan-300 cursor-grab active:cursor-grabbing border-r border-white/10 pr-1.5 select-none shrink-0"
-            title="拖动面板"
+            title={t('editor.dragPanel')}
           >
             <Compass size={14} className="animate-pulse" />
           </div>
@@ -831,7 +858,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               onClick={() => handleModifySelected({ type: selectedNote.type === 'tap' ? 'touch' : 'tap' })}
               className="px-2.5 py-1 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 text-xs font-bold hover:bg-cyan-500/40 cursor-pointer"
             >
-              切换为 {selectedNote.type === 'tap' ? '● Touch' : '■ Tap'}
+              {t('editor.switchTo')} {selectedNote.type === 'tap' ? '● Touch' : '■ Tap'}
             </button>
           </div>
 
@@ -865,7 +892,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               value={selectedNote.color || chart.metadata.noteColor || '#00f0ff'}
               onChange={(e) => handleModifySelected({ color: e.target.value })}
               className="w-6 h-6 rounded border border-cyan-500/40 bg-transparent cursor-pointer"
-              title="覆盖全局音符颜色；双击重置为全局音符色"
+              title={t('editor.overwriteColor')}
               onDoubleClick={() => handleModifySelected({ color: undefined })}
             />
           </div>
@@ -897,12 +924,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 onPointerMove={onPanelPointerMove}
                 onPointerUp={onPanelPointerUp}
                 className="w-5 h-5 flex items-center justify-center text-emerald-400/50 hover:text-emerald-400 active:text-emerald-300 cursor-grab active:cursor-grabbing mr-1 select-none shrink-0 animate-pulse"
-                title="拖动面板"
+                title={t('editor.dragPanel')}
               >
                 <Compass size={14} />
               </div>
               <span className="w-3 h-3 border-2 border-emerald-300 rotate-45 block" />
-              <span className="font-bold text-sm text-emerald-300 font-orbitron">Slide 链编辑</span>
+              <span className="font-bold text-sm text-emerald-300 font-orbitron">{t('editor.slideChain')}</span>
               <span className="text-[10px] text-white/50 font-mono">#{selectedNote.id}</span>
             </div>
             <div className="flex items-center gap-2">
@@ -911,7 +938,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 value={selectedNote.color || chart.metadata.noteColor || '#00f0ff'}
                 onChange={(e) => handleModifySelected({ color: e.target.value })}
                 className="w-6 h-6 bg-transparent cursor-pointer rounded border border-emerald-400/40"
-                title="设置整条 Slide 链的颜色（头节点与所有子节点统一）；点击右侧可重置"
+                title={t('editor.setChainColor')}
                 onDoubleClick={() => handleModifySelected({ color: undefined })}
               />
               <button onClick={handleDeleteSelected} className="p-1.5 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 hover:bg-red-800 hover:text-white transition cursor-pointer" title="删除整条 Slide">
@@ -927,7 +954,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           <div className={`grid grid-cols-12 gap-1.5 items-center p-2 rounded-lg mb-1.5 text-xs font-mono ${
             selectedNoteId === selectedNote.id ? 'bg-emerald-900/40 border border-emerald-400/50' : 'glass-sub border-white/10'
           }`}>
-            <span className="col-span-2 text-emerald-300 font-bold">头节点</span>
+            <span className="col-span-2 text-emerald-300 font-bold">{t('editor.headNode')}</span>
             <input
               type="number" step={snapSubdivision} value={selectedNote.beat}
               onChange={(e) => handleModifySelected({ beat: parseFloat(e.target.value) || 0 })}
@@ -954,7 +981,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 selectedNoteId === `${selectedNote.id}#${i + 1}` ? 'bg-emerald-900/40 border border-emerald-400/50' : 'glass-sub border-white/10'
               }`}
             >
-              <span className="col-span-2 text-white/70">节点 {i + 1}</span>
+              <span className="col-span-2 text-white/70">{t('editor.nodeN', { n: i + 1 })}</span>
               <input
                 type="number" step={snapSubdivision} value={sn.beat}
                 onChange={(e) => handlePatchSlideNode(i, { beat: parseFloat(e.target.value) || 0 })}
@@ -988,7 +1015,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             onClick={handleAddSlideNode}
             className="w-full py-1.5 rounded-lg border-2 border-dashed border-emerald-500/40 hover:bg-emerald-500/10 text-emerald-300 font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1"
           >
-            <Plus size={13} /> 追加子节点
+            <Plus size={13} /> {t('editor.appendNode')}
           </button>
         </div>
       )}
@@ -1007,7 +1034,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           onPointerMove={onSnapPointerMove}
           onPointerUp={onSnapPointerUp}
           className="w-full h-3 flex items-center justify-center text-cyan-400/40 hover:text-cyan-400 active:text-cyan-300 cursor-grab active:cursor-grabbing border-b border-white/10 pb-1 select-none animate-pulse shrink-0"
-          title="拖动微调面板"
+          title={t('editor.snapFine')}
         >
           <Compass size={12} />
         </div>
@@ -1016,7 +1043,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           <button
             onClick={() => { setRateMenuOpen((v) => !v); setSnapMenuOpen(false); }}
             className={`min-w-16 px-3 py-2 rounded-xl glass-btn border-cyan-400/40 text-cyan-200 font-mono font-black text-sm hover:text-cyan-100 transition cursor-pointer shadow-lg shadow-cyan-500/10 ${playbackRate !== 1 ? 'ring-1 ring-cyan-400/60' : ''}`}
-            title="点击切换播放速度（仅编辑预览，进入试玩/游戏会恢复 1x）"
+            title={t('editor.rateBtn')}
           >
             {RATE_OPTIONS.find((o) => Math.abs(o.value - playbackRate) < 0.00001)?.label ?? '1x'}
           </button>
@@ -1042,20 +1069,20 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           <button
             onClick={() => { setSnapMenuOpen((v) => !v); setRateMenuOpen(false); }}
             className="min-w-16 px-3 py-2 rounded-xl glass-btn border-cyan-400/40 text-cyan-200 font-mono font-black text-sm hover:text-cyan-100 transition cursor-pointer shadow-lg shadow-cyan-500/10"
-            title="点击切换节拍吸附"
+            title={t('editor.snapBtn')}
           >
             {[
               { label: '1/1', val: 1 }, { label: '1/2', val: 0.5 }, { label: '1/3', val: 0.333333333333 },
               { label: '1/4', val: 0.25 }, { label: '1/6', val: 0.166666666667 }, { label: '1/8', val: 0.125 },
               { label: '1/12', val: 0.083333333333 }, { label: '1/16', val: 0.0625 }, { label: 'Free', val: 0.01 },
-            ].find((o) => Math.abs(o.val - snapSubdivision) < 0.00001)?.label ?? 'Snap'}
+            ].find((o) => Math.abs(o.val - snapSubdivision) < 0.00001)?.label ?? t('editor.snap')}
           </button>
           {snapMenuOpen && (
             <div className="glass-panel-strong absolute top-11 right-0 w-28 p-1.5 rounded-xl border-white/15 z-50 space-y-1">
               {[
-                { label: '1/1 拍', val: 1 }, { label: '1/2 拍', val: 0.5 }, { label: '1/3 拍', val: 0.333333333333 },
-                { label: '1/4 拍', val: 0.25 }, { label: '1/6 拍', val: 0.166666666667 }, { label: '1/8 拍', val: 0.125 },
-                { label: '1/12 拍', val: 0.083333333333 }, { label: '1/16 拍', val: 0.0625 }, { label: '自由', val: 0.01 },
+                { label: `1/1 ${beatUnit}`, val: 1 }, { label: `1/2 ${beatUnit}`, val: 0.5 }, { label: `1/3 ${beatUnit}`, val: 0.333333333333 },
+                { label: `1/4 ${beatUnit}`, val: 0.25 }, { label: `1/6 ${beatUnit}`, val: 0.166666666667 }, { label: `1/8 ${beatUnit}`, val: 0.125 },
+                { label: `1/12 ${beatUnit}`, val: 0.083333333333 }, { label: `1/16 ${beatUnit}`, val: 0.0625 }, { label: t('editor.free'), val: 0.01 },
               ].map(({ label, val }) => {
                 const active = Math.abs(snapSubdivision - val) < 0.00001;
                 return (
@@ -1072,11 +1099,11 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           )}
         </div>
 
-        <div className="text-[9px] text-white/40 font-mono leading-none mt-0.5">微调</div>
+        <div className="text-[9px] text-white/40 font-mono leading-none mt-0.5">{t('editor.tune')}</div>
         <button
           onClick={() => onSeekBeat(Math.max(0, Math.floor((currentBeat - 1e-6) / snapSubdivision) * snapSubdivision))}
           className="w-10 h-10 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 flex items-center justify-center font-bold text-sm transition cursor-pointer"
-          title="吸附到上一个节拍"
+          title={t('editor.snapPrev')}
         >
           ▲ -
         </button>
@@ -1088,7 +1115,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         <button
           onClick={() => onSeekBeat(Math.ceil((currentBeat + 1e-6) / snapSubdivision) * snapSubdivision)}
           className="w-10 h-10 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 flex items-center justify-center font-bold text-sm transition cursor-pointer"
-          title="吸附到下一个节拍"
+          title={t('editor.snapNext')}
         >
           ▼ +
         </button>
@@ -1110,7 +1137,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         <button
           onClick={() => onSeekBeat(0)}
           className="p-2 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer shrink-0"
-          title="重置到谱面起点"
+          title={t('editor.resetStart')}
         >
           <RotateCcw size={16} />
         </button>
@@ -1118,7 +1145,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         <div className="flex-1 flex flex-col gap-1">
           <div className="flex justify-between text-[11px] font-mono text-white/70">
             <span className="text-cyan-300 font-bold">Beat {currentBeat.toFixed(2)}</span>
-            <span>总长: Beat {getMaxBeat(chart).toFixed(2)}</span>
+            <span>{t('editor.totalLen')}: Beat {getMaxBeat(chart).toFixed(2)}</span>
           </div>
           <input
             type="range"
@@ -1145,12 +1172,13 @@ interface EventRowProps {
 
 const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }) => {
   const [expanded, setExpanded] = useState(false);
+  const { t } = useI18n();
 
   const typeLabel: Record<EventType, string> = {
-    speed_change: '变速',
-    text_display: '文字',
-    note_color_change: '音符色',
-    bg_change: '背景色',
+    speed_change: t('editor.evt.speed'),
+    text_display: t('editor.evt.text'),
+    note_color_change: t('editor.evt.noteColor'),
+    bg_change: t('editor.evt.bg'),
   };
 
   const typeColor: Record<EventType, { border: string; text: string }> = {
@@ -1174,14 +1202,14 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
         <button
           onClick={onSeek}
           className={`text-[10px] font-mono ${color.text} flex-1 text-left truncate`}
-          title="跳转到该拍"
+          title={t('editor.jumpToBeat')}
         >
           B{event.beat.toFixed(2)} · {typeLabel[event.eventType]}
         </button>
         <button
           onClick={onDelete}
           className="text-[10px] text-red-400 hover:text-red-300"
-          title="删除事件"
+          title={t('editor.deleteEvent')}
         >
           <X size={12} />
         </button>
@@ -1189,7 +1217,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
       {expanded && (
         <div className="px-2 pb-2 space-y-1.5 border-t border-white/10">
           <div>
-            <label className="text-[10px] text-white/50 block mb-0.5">拍 (Beat)</label>
+            <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldBeat')}</label>
             <input
               type="number"
               step="0.25"
@@ -1200,7 +1228,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
           </div>
           {event.eventType === 'speed_change' && (
             <div>
-              <label className="text-[10px] text-white/50 block mb-0.5">速度倍率</label>
+              <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldSpeed')}</label>
               <input
                 type="number"
                 step="0.1"
@@ -1215,7 +1243,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
           {event.eventType === 'text_display' && (
             <>
               <div>
-                <label className="text-[10px] text-white/50 block mb-0.5">显示文字</label>
+                <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldText')}</label>
                 <input
                   type="text"
                   value={event.text ?? ''}
@@ -1224,7 +1252,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                 />
               </div>
               <div>
-                <label className="text-[10px] text-white/50 block mb-0.5">持续时间 (秒, 0=永久)</label>
+                <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldDuration')}</label>
                 <input
                   type="number"
                   step="0.5"
@@ -1236,7 +1264,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] text-white/50 block mb-0.5">X 位置 [-1,1]</label>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldX')}</label>
                   <input
                     type="number"
                     step="0.1"
@@ -1246,7 +1274,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-white/50 block mb-0.5">Y 位置 [-1,1]</label>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldY')}</label>
                   <input
                     type="number"
                     step="0.1"
@@ -1258,7 +1286,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] text-white/50 block mb-0.5">字号 (px)</label>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldFontSize')}</label>
                   <input
                     type="number"
                     step="2"
@@ -1270,7 +1298,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-white/50 block mb-0.5">文字颜色</label>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldTextColor')}</label>
                   <input
                     type="color"
                     value={event.color || '#ffffff'}
@@ -1283,7 +1311,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
           )}
           {event.eventType === 'note_color_change' && (
             <div>
-              <label className="text-[10px] text-white/50 block mb-0.5">音符颜色</label>
+              <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldNoteColor')}</label>
               <input
                 type="color"
                 value={event.noteColor || '#00f0ff'}
@@ -1296,7 +1324,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
             <>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] text-white/50 block mb-0.5">背景起始</label>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldBgStart')}</label>
                   <input
                     type="color"
                     value={event.gradientStart || '#050c1e'}
@@ -1305,7 +1333,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-white/50 block mb-0.5">背景结束</label>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldBgEnd')}</label>
                   <input
                     type="color"
                     value={event.gradientEnd || '#1b072c'}
@@ -1313,7 +1341,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                     className="w-full h-7 bg-transparent cursor-pointer"
                   />
                 </div>
-                <p>*此事件暂未实现</p>
+                <p>*{t('editor.notImpl')}</p>
               </div>
             </>
           )}

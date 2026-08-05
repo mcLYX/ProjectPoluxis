@@ -15,6 +15,7 @@ import { calculateNoteScore, calculateRank } from './utils/scoring';
 import { getChartDuration, beatToSeconds, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
 import { submitScore, calcBadgeFromStats } from './utils/scoreStore';
 import { globalAudio } from './audio/AudioManager';
+import { useI18n } from './i18n';
 import {
   Play,
   Pause,
@@ -87,6 +88,7 @@ function saveSettings(settings: typeof DEFAULT_SETTINGS) {
 }
 
 export function App() {
+  const { t } = useI18n();
   const initialSettings = loadSettings();
 
   const [currentChart, setCurrentChart] = useState<ChartData>(DEMO_CHARTS['neon-cyberspace']);
@@ -362,6 +364,10 @@ export function App() {
       window.clearInterval(countdownTimerRef.current);
       countdownTimerRef.current = null;
     }
+    // Reset the end-of-song lock so the pause button isn't stuck disabled
+    // from a previous play-test that ended.
+    songEndedRef.current = false;
+    setIsSongEnded(false);
     setCountdownVal(null);
     setEditorPreviewPlaying(false);
     // Restore 1x playback for actual playtest/gameplay.
@@ -418,6 +424,10 @@ export function App() {
       globalAudio.stop();
       setIsPlayTestMode(false);
       setGameState('editor');
+      // Clear the end-of-song lock (set when the play-test finished) so the
+      // pause button is re-enabled for the next play-test.
+      songEndedRef.current = false;
+      setIsSongEnded(false);
       setEditorPreviewPlaying(false);
       setTransitionPhase('fade-in');
       transitionTimerRef.current = window.setTimeout(() => {
@@ -1175,7 +1185,7 @@ export function App() {
                   {countdownVal}
                 </div>
                 <div className="text-xs font-bold uppercase tracking-[0.3em] text-white/55 mt-4">
-                  准备继续游玩 (Get Ready...)
+                  {t('hud.getReady')}
                 </div>
               </div>
             </div>
@@ -1192,7 +1202,7 @@ export function App() {
                   className="font-bold tracking-widest uppercase text-xs font-orbitron mb-1"
                   style={{ color: hudAccentLight }}
                 >
-                  {isPlayTestMode ? 'Play Test Paused' : 'Paused'}
+                  {isPlayTestMode ? t('hud.playTestPaused') : t('hud.paused')}
                 </div>
                 <h2 className="text-xl font-bold font-orbitron text-white tracking-wider mb-6">
                   {currentChart.metadata.title}
@@ -1204,7 +1214,7 @@ export function App() {
                   <button
                     onClick={isPlayTestMode ? handleExitPlayTest : handleReturnToMenu}
                     className="glass-btn w-14 h-14 rounded-full text-white/85 hover:text-white flex items-center justify-center cursor-pointer group"
-                    title={isPlayTestMode ? '返回编辑器' : '返回主选单'}
+                    title={isPlayTestMode ? t('hud.backToEditor') : t('hud.backToMenu')}
                   >
                     <ArrowLeft size={22} className="group-hover:-translate-x-0.5 transition" />
                   </button>
@@ -1213,7 +1223,7 @@ export function App() {
                   <button
                     onClick={handleTogglePause}
                     className="w-18 h-18 rounded-full border text-white flex items-center justify-center transition cursor-pointer transform hover:scale-105 active:scale-95"
-                    title="继续游玩"
+                    title={t('hud.continue')}
                     style={{
                       borderColor: hudAccentLight,
                       background: primaryGradient,
@@ -1229,7 +1239,7 @@ export function App() {
                   <button
                     onClick={() => isPlayTestMode ? handleStartPlayTest(false) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.diffName)}
                     className="w-14 h-14 rounded-full border flex items-center justify-center transition cursor-pointer group"
-                    title="重新开始"
+                    title={t('hud.retry')}
                     style={{
                       borderColor: hudAccent40,
                       background: withAlpha(accent, 0.1),
@@ -1252,7 +1262,7 @@ export function App() {
                 </div>
 
                 <div className="text-[10px] text-white/45 uppercase tracking-wider">
-                  {isPlayTestMode ? '返回编辑器 | 继续 (3秒倒数) | 从头重试' : '返回选曲 | 继续 (3秒倒数) | 重试'}
+                  {isPlayTestMode ? t('hud.backEditorStates') : t('hud.backMenuStates')}
                 </div>
               </div>
             </div>
@@ -1285,7 +1295,7 @@ export function App() {
               onClick={handleTogglePause}
               disabled={isSongEnded}
               className={`p-1.5 rounded-lg border backdrop-blur-md transition ${isSongEnded ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-              title={isSongEnded ? '谱面已结束' : '暂停'}
+              title={isSongEnded ? t('hud.songEnded') : t('hud.pause')}
               style={{
                 background: withAlpha(accent, 0.12),
                 borderColor: withAlpha(accent, 0.4),

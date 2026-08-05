@@ -77,11 +77,23 @@ export interface ResolvedSlideNode extends SlideNodeData {
   timeSec: number;
 }
 
+/** A rectangular hit region (axis-aligned) in note-space, used by the
+ *  overlap-merge tap judgment (方案二): when a tap is consumed, its own
+ *  hitbox is merged into the other same-time taps the touch point overlapped. */
+export interface HitRegion {
+  x: number;
+  y: number;
+  half: number;
+}
+
 /** Runtime-resolved note with absolute time in seconds */
 export interface ResolvedNote extends NoteData {
   timeSec: number;
   /** Slide only: resolved child nodes */
   resolvedNodes?: ResolvedSlideNode[];
+  /** Extra hit regions (besides the note's own TAP_HIT_HALF box) gained from
+   *  consuming other overlapping same-time taps. Runtime-only, reset per play. */
+  extraHitRegions?: HitRegion[];
 }
 
 /** Runtime-resolved event with absolute time in seconds */
