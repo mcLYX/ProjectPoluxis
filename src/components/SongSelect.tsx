@@ -415,7 +415,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     <div
       ref={containerRef}
       onClick={handleContainerClick}
-      className="absolute inset-0 z-20 flex flex-col bg-black/45 backdrop-blur-md"
+      className="absolute inset-0 z-20 bg-black/45 backdrop-blur-md"
     >
       {/* Dim + blurred cover background — fades in when a card is expanded, and
           cross-dissolves when switching cards. All transitions delayed 0.5s. */}
@@ -446,6 +446,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         />
         <div className="absolute inset-0 bg-black/70" />
       </div>
+
+      {/* UI 框：卡片 UI 限制在中间 2:1 安全区，封面背景已全屏 */}
+      <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[calc(100vh*2)] flex flex-col">
 
       {/* Top Bar (hidden in result mode) */}
       {!result && (
@@ -663,6 +666,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         )}
       </div>
       )}
+      </div>{/* /UI 框 */}
     </div>
   );
 };

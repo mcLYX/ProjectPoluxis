@@ -1709,11 +1709,23 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
     let best: ResolvedNote | null = null;
     let bestDist = Infinity;
-    // Closer to touch point wins; on exact tie pick the EARLIER note (smaller
-    // timeSec). We must NOT compare ids: chart ids are arbitrary strings the
-    // author can reorder or make non-numeric (e.g. "note-10" < "note-9" as a
-    // string), so use the numeric timeSec instead — stable and id-independent.
+    // Selection rule (fixes late-tap swallow bug): when the touch point lands
+    // inside the hitbox of taps at DIFFERENT times (neighbouring close taps with
+    // overlapping TAP_HIT_HALF boxes), prefer the MOST LATE one — the tap closest
+    // to its miss deadline is the one the player is racing to rescue. Judging the
+    // nearer-but-later tap first would swallow the earlier late tap (e.g. note-291
+    // late but note-292 closer → 292 got judged, 291 dropped). Within the chosen
+    // time group (truly same-time overlapping taps) fall back to 方案二: pick the
+    // closest to the touch point, then merge hitboxes. Times are numeric and
+    // id-independent (ids can be arbitrary strings).
+    let bestLate = -Infinity;
+    let bestTimeSec = Infinity;
     for (const n of overlapSet) {
+      const late = curTime - n.timeSec; // seconds, signed; larger = later
+      if (late > bestLate) { bestLate = late; bestTimeSec = n.timeSec; }
+    }
+    for (const n of overlapSet) {
+      if (n.timeSec !== bestTimeSec) continue; // only the most-late time group
       const d = Math.hypot(px - n.x, py - n.y);
       if (d < bestDist || (d === bestDist && best !== null && n.timeSec < best.timeSec)) {
         best = n;

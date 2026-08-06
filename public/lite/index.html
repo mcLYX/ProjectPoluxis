@@ -2423,11 +2423,22 @@ if (!Object.assign) {
       if (inOwn || inExtra) overlapSet.push(n);
     }
     var best = null, bestDist = Infinity;
-    // Closer wins; on exact tie pick EARLIER note (smaller timeSec). Do NOT compare
-    // ids: chart ids are arbitrary strings the author can reorder or make
-    // non-numeric, so use numeric timeSec instead (stable, id-independent).
+    // Selection rule (fixes late-tap swallow bug): when the touch point lands
+    // inside hitboxes of taps at DIFFERENT times (neighbouring close taps whose
+    // TAP_HIT_HALF boxes overlap), prefer the MOST LATE one — closest to its miss
+    // deadline, the tap the player is racing to rescue. Judging the nearer-but-
+    // later tap first would swallow the earlier late tap (e.g. note-291 late but
+    // note-292 closer → 292 judged, 291 dropped). Within the chosen time group
+    // (truly same-time overlapping taps) fall back to 方案二: closest to touch
+    // point wins; then merge hitboxes. Times numeric & id-independent.
+    var bestLate = -Infinity, bestTimeSec = Infinity;
     for (var k = 0; k < overlapSet.length; k++) {
-      var m = overlapSet[k];
+      var lat = curTime - overlapSet[k].timeSec; // seconds, signed; larger = later
+      if (lat > bestLate) { bestLate = lat; bestTimeSec = overlapSet[k].timeSec; }
+    }
+    for (var k2 = 0; k2 < overlapSet.length; k2++) {
+      var m = overlapSet[k2];
+      if (m.timeSec !== bestTimeSec) continue; // only the most-late time group
       var dxm = m.x - wx, dym = m.y - wy;
       var d = Math.sqrt(dxm * dxm + dym * dym);
       if (d < bestDist || (d === bestDist && best !== null && m.timeSec < best.timeSec)) { best = m; bestDist = d; }

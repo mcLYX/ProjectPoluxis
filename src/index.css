@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+html, body {
+  background: #0a0d12;
+}
+
 /* "short" variant: viewports with limited height (landscape phones etc.)
    Used by the song-card result overlay for a compact layout. */
 @custom-variant short (@media (max-height: 620px));

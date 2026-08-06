@@ -971,7 +971,7 @@ export function App() {
   }, [currentChart]);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#0a0d12] select-none text-white font-rajdhani">
+    <div className="relative w-full h-screen overflow-hidden bg-[#0a0d12] select-none text-white font-rajdhani">
       {/* Dynamic Ambient BG — fully static dark color in Low Quality Mode to save massive shader resources */}
       {qualityMode === 'low' ? (
         <div className="absolute inset-0 bg-[#0e1218] pointer-events-none z-0" />
@@ -1033,6 +1033,9 @@ export function App() {
           />
         </div>
       )}
+
+      {/* ── UI 框：游戏内 / 编辑器 UI 限制在中间 2:1 安全区，背景与游戏主体全屏 ── */}
+      <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[calc(100vh*2)] z-10 pointer-events-none">
 
       {/* Visual Chart Editor Overlay when in Editor Mode */}
       {gameState === 'editor' && (
@@ -1317,7 +1320,9 @@ export function App() {
         </div>
       )}
 
-      {/* Main Menu Screen — Vertical Card Carousel */}
+      </div>{/* /UI 框 */}
+
+      {/* Main Menu Screen — Vertical Card Carousel (封面背景全屏；卡片 UI 在 SongSelect 内部框入 2:1) */}
       {gameState === 'menu' && (
         <div className={`absolute inset-0 z-20 transition-opacity duration-300 ${
           transitionPhase === 'fade-out' ? 'opacity-0' : 'opacity-100'

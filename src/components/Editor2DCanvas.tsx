@@ -269,7 +269,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         ctx.moveTo(fl, py);
         ctx.lineTo(fl + fw, py);
         ctx.stroke();
-        if (isInteger) {
+        if (isInteger && b >= 0) {
           ctx.fillStyle = 'rgba(150,210,255,0.5)';
           ctx.font = `${10 * dpr}px monospace`;
           ctx.fillText(`${Math.round(b)}`, fl + 4, py - 3);
