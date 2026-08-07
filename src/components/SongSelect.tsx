@@ -447,13 +447,13 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         <div className="absolute inset-0 bg-black/70" />
       </div>
 
-      {/* UI 框：卡片 UI 限制在中间 2:1 安全区，封面背景已全屏 */}
-      <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[calc(100vh*2)] flex flex-col">
+      {/* 全屏层：卡片轮播横向铺满整屏（滚动连续），上下栏另行固定在 2:1 安全区 */}
+      <div className="absolute inset-0 flex flex-col">
 
       {/* Top Bar (hidden in result mode) */}
       {!result && (
-      <div className="relative z-10 flex items-center justify-between px-6 py-4 min-h-[60px]">
-        <div className="flex items-center gap-3 min-w-0">
+      <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between py-4 min-h-[60px] pointer-events-none" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))', paddingLeft: 'max(1.5rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1.5rem, env(safe-area-inset-right, 0px))' }}>
+        <div className="flex items-center gap-3 min-w-0 pointer-events-auto">
           {viewDepth === 'album' && (
             <button
               onClick={handleBackToRoot}
@@ -479,7 +479,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap pointer-events-auto">
           <button
             onClick={onOpenDocs}
             className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
@@ -531,15 +531,16 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         data-scroll-container
         onClick={handleContainerClick}
         className={`
+          song-carousel
           relative z-10 flex-1 flex items-center overflow-x-auto overflow-y-hidden
           ${result ? 'justify-center' : 'justify-start'}
           gap-6
-          px-10 py-8
+          py-8
           scroll-smooth
         `}
         style={{
-          scrollbarWidth: 'thin',
-          scrollbarColor: 'rgba(6, 182, 212, 0.3) transparent',
+          paddingLeft: 'max(2.5rem, env(safe-area-inset-left, 0px))',
+          paddingRight: 'max(2.5rem, env(safe-area-inset-right, 0px))',
           opacity: albumAnimPhase === 'exit' || albumAnimPhase === 'enter-start' ? 0 : 1,
           transform: albumAnimPhase === 'exit'
             ? `translateX(${albumAnimDir === 'in' ? '-60px' : '60px'})`
@@ -638,8 +639,8 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
       {/* Bottom Bar (hidden in result mode) */}
       {!result && (
-      <div className="relative z-10 flex flex-wrap items-center justify-between gap-4 px-6 py-4">
-        <div className="flex items-center gap-6 text-xs text-white/70">
+      <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-wrap items-center justify-between gap-4 py-4 pointer-events-none" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 0px))', paddingLeft: 'max(1.5rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1.5rem, env(safe-area-inset-right, 0px))' }}>
+        <div className="flex items-center gap-6 text-xs text-white/70 pointer-events-auto">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"

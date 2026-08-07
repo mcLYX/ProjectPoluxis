@@ -298,3 +298,42 @@ canvas {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.32);
 }
+
+/* Song-select card carousel: hide the scrollbar entirely. The card's back-ease
+   expand overshoots the target size momentarily, which makes scrollWidth
+   briefly overflow and flashes an ugly scrollbar at the bottom — and on
+   non-overlay scrollbar devices that bar eats layout height and shoves the
+   centered cards upward. We hide it (scrolling still works) and contain the
+   overscroll so the bounce can't chain to the page. This element-scoped rule
+   overrides the global ::-webkit-scrollbar above (higher specificity). */
+.song-carousel {
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;         /* legacy Edge/IE */
+  overscroll-behavior-x: contain;
+}
+.song-carousel::-webkit-scrollbar {
+  display: none;
+}
+
+/* Settings modal height: stable across tabs (no jump) and smooth while
+   resizing the window. Pure height-driven, continuous piecewise:
+     - tall screens (>=850px): 80vh
+     - mid screens (723..850px): fixed 680px (plateau — no change while dragging)
+     - short screens (<=723px): 94vh (fills small/landscape screens)
+   The two hinge points are chosen so the pieces meet exactly (80vh==680 at
+   850px, 94vh==680 at 723px) -> dragging never jumps.
+   max-height keeps it inside the safe-area on notched devices. */
+.settings-modal {
+  height: 80vh;
+  max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 1.5rem);
+}
+@media (max-height: 850px) {
+  .settings-modal {
+    height: 680px;
+  }
+}
+@media (max-height: 723px) {
+  .settings-modal {
+    height: 94vh;
+  }
+}

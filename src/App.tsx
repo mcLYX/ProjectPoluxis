@@ -1034,8 +1034,16 @@ export function App() {
         </div>
       )}
 
-      {/* ── UI 框：游戏内 / 编辑器 UI 限制在中间 2:1 安全区，背景与游戏主体全屏 ── */}
-      <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[calc(100vh*2)] z-10 pointer-events-none">
+      {/* ── UI 层：游戏内 / 编辑器 UI 全屏铺满，仅靠 safe-area 避开刘海/灵动岛；不再有 2:1 强行限制 ── */}
+      <div
+        className="absolute inset-0 z-10 pointer-events-none"
+        style={{
+          paddingTop: 'env(safe-area-inset-top, 0px)',
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          paddingLeft: 'env(safe-area-inset-left, 0px)',
+          paddingRight: 'env(safe-area-inset-right, 0px)',
+        }}
+      >
 
       {/* Visual Chart Editor Overlay when in Editor Mode */}
       {gameState === 'editor' && (
@@ -1322,7 +1330,7 @@ export function App() {
 
       </div>{/* /UI 框 */}
 
-      {/* Main Menu Screen — Vertical Card Carousel (封面背景全屏；卡片 UI 在 SongSelect 内部框入 2:1) */}
+      {/* Main Menu Screen — Vertical Card Carousel (封面背景全屏；卡片 UI 全屏铺满，靠 safe-area 避让刘海，无 2:1 限制) */}
       {gameState === 'menu' && (
         <div className={`absolute inset-0 z-20 transition-opacity duration-300 ${
           transitionPhase === 'fade-out' ? 'opacity-0' : 'opacity-100'

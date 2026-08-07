@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0b1120">
   <!-- PWA manifest (relative so it works under a sub-path like /poluxis/lite/) -->
   <link rel="manifest" href="../manifest.webmanifest">
@@ -61,7 +61,7 @@
     /* IE11 fallback for gradient text is at the end of the stylesheet
      * (must come after the base rules so it can override them). */
     .menu-subtitle { text-align: center; font-size: 12px; color: #94a3b8; letter-spacing: 2px; margin: 4px 0 0 0; }
-    .chart-list { -ms-flex: 1 1 auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: 720px; width: 100%; margin: 0 auto; padding: 16px 0; }
+    .chart-list { -ms-flex: 1 1 auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: 720px; width: 100%; margin: 0 auto; padding: max(16px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
     .chart-card {
       padding: 14px 18px; margin-bottom: 10px; border-radius: 14px; cursor: pointer;
       background: rgba(9, 17, 36, 0.9); border: 1px solid rgba(6, 182, 212, 0.2);
@@ -136,7 +136,7 @@
 
     /* Result */
     #result-screen { -ms-flex-pack: center; justify-content: center; -ms-flex-align: center; align-items: center; background: rgba(5, 7, 13, 0.85); }
-    .result-card { max-width: 420px; width: 90%; margin: 0 auto; background: rgba(14, 27, 56, 0.95); border: 1px solid rgba(6,182,212,0.3); border-radius: 18px; padding: 28px; text-align: center; }
+    .result-card { max-width: 420px; width: 90%; margin: max(16px, env(safe-area-inset-top, 0px)) auto max(16px, env(safe-area-inset-bottom, 0px)); background: rgba(14, 27, 56, 0.95); border: 1px solid rgba(6,182,212,0.3); border-radius: 18px; padding: 28px; text-align: center; }
     .result-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 4px 0; letter-spacing: 1px; word-break: break-word; }
     .result-meta { font-size: 11px; color: #94a3b8; margin: 0 0 14px 0; }
     .result-rank {
@@ -171,7 +171,7 @@
       position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%;
       z-index: 20; display: none;
       background: rgba(0,0,0,0.6);
-      padding: 16px; box-sizing: border-box;
+      padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); box-sizing: border-box;
     }
     .modal-backdrop.active { display: block; }
     .modal-card {
