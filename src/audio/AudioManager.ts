@@ -393,10 +393,12 @@ export class AudioManager {
       this.bgmSource.connect(this.bgmGain);
       this.bgmSource.start(audioStartInCtx, Math.max(0, startOffsetSec));
     } else {
-      /* Synthesizer can't easily schedule in the future. Start immediately
-       * from the same offset — timing stays consistent because the game clock
-       * already accounts for lead-in. The synth's simple tones are fine. */
-      this.startSynthesizedMusic(Math.max(0, startOffsetSec));
+      /* The synthesizer is a setInterval-based loop that starts immediately by
+       * default, but the game clock (via startTime) already accounts for the
+       * lead-in. We delay the first tick by leadInSec so the synth audio
+       * actually begins at the same moment the game clock reaches zero — in
+       * lockstep with the notes, just like the buffer-source path. */
+      this.startSynthesizedMusic(Math.max(0, startOffsetSec), leadInSec);
     }
   }
 
@@ -459,6 +461,84 @@ export class AudioManager {
     if (this.synthInterval) {
       window.clearInterval(this.synthInterval);
       this.synthInterval = null;
+    }
+  }
+
+  /** In-place position jump while staying in the playing state — no stop/play
+   *  cycle, no lead-in delay, no audible gap on buffer audio. Designed for
+   *  editor scrubbing and timeline seeks. The game clock is adjusted so
+   *  getCurrentTime() reads `targetSec` immediately after the call.
+   *
+   *  - Buffer audio: stop the current source and start a new one from
+   *    `targetSec`, reusing the existing gain node so there's no volume jump.
+   *  - Synthesised audio: clear the interval, recalculate the step from
+   *    `targetSec`, and restart the tick loop. */
+  public seek(targetSec: number) {
+    if (!this.isPlaying || !this.ctx) return;
+    const useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
+
+    // Update the game clock so time immediately reads `targetSec`
+    this.startTime = this.ctx.currentTime - (targetSec - this.userAudioOffset) / this.playbackRate;
+
+    if (useBuffer && this.bgmBuffer && this.bgmGain) {
+      // Stop old source, start new one from the new offset
+      if (this.bgmSource) {
+        try { this.bgmSource.stop(); this.bgmSource.disconnect(); } catch {}
+        this.bgmSource = null;
+      }
+      this.bgmSource = this.ctx.createBufferSource();
+      this.bgmSource.buffer = this.bgmBuffer;
+      this.bgmSource.playbackRate.value = this.playbackRate;
+      this.bgmSource.connect(this.bgmGain);
+      this.bgmSource.start(0, Math.max(0, targetSec));
+    } else {
+      // Synthesised: restart the interval loop from the matching step
+      if (this.synthInterval) {
+        window.clearInterval(this.synthInterval);
+        this.synthInterval = null;
+      }
+      const beatInterval = 60 / this.synthBpm;
+      let step = Math.floor(targetSec / (beatInterval / 4));
+      const chords = [
+        [220, 277.18, 329.63, 440],
+        [174.61, 220, 261.63, 349.23],
+        [261.63, 329.63, 392, 523.25],
+        [196, 246.94, 293.66, 392],
+      ];
+      const tick = () => {
+        if (!this.isPlaying || !this.ctx || !this.bgmGain) return;
+        const now = this.ctx.currentTime;
+        const beat16 = step % 16;
+        const bar = Math.floor(step / 16) % chords.length;
+        const chord = chords[bar];
+        if (beat16 % 4 === 0) {
+          const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
+          o.type = 'sine'; o.frequency.setValueAtTime(140, now); o.frequency.exponentialRampToValueAtTime(35, now + 0.08);
+          g.gain.setValueAtTime(0.8, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+          o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.12);
+        }
+        if (beat16 === 4 || beat16 === 12) {
+          const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
+          o.type = 'triangle'; o.frequency.setValueAtTime(240, now); o.frequency.exponentialRampToValueAtTime(80, now + 0.09);
+          g.gain.setValueAtTime(0.5, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+          o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.1);
+        }
+        if (beat16 % 2 === 1) {
+          const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
+          o.type = 'triangle'; o.frequency.setValueAtTime(3000, now);
+          g.gain.setValueAtTime(0.15, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+          o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.04);
+        }
+        const arpNote = chord[beat16 % chord.length];
+        const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
+        o.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine';
+        o.frequency.setValueAtTime(arpNote, now);
+        g.gain.setValueAtTime(0.25, now); g.gain.exponentialRampToValueAtTime(0.001, now + beatInterval * 0.35);
+        o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + beatInterval * 0.35);
+        step++;
+      };
+      tick();
+      this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
     }
   }
 
@@ -759,7 +839,7 @@ export class AudioManager {
     o1.start(now); o2.start(now); o1.stop(now + 0.06); o2.stop(now + 0.06);
   }
 
-  private startSynthesizedMusic(startOffset: number) {
+  private startSynthesizedMusic(startOffset: number, leadInSec = 0) {
     if (!this.ctx || !this.bgmGain) return;
     const beatInterval = 60 / this.synthBpm;
     let step = Math.floor(startOffset / (beatInterval / 4));
@@ -801,7 +881,20 @@ export class AudioManager {
       o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + beatInterval * 0.35);
       step++;
     };
-    this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
+    const intervalMs = (beatInterval / 4) * 1000;
+    if (leadInSec > 0) {
+      /* Defer the first tick by leadInSec so the synth starts exactly when
+       * the game clock reaches zero — the same lockstep as buffer audio. */
+      const delayMs = leadInSec * 1000;
+      setTimeout(() => {
+        if (!this.isPlaying) return;
+        tick(); // first note
+        this.synthInterval = window.setInterval(tick, intervalMs);
+      }, delayMs);
+    } else {
+      tick();
+      this.synthInterval = window.setInterval(tick, intervalMs);
+    }
   }
 }
 

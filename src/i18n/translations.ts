@@ -206,6 +206,17 @@ export const translations: AllDicts = {
     'settings.done': '完成',
     'settings.language': '语言',
 
+    // --- FileManagerModal (chart upload) ---
+    'filemanager.title': '谱面上传',
+    'filemanager.formatError': '谱面格式不符合规范',
+    'filemanager.noJson': '未上传 JSON 谱面文件。',
+    'filemanager.audioLabel': '1. 音频文件上传',
+    'filemanager.ready': '已就绪: {name} ({size} MB)',
+    'filemanager.chartLabel': '2. 谱面 JSON 文件上传',
+    'filemanager.valid': '校验通过: {name} ({notes} 个音符, {difficulty})',
+    'filemanager.cancel': '取消',
+    'filemanager.start': '加载并开始游戏',
+
     // --- DocModal ---
     'doc.title': 'Project:Poluxis 说明',
     'doc.subtitle': '游戏机制、音符类型与谱面格式规范',
@@ -427,6 +438,17 @@ export const translations: AllDicts = {
     'settings.done': 'Done',
     'settings.language': 'Language',
 
+    // --- FileManagerModal (chart upload) ---
+    'filemanager.title': 'Chart Upload',
+    'filemanager.formatError': 'Chart format is invalid',
+    'filemanager.noJson': 'No JSON chart file uploaded.',
+    'filemanager.audioLabel': '1. Upload audio file',
+    'filemanager.ready': 'Ready: {name} ({size} MB)',
+    'filemanager.chartLabel': '2. Upload chart JSON',
+    'filemanager.valid': 'Validated: {name} ({notes} notes, {difficulty})',
+    'filemanager.cancel': 'Cancel',
+    'filemanager.start': 'Load & Start',
+
     // --- DocModal ---
     'doc.title': 'About Project:Poluxis',
     'doc.subtitle': 'Gameplay Mechanics, Note Types & Chart Format Spec',
@@ -647,6 +669,17 @@ export const translations: AllDicts = {
     'settings.audioOffsetHint': '再生遅延。負は早め、正は遅め。Bluetooth イヤホン使用時は遅延を補うため負に設定すると良い。',
     'settings.done': '完了',
     'settings.language': '言語',
+
+    // --- FileManagerModal (chart upload) ---
+    'filemanager.title': '譜面アップロード',
+    'filemanager.formatError': '譜面のフォーマットが正しくありません',
+    'filemanager.noJson': 'JSON 譜面ファイルがアップロードされていません。',
+    'filemanager.audioLabel': '1. オーディオファイルをアップロード',
+    'filemanager.ready': '準備完了: {name} ({size} MB)',
+    'filemanager.chartLabel': '2. 譜面 JSON をアップロード',
+    'filemanager.valid': '検証完了: {name} ({notes} 音符, {difficulty})',
+    'filemanager.cancel': 'キャンセル',
+    'filemanager.start': '読み込んで開始',
 
     // --- DocModal ---
     'doc.title': 'Project:Poluxis について',

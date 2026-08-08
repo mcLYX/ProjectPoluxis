@@ -454,7 +454,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
     // Scrub mode: vertical drag on empty space moves the playhead.
     if (drag.isScrub) {
-      const { height } = fieldRect(w, h);
+      // const { height } = fieldRect(w, h);
       const pxPerBeat = pxPerBeatRef.current;
       const dy = py - drag.lastPy;
       drag.lastPy = py;

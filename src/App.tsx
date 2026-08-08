@@ -652,7 +652,8 @@ export function App() {
     );
     setGameTime(targetSec);
     if (gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)) {
-      globalAudio.play(targetSec);
+      // In-place seek: no stop/play cycle, no lead-in, no audible gap.
+      globalAudio.seek(targetSec);
     }
   };
 

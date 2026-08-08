@@ -1426,7 +1426,7 @@ if (!Object.assign) {
       this.bgmSource.connect(this.bgmGain);
       this.bgmSource.start(audioStartInCtx, Math.max(0, offsetSec));
     } else {
-      this.startSynthesizedMusic(Math.max(0, offsetSec));
+      this.startSynthesizedMusic(Math.max(0, offsetSec), leadInSec);
     }
   };
   LiteAudio.prototype.pause = function () { if (!this.isPlaying) return; this.pauseTime = this.getCurrentTime(); this.stop(); };
@@ -1459,7 +1459,7 @@ if (!Object.assign) {
     return (this.ctx.currentTime - this.startTime) + this.userOffset;
   };
   /* Synth BGM — ported from AudioManager.ts L293-336 (4-chord arp + kick + hat) */
-  LiteAudio.prototype.startSynthesizedMusic = function (startOffset) {
+  LiteAudio.prototype.startSynthesizedMusic = function (startOffset, leadInSec) {
     if (!this.ctx || !this.bgmGain) return;
     var beatInterval = 60 / this.synthBpm;
     var step = Math.floor(startOffset / (beatInterval / 4));
@@ -1494,7 +1494,19 @@ if (!Object.assign) {
       ao.connect(ag); ag.connect(self.bgmGain); ao.start(t); ao.stop(t + beatInterval * 0.35);
       step++;
     };
-    this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
+    var intervalMs = (beatInterval / 4) * 1000;
+    if (leadInSec > 0) {
+      /* Defer the first tick by leadInSec so the synth starts exactly when the
+       * game clock reaches zero — same lockstep as buffer audio. */
+      window.setTimeout(function () {
+        if (!self.isPlaying) return;
+        tick();
+        self.synthInterval = window.setInterval(tick, intervalMs);
+      }, leadInSec * 1000);
+    } else {
+      tick();
+      this.synthInterval = window.setInterval(tick, intervalMs);
+    }
   };
   var audio = new LiteAudio();
 
@@ -3220,7 +3232,7 @@ if (!Object.assign) {
           for (var di = 0; di < item.difficulties.length; di++) {
             var diff = item.difficulties[di];
             var isCurDiff = di === selectedDiffIdx;
-            var diffLevel = typeof diff.level === 'number' ? ' Lv.' + diff.level : '';
+            var diffLevel = (typeof diff.level === 'number' && diff.level > 0) ? ' Lv.' + diff.level : '';
             /* Glass style, accent-aware (inline because these are built per render) */
             var dAcc = Theme.accent();
             var diffStyle = isCurDiff
@@ -3491,7 +3503,7 @@ if (!Object.assign) {
   var DEMO_CHARTS = {
     'neon-cyberspace': {
       metadata: {
-        title: 'Neon Cyberspace', artist: 'K3-CYBER // SYNTH', difficulty: 'Master [Lv.14]',
+        title: 'Neon Cyberspace', artist: 'SYSTEM TEST // DEMO', difficulty: 'Hard Lv.6',
         bpm: 140, offset: 0.05,
         bgScheme: { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' },
         noteColor: '#00f0ff'
@@ -3534,7 +3546,7 @@ if (!Object.assign) {
     },
     'quantum-horizon': {
       metadata: {
-        title: 'Quantum Horizon', artist: 'AETHER FLIGHT', difficulty: 'Standard [Lv.7]',
+        title: 'Quantum Horizon', artist: 'SYSTEM TEST // DEMO', difficulty: 'Easy Lv.3',
         bpm: 128, offset: 0.0,
         bgScheme: { gradientStart: '#081120', gradientEnd: '#0a1d37', accentColor: '#38bdf8' },
         noteColor: '#38bdf8'
@@ -3562,7 +3574,7 @@ if (!Object.assign) {
     },
     'starlight-pulse': {
       metadata: {
-        title: 'Starlight Pulse', artist: 'HYPER-DRIVE 174', difficulty: 'Expert [Lv.11]',
+        title: 'Starlight Pulse', artist: 'SYSTEM TEST // DEMO', difficulty: 'Normal Lv.5',
         bpm: 174, offset: 0.02,
         bgScheme: { gradientStart: '#041712', gradientEnd: '#132c1c', accentColor: '#10b981' },
         noteColor: '#10b981'

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ChartData } from '../types/game';
 import { parseAndValidateChart } from '../utils/chartParser';
 import { Upload, Music, FileCode, CheckCircle, AlertCircle, X } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 interface FileManagerModalProps {
   isOpen: boolean;
@@ -18,6 +19,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
   const [chartData, setChartData] = useState<ChartData | null>(null);
   const [chartFileName, setChartFileName] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const { t } = useI18n();
 
   if (!isOpen) return null;
 
@@ -39,7 +41,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
           setChartData(res.chart);
           setErrorMessage(null);
         } else {
-          setErrorMessage(res.error || '谱面格式不符合规范');
+          setErrorMessage(res.error || t('filemanager.formatError'));
           setChartData(null);
         }
       };
@@ -49,7 +51,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
 
   const handleConfirm = () => {
     if (!chartData) {
-      setErrorMessage('未上传 JSON 谱面文件。');
+      setErrorMessage(t('filemanager.noJson'));
       return;
     }
     onSelectCustomSong(chartData, audioFile || undefined);
@@ -66,9 +68,8 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
             </div>
             <div>
               <h2 className="text-xl font-bold font-orbitron tracking-wider text-white/90">
-                谱面上传
+                {t('filemanager.title')}
               </h2>
-              <p className="text-xs text-white/50">Local Audio & JSON Chart Processing (No Server Upload)</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1 rounded-lg hover:bg-white/10 text-white/55 hover:text-white">
@@ -87,7 +88,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
           {/* Audio Upload */}
           <div className="p-4 rounded-xl glass-sub border border-white/10">
             <label className="block text-sm font-bold text-white mb-2 flex items-center gap-2">
-              <Music size={16} /> 1. 音频文件上传
+              <Music size={16} /> {t('filemanager.audioLabel')}
             </label>
             <input
               type="file"
@@ -97,7 +98,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
             />
             {audioFile && (
               <div className="mt-2 text-xs text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle size={14} /> 已就绪: {audioFile.name} ({(audioFile.size / 1024 / 1024).toFixed(2)} MB)
+                <CheckCircle size={14} /> {t('filemanager.ready', { name: audioFile.name, size: (audioFile.size / 1024 / 1024).toFixed(2) })}
               </div>
             )}
           </div>
@@ -105,7 +106,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
           {/* Chart JSON Upload */}
           <div className="p-4 rounded-xl glass-sub border border-white/10">
             <label className="block text-sm font-bold text-white mb-2 flex items-center gap-2">
-              <FileCode size={16} /> 2. 谱面 JSON 文件上传 
+              <FileCode size={16} /> {t('filemanager.chartLabel')}
             </label>
             <input
               type="file"
@@ -115,7 +116,7 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
             />
             {chartData && (
               <div className="mt-2 text-xs text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle size={14} /> 校验通过: {chartFileName} ({chartData.notes.length} 个音符, {chartData.metadata.difficulty})
+                <CheckCircle size={14} /> {t('filemanager.valid', { name: chartFileName, notes: chartData.notes.length, difficulty: chartData.metadata.difficulty })}
               </div>
             )}
           </div>
@@ -126,13 +127,13 @@ export const FileManagerModal: React.FC<FileManagerModalProps> = ({
             onClick={onClose}
             className="glass-btn px-5 py-2 rounded-xl text-white/80 font-semibold"
           >
-            取消
+            {t('filemanager.cancel')}
           </button>
           <button
             onClick={handleConfirm}
             className="px-6 py-2 rounded-xl glass-btn-primary font-bold transition cursor-pointer active:scale-95"
           >
-            加载并开始游戏
+            {t('filemanager.start')}
           </button>
         </div>
       </div>
