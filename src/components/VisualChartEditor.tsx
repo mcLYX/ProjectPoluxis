@@ -74,7 +74,7 @@ interface VisualChartEditorProps {
   /** 2D editor: vertical pixels between adjacent integer beats (time-axis zoom). */
   pxPerBeat: number;
   onSetPxPerBeat: (n: number) => void;
-  onUploadAudioFile: (file: File) => void;
+  onUploadAudioFile: (file: File) => Promise<void>;
   onExitEditor: () => void;
   onStartPlayTest: (fromCurrentBeat: boolean) => void;
   /** '3d' = default perspective view; '2d' = top-down falling-editor view. */
@@ -343,9 +343,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     onSelectNote(null);
   };
 
-  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAudioUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      onUploadAudioFile(e.target.files[0]);
+      try {
+        await onUploadAudioFile(e.target.files[0]);
+        setFileError(null);
+      } catch (err) {
+        setFileError(err instanceof Error ? err.message : t('editor.audioDecodeError'));
+      }
     }
   };
 

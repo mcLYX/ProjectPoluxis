@@ -144,32 +144,37 @@ export class AudioManager {
     return this.musicVolume;
   }
 
-  /** Try to load the 4 packaged OGG hit/ui sounds from /sounds/. Any
-   *  individual fetch/decode failure is swallowed — preRenderHitSounds() acts
-   *  as a synchronous fallback that always leaves at least one buffer in
-   *  place. */
+  /** Try to load the 4 packaged hit/ui sounds from /sounds/. Safari/WebKit
+   *  cannot decode OGG Vorbis at all, so we try multiple extensions per sound
+   *  (ogg → mp3 → m4a) and use whichever the browser can actually decode.
+   *  Any sound that still fails to load falls back to preRenderHitSounds(). */
   private async loadBuiltinSounds(): Promise<void> {
     if (!this.ctx) return;
-    const list: Array<{ key: NoteType | 'ui'; url: string }> = [
-      { key: 'tap',   url: 'sounds/tap.ogg'   },
-      { key: 'touch', url: 'sounds/touch.ogg' },
-      { key: 'slide', url: 'sounds/slide.ogg' },
-      { key: 'ui',    url: 'sounds/ui.ogg'    },
+    const base: Array<{ key: NoteType | 'ui'; name: string }> = [
+      { key: 'tap',   name: 'tap'   },
+      { key: 'touch', name: 'touch' },
+      { key: 'slide', name: 'slide' },
+      { key: 'ui',    name: 'ui'    },
     ];
+    const extensions = ['ogg', 'mp3', 'm4a'];
     await Promise.all(
-      list.map(async ({ key, url }) => {
-        try {
-          const res = await fetch(url);
-          if (!res.ok) return;
-          const ab = await res.arrayBuffer();
-          const buffer = await this.ctx!.decodeAudioData(ab.slice(0));
-          if (key === 'ui') {
-            this.uiSoundBuffer = buffer;
-          } else {
-            this.hitSoundBuffers[key as NoteType] = buffer;
+      base.map(async ({ key, name }) => {
+        for (const ext of extensions) {
+          const url = `sounds/${name}.${ext}`;
+          try {
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const ab = await res.arrayBuffer();
+            const buffer = await this.ctx!.decodeAudioData(ab.slice(0));
+            if (key === 'ui') {
+              this.uiSoundBuffer = buffer;
+            } else {
+              this.hitSoundBuffers[key as NoteType] = buffer;
+            }
+            return; // success for this sound
+          } catch {
+            // try next extension
           }
-        } catch {
-          // swallow — fallback to procedural synthesis below
         }
       })
     );
@@ -310,7 +315,18 @@ export class AudioManager {
     this.init();
     if (!this.ctx) throw new Error('AudioContext failed to initialize');
     const arrayBuffer = await file.arrayBuffer();
-    const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+    let audioBuffer: AudioBuffer;
+    try {
+      audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+    } catch {
+      // Safari/WebKit cannot decode OGG Vorbis at all — surface a clear,
+      // actionable error instead of a cryptic decode failure.
+      const isOgg = /\.ogg$/i.test(file.name);
+      const hint = isOgg
+        ? ' (Safari 不支持 OGG 格式，请改用 MP3 / M4A)'
+        : ' (格式可能不被当前浏览器支持)';
+      throw new Error(`无法解码音频文件「${file.name}」${hint}`);
+    }
     this.bgmBuffer = audioBuffer;
     this.hasUploadedAudio = true;
     this.forceSynth = false;
@@ -325,7 +341,16 @@ export class AudioManager {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status} loading ${url}`);
     const arrayBuffer = await res.arrayBuffer();
-    const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
+    let audioBuffer: AudioBuffer;
+    try {
+      audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
+    } catch {
+      const isOgg = /\.ogg(\?|$)/i.test(url);
+      const hint = isOgg
+        ? ' (Safari 不支持 OGG 格式，请改用 MP3 / M4A)'
+        : ' (格式可能不被当前浏览器支持)';
+      throw new Error(`无法解码音频: ${url}${hint}`);
+    }
     if (setActive) {
       this.bgmBuffer = audioBuffer;
       this.hasUploadedAudio = true;

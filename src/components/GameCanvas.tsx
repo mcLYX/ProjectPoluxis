@@ -2661,6 +2661,20 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
   };
 
+  // iOS Safari 15+ shows a text-selection "loupe" (magnifier) on double-tap +
+  // hold that CSS alone cannot suppress. The only reliable fix is preventDefault
+  // on the native touchstart — and it MUST be non-passive, because React's
+  // onTouchStart is registered passively and its preventDefault() is ignored.
+  // Pointer events (used for gameplay/editor input) still fire normally, so note
+  // tapping and editor dragging are completely unaffected.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onTouchStart = (e: TouchEvent) => { e.preventDefault(); };
+    el.addEventListener('touchstart', onTouchStart, { passive: false });
+    return () => el.removeEventListener('touchstart', onTouchStart);
+  }, []);
+
   return (
     <div
       ref={containerRef}

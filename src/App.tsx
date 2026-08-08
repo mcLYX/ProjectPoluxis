@@ -736,9 +736,17 @@ export function App() {
   const handleSelectCustomSong = async (chart: ChartData, audioFile?: File) => {
     setCurrentChart(chart);
     if (audioFile) {
-      await globalAudio.loadAudioFile(audioFile);
-      setHasCustomAudio(true);
-      handleStartGame(chart, true);
+      try {
+        await globalAudio.loadAudioFile(audioFile);
+        setHasCustomAudio(true);
+        handleStartGame(chart, true);
+      } catch (err) {
+        // Decode failed (e.g. Safari can't play OGG) — fall back to the
+        // procedural synth so the game still starts, and explain in console.
+        console.error('[audio] custom audio decode failed, using synth:', err);
+        setHasCustomAudio(false);
+        handleStartGame(chart, false);
+      }
     } else {
       setHasCustomAudio(false);
       handleStartGame(chart, false);

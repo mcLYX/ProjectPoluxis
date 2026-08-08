@@ -2,6 +2,16 @@
 
 html, body {
   background: #0a0d12;
+  /* Disable iOS Safari double-tap zoom + the text-selection loupe/magnifier
+     that appears when gameplay taps register as text selection. The
+     user-scalable=no in the viewport <meta> is ignored by modern Safari, so
+     touch-action: manipulation is the reliable switch that also removes the
+     ~300ms double-tap delay. -webkit-touch-callout kills the long-press menu. */
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* "short" variant: viewports with limited height (landscape phones etc.)
@@ -248,7 +258,7 @@ canvas {
     font-size: 13px; /* scale down standard text sizes slightly */
   }
   .max-h-\[60vh\] {
-    max-h: 46vh !important; /* give carousel more breathing room on short screens */
+    max-height: 46vh !important; /* give carousel more breathing room on short screens */
   }
   .max-w-5xl {
     max-width: 92vw !important;
@@ -272,13 +282,13 @@ canvas {
     font-size: 12px;
   }
   .grid-cols-3 {
-    grid-cols: 1 !important; /* Stack selector grid on narrow screens */
+    grid-template-columns: 1fr !important; /* Stack selector grid on narrow screens */
     display: flex !important;
     flex-direction: column !important;
     gap: 0.75rem !important;
   }
   .max-h-\[46vh\] {
-    max-h: 40vh !important;
+    max-height: 40vh !important;
     overflow-y: auto !important;
   }
 }
