@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useMemo } from 'react';
+import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, BpmPoint, HitRegion } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion } from '../types/game';
 import { evaluateJudgement, calculateNoteScore, JUDGEMENT_COLORS } from '../utils/scoring';
-import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance } from '../utils/beatTime';
+import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { globalAudio } from '../audio/AudioManager';
 
 interface QuickCreateDelta {
@@ -691,11 +691,41 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
   useEffect(() => { resetPlayState(); }, [playSession, chart]);
 
+  // `vpKey` is bumped when the 3D viewport becomes visible again (see the
+  // ResizeObserver below) so the heavy setup effect re-runs with correct
+  // dimensions and the metadata edited while hidden.
+  const [vpKey, setVpKey] = useState(0);
+
+  // A plain window 'resize' listener does NOT fire when a container transitions
+  // display:none → block (e.g. switching the editor from 2D back to 3D), so the
+  // WebGL canvas never gets re-sized / re-built and stays blank. Watch the
+  // container with a ResizeObserver and bump `vpKey` on the hidden→visible edge.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let wasVisible = el.clientWidth > 0 && el.clientHeight > 0;
+    const ro = new ResizeObserver(() => {
+      const visible = el.clientWidth > 0 && el.clientHeight > 0;
+      if (visible && !wasVisible) setVpKey((k) => k + 1);
+      wasVisible = visible;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
     const w = container.clientWidth;
     const h = container.clientHeight;
+    // The 3D viewport may be hidden — e.g. the editor is in 2D view, where this
+    // canvas is display:none and reports a 0×0 box. Never build/rebuild the
+    // WebGL scene while hidden: doing so would create a useless 0×0 renderer and
+    // tear down the previously-good one, leaving a blank 3D view when we switch
+    // back. The ResizeObserver above bumps `vpKey` when the container becomes
+    // visible again, re-running this effect at the correct size with whatever
+    // metadata was edited while hidden.
+    if (w <= 0 || h <= 0) return;
     const scene = new THREE.Scene(); sceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(CAMERA_VFOV, w / h, 0.1, 1000);
     const dist0 = fitCameraDistance(w / h);
@@ -714,6 +744,23 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const existingCanvas = container.querySelector('canvas');
     if (existingCanvas) existingCanvas.remove();
     container.appendChild(renderer.domElement); rendererRef.current = renderer;
+
+    // iOS Safari (tabbed AND standalone/PWA) arms a double-tap-zoom gesture
+    // recognizer per touch *target*. That recognizer holds the 2nd+ rapid tap
+    // for ~300ms to decide if it's a zoom — which shows up as "missing fast
+    // taps" in gameplay. Setting touch-action: none on the parent isn't enough;
+    // it must be on the canvas itself (the element the touch actually lands
+    // on), so we pin it inline to survive any library/UA stylesheet override.
+    // The loupe/magnifier is already killed by the non-passive touchstart
+    // preventDefault below; here we also block text selection / callout that
+    // can swallow a held tap. Pointer events (gameplay input) are unaffected.
+    const cv = renderer.domElement;
+    cv.style.touchAction = 'none';
+    cv.style.userSelect = 'none';
+    (cv.style as any).webkitUserSelect = 'none';
+    (cv.style as any).webkitTouchCallout = 'none';
+    const onCanvasTouchStart = (e: TouchEvent) => { e.preventDefault(); };
+    cv.addEventListener('touchstart', onCanvasTouchStart, { passive: false });
 
     // effectToggles defaults to all-true (see chartParser.ts) — only the chart
     // author can explicitly disable each effect.
@@ -1009,65 +1056,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         particleSpriteRef.current = null;
       }
       renderer.dispose(); scene.clear();
+      cv.removeEventListener('touchstart', onCanvasTouchStart);
       sceneRef.current = null; cameraRef.current = null; rendererRef.current = null;
       ultraWallsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, noteRenderDistance]);
+  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, noteRenderDistance, vpKey]);
 
   // ====== Quick-Create time/beat helpers =========================================
-  /** Convert an audio-clock timestamp to a beat value using the chart's BPM +
-   *  bpmlist. This is the inverse of beatToSecondsMultiBpm and the direct
-   *  counterpart of the game's "currentBeat" logic — it's the same formula
-   *  used by GameCanvas tick() for currentBeat, but applied to an
-   *  arbitrary time value so mid-press beat interpolation is correct even
-   *  through BPM shifts. */
-  const qcTimeToBeat = (tSec: number): number => {
-    const c = chartRef.current;
-    const baseBpm = c.metadata.bpm;
-    const offsetSec = c.metadata.offset || 0;
-    // beat = (tSec - offsetSec) * bpm / 60 is only accurate when there are
-    // no BPM points; if bpmlist exists we step through each segment.
-    const bpmlist: BpmPoint[] = (c.metadata as any).bpmlist ?? [];
-    // Convert bpmlist beat boundaries into their corresponding audio-time
-    // boundaries so we can find which segment the argument tSec falls in.
-    // We only run this once-then-cache per bpmlist+offset change; quick-create
-    // gesture callbacks are 60fps per pointer, so recomputing every frame
-    // would cost O(N*bpm points).
-    type Seg = { fromSec: number; fromBeat: number; bpm: number };
-    let segs: Seg[] | undefined = (qcTimeToBeatCacheRef.current as any);
-    const cacheKey = `${offsetSec}|${baseBpm}|${bpmlist.map(p => `${p.beat}:${p.bpm}`).join(';')}`;
-    if (qcTimeToBeatCacheKeyRef.current !== cacheKey || !segs) {
-      segs = [];
-      // Segment 0: t=offsetSec, beat=0, using baseBpm until the first bpm point.
-      segs.push({ fromSec: offsetSec, fromBeat: 0, bpm: baseBpm });
-      let curSec = offsetSec;
-      let curBeat = 0;
-      let curBpm = baseBpm;
-      for (const p of bpmlist) {
-        const dt = ((p.beat - curBeat) * 60) / curBpm;
-        curBeat = p.beat;
-        curSec = curSec + dt;
-        curBpm = p.bpm;
-        segs.push({ fromSec: curSec, fromBeat: curBeat, bpm: curBpm });
-      }
-      qcTimeToBeatCacheRef.current = segs as any;
-      qcTimeToBeatCacheKeyRef.current = cacheKey;
-    }
-    // Find the active segment — binary search because bpmlist is small but
-    // looping was fine too; binary search scales for insane bpmlists.
-    let lo = 0, hi = segs.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if ((segs[mid] as Seg).fromSec <= tSec) lo = mid; else hi = mid - 1;
-    }
-    const seg = segs[lo] as Seg;
-    const dt = tSec - seg.fromSec;
-    return Math.max(0, seg.fromBeat + (dt * seg.bpm) / 60);
+  /** Chart-clock timestamp -> beat, via the shared inverse in beatTime.ts.
+   *  Handles bpmlist tempo changes, so mid-press beat interpolation stays
+   *  correct through BPM shifts. */
+  const chartTimeToBeat = (tSec: number): number => {
+    const m = chartRef.current.metadata;
+    return secondsToBeatMultiBpm(tSec, m.bpm, m.offset || 0, m.bpmlist);
   };
-  /** Cached segment table for qcTimeToBeat. */
-  const qcTimeToBeatCacheRef = useRef<any>(undefined);
-  const qcTimeToBeatCacheKeyRef = useRef<string>('');
 
   /** Snap grid step (in beats). The user's snapSubdivision is honoured, but it
    *  is never finer than 1/16 beat (per spec: "最少1/16拍，如果选的自由也按1/16计算").
@@ -1375,11 +1378,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   /**
    * Simplified Slide chain judgement (per latest spec):
    * - Nodes behave like Touch but require the pointer to be HELD.
-   * - Once a node is judged, the judging pointer becomes bound; only it can judge later nodes.
-   * - On release of the bound pointer, the *next unjudged node* is immediately locked red
-   *   and will be judged as Late Miss after +160ms, regardless of position.
-   * - No Early Miss on release. Nodes after the next one lose the binding and can be rebound.
-   * - A normal Miss does NOT clear the binding.
+   * - Once a node is judged, EVERY finger currently on that node becomes bound; any of the
+   *   bound fingers can judge later nodes (multi-finger support, solves overlapping-node cases).
+   * - A bound finger that lifts (released) is removed. A bound finger still down but off the
+   *   current node is dropped ONLY when at least one other bound finger is already on that node;
+   *   if no bound finger is on the node yet (e.g. fingers still at a shared start, or travelling
+   *   between nodes) all bindings are kept, so the chain never loses the finger that will service
+   *   the next node (this is what makes split slides from a shared start work).
+   * - On release of the LAST remaining bound pointer, the *next unjudged node* is immediately
+   *   locked red and will be judged as Late Miss after +160ms, regardless of position.
+   * - No Early Miss on release. A normal Miss does NOT clear the binding.
    */
   const processSlide = (note: ResolvedNote, curTime: number) => {
     // Cached: avoids rebuilding [head, ...resolvedNodes] every frame.
@@ -1405,6 +1413,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // No more "judge at release time" or Early Miss on release.
     // EXCEPTION: If the next node is a tail node already locked for S-Perfect
     // (tailLockedSPerfect), skip missLocked — the player held through the end.
+    // nextIdx / current node are needed both here (move-away removal) and in step 3.
+    const nextIdx = rt.nodes.findIndex((n) => !n.judged);
+    const ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
+
     if (rt.boundPointerIds.size > 0) {
       // Remove released pointers from the bound set
       let allReleased = true;
@@ -1416,20 +1428,39 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           rt.boundPointerIds.delete(pid);
         }
       }
-      if (allReleased && rt.boundPointerIds.size === 0) {
-        const nextIdx = rt.nodes.findIndex((n) => !n.judged);
-        if (nextIdx >= 0) {
-          const ns = rt.nodes[nextIdx];
-          if (!ns.judged && !ns.tailLockedSPerfect) {
-            ns.missLocked = true;
-            ns.redWarn = false;
-          }
+      // Multi-finger binding: a bound finger that is still down but has slid off the
+      // current node is a candidate to be dropped. HOWEVER we must NOT prune during the
+      // moment two chains share a start node and the fingers haven't diverged yet (e.g. a
+      // split slide where both fingers are still sitting on the shared head, so neither is
+      // on either chain's NEXT node). Pruning then would keep, by insertion order, the
+      // finger heading the WRONG way and permanently drop the correct one.
+      // Fix: only drop off-node fingers when at least ONE bound finger is already on the
+      // current node. If none are on it yet (all still travelling / at a shared start),
+      // keep every binding so the correct finger is retained until it arrives.
+      if (ndForCheck && rt.boundPointerIds.size > 0) {
+        const onNodeBound: number[] = [];
+        const offNodeBound: number[] = [];
+        for (const pid of rt.boundPointerIds) {
+          const bp = pointersRef.current.get(pid);
+          const onNode = !!bp && bp.down &&
+            Math.abs(bp.x - ndForCheck.x) < SLIDE_HIT_HALF &&
+            Math.abs(bp.y - ndForCheck.y) < SLIDE_HIT_HALF;
+          (onNode ? onNodeBound : offNodeBound).push(pid);
+        }
+        if (onNodeBound.length > 0) {
+          for (const pid of offNodeBound) rt.boundPointerIds.delete(pid);
+        }
+      }
+      if (allReleased && rt.boundPointerIds.size === 0 && nextIdx >= 0) {
+        const ns = rt.nodes[nextIdx];
+        if (!ns.judged && !ns.tailLockedSPerfect) {
+          ns.missLocked = true;
+          ns.redWarn = false;
         }
       }
     }
 
-    // 3) Interact with the current next node
-    const nextIdx = rt.nodes.findIndex((n) => !n.judged);
+    // 3) Interact with the current next node (nextIdx / ndForCheck hoisted above)
     if (nextIdx < 0) return;
     const ns = rt.nodes[nextIdx];
     const nd = allNodes[nextIdx];
@@ -1472,30 +1503,31 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
 
     // Which pointers may judge this node? Bound chain → any bound pointer; free chain → any held pointer.
-    let insideId: number | null = null;
+    // Collect EVERY finger currently on the node (multi-finger binding): each eligible finger inside the
+    // hit box is a candidate, not just the first one. Overlapping nodes are then each serviced by
+    // whatever finger covers them.
+    const onNodePids: number[] = [];
     if (rt.boundPointerIds.size > 0) {
       for (const pid of rt.boundPointerIds) {
         const p = pointersRef.current.get(pid);
-        if (p && p.down) {
-          if (Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) {
-            insideId = pid;
-            break;
-          }
+        if (p && p.down &&
+            Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) {
+          onNodePids.push(pid);
         }
       }
     } else {
       for (const [pid, p] of pointersRef.current) {
         if (!p.down) continue;
-        if (Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) { insideId = pid; break; }
+        if (Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
       }
     }
 
     // Track "has passed the zone while held" for release-judging (no time restriction).
-    if (rt.boundPointerIds.size > 0 && insideId !== null) ns.everInZone = true;
+    if (rt.boundPointerIds.size > 0 && onNodePids.length > 0) ns.everInZone = true;
 
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && insideId !== null) {
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
       ns.lastInsideTime = curTime;
-      ns.lastInsidePointerId = insideId;
+      ns.lastInsidePointerId = onNodePids[0];
     }
 
     if (dt >= 0 && !ns.judged) {
@@ -1512,16 +1544,17 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         commitSlideNode(note, nextIdx, nd.x, nd.y, 'S-Perfect', dt);
       } else if (!ns.arrivalChecked) {
         ns.arrivalChecked = true;
-        if (insideId !== null) {
+        if (onNodePids.length > 0) {
           ns.judged = true;
-          rt.boundPointerIds.add(insideId);
+          // Bind EVERY finger on the node (multi-finger).
+          for (const pid of onNodePids) rt.boundPointerIds.add(pid);
           commitSlideNode(note, nextIdx, nd.x, nd.y, 'S-Perfect', dt);
         }
-      } else if (insideId !== null && dt <= HIT_WINDOW_MS) {
+      } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
         const j = evaluateJudgement(dt);
         if (j) {
           ns.judged = true;
-          rt.boundPointerIds.add(insideId);
+          for (const pid of onNodePids) rt.boundPointerIds.add(pid);
           commitSlideNode(note, nextIdx, nd.x, nd.y, j, dt);
         }
       }
@@ -1531,7 +1564,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     //    NONE of the bound pointers are on the node,
     //    but some other held pointer IS on it → move the correct finger back to recover.
     ns.redWarn = false;
-    if (!ns.judged && rt.boundPointerIds.size > 0 && insideId === null && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
+    if (!ns.judged && rt.boundPointerIds.size > 0 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
       for (const [pid, p] of pointersRef.current) {
         if (rt.boundPointerIds.has(pid) || !p.down) continue;
         if (Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) { ns.redWarn = true; break; }
@@ -1648,10 +1681,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const curTime = (isPlayingRef.current && !isPausedRef.current)
         ? globalAudio.getCurrentTime()
         : gameTimeRef.current;
-      const curBeat = Math.max(
-        0,
-        ((curTime - (chartRef.current.metadata.offset || 0)) * chartRef.current.metadata.bpm) / 60
-      );
+      const curBeat = chartTimeToBeat(curTime);
 
       for (const n of notes) {
         const candidates: Array<{ id: string; x: number; y: number; beat: number; r: number }> =
@@ -2093,17 +2123,25 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             crossPoint = _vCrossPoint;
           }
 
-          // Manual contact condition: chain is bound, segment actually intersects the
-          // judgement plane, and ANY bound pointer is on that exact cross-section.
+          // Manual contact condition: the segment actually intersects the judgement
+          // plane, and a finger is on that exact cross-section.
+          // - Bound chain: only the bound pointers count (normal "drag along the pipe").
+          // - FREE chain (the front node has NOT been judged yet — e.g. it was missed or
+          //   the slide never started): ANY held pointer on the cross-section still clips
+          //   the pipe. The intended behaviour is: as long as a finger is on the pipe it
+          //   truncates, regardless of whether the leading node was successfully judged.
           let isHoldingCrossSection = false;
-          if (!isEditorModeRef.current && !autoPlayRef.current && crossPoint && rt && rt.boundPointerIds.size > 0) {
-            for (const pid of rt.boundPointerIds) {
+          if (!isEditorModeRef.current && !autoPlayRef.current && crossPoint && rt) {
+            const candidates = rt.boundPointerIds.size > 0
+              ? rt.boundPointerIds
+              : pointersRef.current.keys();
+            for (const pid of candidates) {
               const bp = pointersRef.current.get(pid);
-              if (bp?.down) {
-                if (Math.abs(bp.x - crossPoint.x) < SLIDE_HIT_HALF && Math.abs(bp.y - crossPoint.y) < SLIDE_HIT_HALF) {
-                  isHoldingCrossSection = true;
-                  break;
-                }
+              if (bp?.down &&
+                  Math.abs(bp.x - crossPoint.x) < SLIDE_HIT_HALF &&
+                  Math.abs(bp.y - crossPoint.y) < SLIDE_HIT_HALF) {
+                isHoldingCrossSection = true;
+                break;
               }
             }
           }
@@ -2690,7 +2728,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // Read audio time so the gesture beat is precise.
           const playing = isPlayingRef.current && !isPausedRef.current;
           const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
-          const beat = qcTimeToBeat(tSec);
+          const beat = chartTimeToBeat(tSec);
           const track: QCTrack = {
             pointerId: e.pointerId,
             pressTimeSec: tSec,
@@ -2722,7 +2760,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         if (!track || !p) return;
         const playing = isPlayingRef.current && !isPausedRef.current;
         const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
-        const beat = qcTimeToBeat(tSec);
+        const beat = chartTimeToBeat(tSec);
         track.trajectory.push({ tSec, beat, x: p.x, y: p.y });
         // Keep trajectory from growing unbounded during long presses.
         if (track.trajectory.length > 120) track.trajectory.splice(0, track.trajectory.length - 120);
@@ -2735,7 +2773,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // Append release-time sample for final classification.
           const playing = isPlayingRef.current && !isPausedRef.current;
           const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
-          const beat = qcTimeToBeat(tSec);
+          const beat = chartTimeToBeat(tSec);
           const p = pointersRef.current.get(e.pointerId);
           if (p) track.trajectory.push({ tSec, beat, x: p.x, y: p.y });
           qcOnUp(track);

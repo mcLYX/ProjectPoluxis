@@ -191,8 +191,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       </section>
       <section className="space-y-1.5">
         <div className="flex justify-between"><label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Focus size={16} /> {t('settings.audioOffset')}</label><span className={valueClass}>{audioOffsetMs > 0 ? '+' : ''}{audioOffsetMs}ms</span></div>
-        <input type="range" min="-600" max="600" step="5" value={audioOffsetMs} onChange={(e) => setAudioOffsetMs(Number(e.target.value))} className={sliderClass} />
-        <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>0ms</span><span>+600ms</span></div>
+        <input type="range" min="-600" max="400" step="5" value={audioOffsetMs} onChange={(e) => setAudioOffsetMs(Number(e.target.value))} className={sliderClass} />
+        <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>+400ms</span></div>
         <p className="text-[11px] text-white/50 leading-relaxed">
           {t('settings.audioOffsetHint')}
         </p>

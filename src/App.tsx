@@ -12,7 +12,7 @@ import { DEMO_CHARTS } from './data/demoCharts';
 import type { QualityMode } from './types/game';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
 import { calculateNoteScore, calculateRank } from './utils/scoring';
-import { getChartDuration, beatToSeconds, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
+import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
 import { submitScore, calcBadgeFromStats } from './utils/scoreStore';
 import { globalAudio } from './audio/AudioManager';
 import { useI18n } from './i18n';
@@ -286,10 +286,14 @@ export function App() {
     });
   }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, musicVolume, effectVolume]);
 
-  // Calculate current beat from gameTime
-  const currentBeat = Math.max(
-    0,
-    ((gameTime - (currentChart.metadata.offset || 0)) * currentChart.metadata.bpm) / 60
+  // Calculate current beat from gameTime. Uses the shared inverse so charts
+  // with a bpmlist stay accurate (a plain bpm*t/60 would drift after the first
+  // tempo change).
+  const currentBeat = secondsToBeatMultiBpm(
+    gameTime,
+    currentChart.metadata.bpm,
+    currentChart.metadata.offset || 0,
+    currentChart.metadata.bpmlist
   );
   // Mirror currentBeat into a ref so editor handlers can read it without
   // depending on currentBeat (which changes every frame → would break
@@ -320,9 +324,10 @@ export function App() {
         globalAudio.setSynthesizedTrack(chartData.metadata.bpm);
       }
 
+      // Lead-in is a pure wall-clock delay before the song starts; the audio
+      // offset is not part of it (AudioManager applies the offset internally).
       const firstNoteTime = getFirstNoteTime(chartData);
-      const userOffsetSec = audioOffsetMs / 1000;
-      const leadIn = Math.max(0, 2 - firstNoteTime + userOffsetSec);
+      const leadIn = Math.max(0, 2 - firstNoteTime);
       globalAudio.play(0, leadIn);
 
       setCurrentChart(chartData);
@@ -395,7 +400,7 @@ export function App() {
       setIsPlayTestMode(true);
       setGameState('playing');
 
-      const leadIn = fromCurrentBeat ? 0 : Math.max(0, 2 - getFirstNoteTime(currentChart) + audioOffsetMs / 1000);
+      const leadIn = fromCurrentBeat ? 0 : Math.max(0, 2 - getFirstNoteTime(currentChart));
       globalAudio.play(startTimeSec, leadIn);
 
       setTransitionPhase('fade-in');
@@ -620,6 +625,8 @@ export function App() {
               countdownTimerRef.current = null;
             }
             setCountdownVal(null);
+            /* gameTime came from getCurrentTime(), and play() takes the same
+             * chart-time coordinate — so it round-trips as-is. */
             globalAudio.play(gameTime);
             setGameState('playing');
           } else {
@@ -648,7 +655,12 @@ export function App() {
     const snappedBeat = Math.round(beat / snapSubdivision) * snapSubdivision;
     const targetSec = Math.max(
       0,
-      beatToSeconds(snappedBeat, currentChart.metadata.bpm, currentChart.metadata.offset || 0)
+      beatToSecondsMultiBpm(
+        snappedBeat,
+        currentChart.metadata.bpm,
+        currentChart.metadata.offset || 0,
+        currentChart.metadata.bpmlist
+      )
     );
     setGameTime(targetSec);
     if (gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)) {
@@ -661,11 +673,10 @@ export function App() {
    *  One notch = exactly one snap subdivision. Scroll down = forward. */
   const handleEditorWheel = useCallback((e: React.WheelEvent) => {
     if (gameState !== 'editor') return;
-    const { bpm, offset } = currentChart.metadata;
-    const off = offset || 0;
+    const { bpm, offset, bpmlist } = currentChart.metadata;
     const dir = e.deltaY > 0 ? 1 : -1;
     const deltaBeats = dir * (snapSubdivision || 0.25);
-    const curBeat = Math.max(0, (gameTime - off) * bpm / 60);
+    const curBeat = secondsToBeatMultiBpm(gameTime, bpm, offset || 0, bpmlist);
     handleSeekBeat(Math.max(0, curBeat + deltaBeats));
   }, [gameState, gameTime, currentChart, snapSubdivision, handleSeekBeat]);
 
@@ -702,8 +713,13 @@ export function App() {
           // (not React state) to avoid stale-beat drift.
           if (doGlow) {
             const curT = globalAudio.getCurrentTime();
-            const beat = ((curT - (currentChart.metadata.offset || 0)) * currentChart.metadata.bpm) / 60;
-            globalAudio.setCurrentBpm(getBpmAtBeat(beat, currentChart.metadata.bpm, (currentChart.metadata as any).bpmlist));
+            const beat = secondsToBeatMultiBpm(
+              curT,
+              currentChart.metadata.bpm,
+              currentChart.metadata.offset || 0,
+              currentChart.metadata.bpmlist
+            );
+            globalAudio.setCurrentBpm(getBpmAtBeat(beat, currentChart.metadata.bpm, currentChart.metadata.bpmlist));
             const f = globalAudio.getAudioFrequencyData();
             const bg = bgSchemeRef.current;
             if (bg && ambientBgRef.current) {

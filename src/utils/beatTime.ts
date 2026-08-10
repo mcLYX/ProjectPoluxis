@@ -103,6 +103,54 @@ export function beatToSecondsMultiBpm(
 }
 
 /**
+ * Exact inverse of `beatToSecondsMultiBpm`: absolute seconds -> beat.
+ *
+ * This is the ONLY sanctioned seconds->beat conversion. Do not re-derive it
+ * with `(sec - offset) * bpm / 60` at call sites: that linear form is only
+ * correct for charts without a bpmlist, and silently drifts on variable-tempo
+ * charts (playhead, HUD beat readout and background pulse all desync).
+ *
+ * `offset` is the chart's own metadata offset (the same one baked into
+ * `note.timeSec` by `resolveChart`). It is removed here so callers never have
+ * to touch `metadata.offset` themselves.
+ *
+ * Times before the offset map to beat 0 (clamped) — there is no musical beat
+ * before the chart starts.
+ */
+export function secondsToBeatMultiBpm(
+  sec: number,
+  baseBpm: number,
+  offset: number,
+  bpmlist?: BpmPoint[]
+): number {
+  const t = sec - offset;
+  if (t <= 0) return 0;
+
+  if (!bpmlist || bpmlist.length === 0) {
+    return (t * baseBpm) / 60;
+  }
+
+  let currentBeat = 0;
+  let currentBpm = baseBpm;
+  let accumulatedTime = 0;
+
+  for (const point of bpmlist) {
+    if (point.beat <= 0) continue;
+    const segmentSeconds = ((point.beat - currentBeat) * 60) / currentBpm;
+    // The target time falls inside this segment — interpolate and stop.
+    if (accumulatedTime + segmentSeconds > t) {
+      return currentBeat + ((t - accumulatedTime) * currentBpm) / 60;
+    }
+    accumulatedTime += segmentSeconds;
+    currentBeat = point.beat;
+    currentBpm = point.bpm;
+  }
+
+  // Past the last BPM change: extrapolate at the final tempo.
+  return currentBeat + ((t - accumulatedTime) * currentBpm) / 60;
+}
+
+/**
  * Get the BPM value at a specific beat, considering BPM changes.
  */
 export function getBpmAtBeat(beat: number, baseBpm: number, bpmlist?: BpmPoint[]): number {

@@ -355,7 +355,7 @@
       </div>
       <div class="modal-row">
         <label data-i18n="setOffset">音频偏移</label>
-        <input type="range" id="set-offset" min="-600" max="600" step="5">
+        <input type="range" id="set-offset" min="-600" max="400" step="5">
         <span class="val" id="val-offset">0ms</span>
       </div>
       <div class="modal-row">
@@ -1380,11 +1380,24 @@ if (!Object.assign) {
      * knows to run the game clock without audio when no file is uploaded. */
     this.forceSynth = true; this.synthBpm = bpm;
   };
-  LiteAudio.prototype.play = function (offsetSec, leadInSec) {
+  /* Time-coordinate contract (mirrors the full build's AudioManager):
+   * every public method speaks CHART TIME, i.e. the same coordinate
+   * getCurrentTime() returns. The userOffset conversion happens inside this
+   * class and nowhere else — callers must never add or subtract it.
+   *   chartTime = audioTime + userOffset
+   * @param startChartSec chart-time position to start from. */
+  LiteAudio.prototype.play = function (startChartSec, leadInSec) {
     this.init();
-    offsetSec = offsetSec || 0;
     leadInSec = leadInSec || 0;
     this.leadInTime = leadInSec;
+    /* The single chart -> audio conversion point.
+     *   audioTime = chartTime − userOffset
+     * NOT clamped: a negative result means "before the audio track's first
+     * sample" and is handled as silence (the buffer is scheduled to start in
+     * the future). Clamping here was the old bug — with a positive offset the
+     * editor could never return to beat 0, and with a negative offset the game
+     * started mid-song. */
+    var offsetSec = (startChartSec || 0) - this.userOffset;
     var self = this;
     if (this.useHtml5) {
       this.stop();
@@ -1415,18 +1428,24 @@ if (!Object.assign) {
     if (!this.ctx) return; this.stop();
     /* startTime is shifted forward by leadInSec so that getCurrentTime()
      * returns offsetSec - leadInSec + userOffset right after play(),
-     * counting up normally. Real audio starts leadInSec seconds later
-     * from offsetSec, preserving note <-> audio synchronisation. */
+     * counting up normally. Real audio starts when the audio clock hits 0. */
     this.startTime = this.ctx.currentTime - offsetSec + leadInSec;
     this.isPlaying = true;
     var useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
-    var audioStartInCtx = this.ctx.currentTime + leadInSec;
+    // Schedule the buffer so buffer-offset 0 is heard exactly when the audio
+    // clock hits 0 (audioTime == 0 ⇔ chartTime == offset). If the start was
+    // requested while audioTime would be negative, `when` lands in the future
+    // and the source stays silent until then; the chart clock already counts
+    // up from startChartSec, so the playhead is correct. Otherwise (`when` ==
+    // now) we begin immediately at the matching buffer offset.
+    var when = Math.max(this.ctx.currentTime, this.startTime);
+    var bufferOffset = Math.max(0, (when - this.startTime));
     if (useBuffer && this.bgmBuffer && this.bgmGain) {
       this.bgmSource = this.ctx.createBufferSource(); this.bgmSource.buffer = this.bgmBuffer;
       this.bgmSource.connect(this.bgmGain);
-      this.bgmSource.start(audioStartInCtx, Math.max(0, offsetSec));
+      this.bgmSource.start(when, bufferOffset);
     } else {
-      this.startSynthesizedMusic(Math.max(0, offsetSec), leadInSec);
+      this.startSynthesizedMusic(offsetSec);
     }
   };
   LiteAudio.prototype.pause = function () { if (!this.isPlaying) return; this.pauseTime = this.getCurrentTime(); this.stop(); };
@@ -1458,54 +1477,57 @@ if (!Object.assign) {
     if (!this.ctx) return this.pauseTime;
     return (this.ctx.currentTime - this.startTime) + this.userOffset;
   };
-  /* Synth BGM — ported from AudioManager.ts L293-336 (4-chord arp + kick + hat) */
-  LiteAudio.prototype.startSynthesizedMusic = function (startOffset, leadInSec) {
+  /* Synth BGM — ported from AudioManager.ts (4-chord arp + kick + hat).
+   * Mirrors the buffer path: the synth stays silent until the audio clock
+   * reaches 0 (this.startTime), then begins from step 0. */
+  LiteAudio.prototype.startSynthesizedMusic = function (startAudioSec) {
     if (!this.ctx || !this.bgmGain) return;
     var beatInterval = 60 / this.synthBpm;
-    var step = Math.floor(startOffset / (beatInterval / 4));
-    var chords = [[220,277.18,329.63,440],[174.61,220,261.63,349.23],[261.63,329.63,392,523.25],[196,246.94,293.66,392]];
-    var self = this;
-    var tick = function () {
-      if (!self.isPlaying || !self.ctx || !self.bgmGain) return;
-      var t = self.ctx.currentTime;
-      var beat16 = step % 16, bar = Math.floor(step / 16) % chords.length, chord = chords[bar];
-      if (beat16 % 4 === 0) {
-        var o = self.ctx.createOscillator(), g = self.ctx.createGain();
-        o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.08);
-        g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-        o.connect(g); g.connect(self.bgmGain); o.start(t); o.stop(t + 0.12);
-      }
-      if (beat16 === 4 || beat16 === 12) {
-        var h = self.ctx.createOscillator(), hg = self.ctx.createGain();
-        h.type = 'triangle'; h.frequency.setValueAtTime(240, t); h.frequency.exponentialRampToValueAtTime(80, t + 0.09);
-        hg.gain.setValueAtTime(0.5, t); hg.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-        h.connect(hg); hg.connect(self.bgmGain); h.start(t); h.stop(t + 0.1);
-      }
-      if (beat16 % 2 === 1) {
-        var hs = self.ctx.createOscillator(), hsg = self.ctx.createGain();
-        hs.type = 'triangle'; hs.frequency.setValueAtTime(3000, t);
-        hsg.gain.setValueAtTime(0.15, t); hsg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
-        hs.connect(hsg); hsg.connect(self.bgmGain); hs.start(t); hs.stop(t + 0.04);
-      }
-      var arp = chord[beat16 % chord.length];
-      var ao = self.ctx.createOscillator(), ag = self.ctx.createGain();
-      ao.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine'; ao.frequency.setValueAtTime(arp, t);
-      ag.gain.setValueAtTime(0.25, t); ag.gain.exponentialRampToValueAtTime(0.001, t + beatInterval * 0.35);
-      ao.connect(ag); ag.connect(self.bgmGain); ao.start(t); ao.stop(t + beatInterval * 0.35);
-      step++;
-    };
     var intervalMs = (beatInterval / 4) * 1000;
-    if (leadInSec > 0) {
-      /* Defer the first tick by leadInSec so the synth starts exactly when the
-       * game clock reaches zero — same lockstep as buffer audio. */
-      window.setTimeout(function () {
-        if (!self.isPlaying) return;
-        tick();
-        self.synthInterval = window.setInterval(tick, intervalMs);
-      }, leadInSec * 1000);
-    } else {
+    // Wall-clock time at which audioTime reaches 0 (synth position 0).
+    var startWall = this.startTime;
+    var delayMs = Math.max(0, (startWall - this.ctx.currentTime) * 1000);
+    var self = this;
+    var begin = function () {
+      if (!self.isPlaying || !self.ctx || !self.bgmGain) return;
+      var step = Math.max(0, Math.floor(startAudioSec / (beatInterval / 4)));
+      var chords = [[220,277.18,329.63,440],[174.61,220,261.63,349.23],[261.63,329.63,392,523.25],[196,246.94,293.66,392]];
+      var tick = function () {
+        if (!self.isPlaying || !self.ctx || !self.bgmGain) return;
+        var t = self.ctx.currentTime;
+        var beat16 = step % 16, bar = Math.floor(step / 16) % chords.length, chord = chords[bar];
+        if (beat16 % 4 === 0) {
+          var o = self.ctx.createOscillator(), g = self.ctx.createGain();
+          o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.08);
+          g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+          o.connect(g); g.connect(self.bgmGain); o.start(t); o.stop(t + 0.12);
+        }
+        if (beat16 === 4 || beat16 === 12) {
+          var h = self.ctx.createOscillator(), hg = self.ctx.createGain();
+          h.type = 'triangle'; h.frequency.setValueAtTime(240, t); h.frequency.exponentialRampToValueAtTime(80, t + 0.09);
+          hg.gain.setValueAtTime(0.5, t); hg.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+          h.connect(hg); hg.connect(self.bgmGain); h.start(t); h.stop(t + 0.1);
+        }
+        if (beat16 % 2 === 1) {
+          var hs = self.ctx.createOscillator(), hsg = self.ctx.createGain();
+          hs.type = 'triangle'; hs.frequency.setValueAtTime(3000, t);
+          hsg.gain.setValueAtTime(0.15, t); hsg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+          hs.connect(hsg); hsg.connect(self.bgmGain); hs.start(t); hs.stop(t + 0.04);
+        }
+        var arp = chord[beat16 % chord.length];
+        var ao = self.ctx.createOscillator(), ag = self.ctx.createGain();
+        ao.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine'; ao.frequency.setValueAtTime(arp, t);
+        ag.gain.setValueAtTime(0.25, t); ag.gain.exponentialRampToValueAtTime(0.001, t + beatInterval * 0.35);
+        ao.connect(ag); ag.connect(self.bgmGain); ao.start(t); ao.stop(t + beatInterval * 0.35);
+        step++;
+      };
       tick();
-      this.synthInterval = window.setInterval(tick, intervalMs);
+      self.synthInterval = window.setInterval(tick, intervalMs);
+    };
+    if (delayMs > 0) {
+      window.setTimeout(begin, delayMs);
+    } else {
+      begin();
     }
   };
   var audio = new LiteAudio();
@@ -2513,7 +2535,11 @@ if (!Object.assign) {
 
   /* Per-frame slide judgment — faithful port of GameCanvas.processSlide.
    * Key rule: nodes are judged ONLY when dt>=0 (node reached the plane),
-   * never early on proximity alone. This fixes the "early judgment" bug. */
+   * never early on proximity alone. This fixes the "early judgment" bug.
+   * Multi-finger binding: every finger on a node is bound; a bound finger that
+   * lifts is removed; a bound finger still down but off the current node is
+   * dropped ONLY when another bound finger is already on that node (so split
+   * slides sharing a start keep the correct fingers, not the wrong one). */
   function processSlide(note, curTime) {
     var allNodes = getAllSlideNodes(note);
     var rt = getSlideRt(note.id, allNodes.length);
@@ -2529,31 +2555,53 @@ if (!Object.assign) {
       }
     }
 
-    /* 2) Release detection: ALL bound pointers released → next unjudged node missLocked
-     * EXCEPTION: tail node with tailLockedSPerfect already set → skip missLocked. */
-    var hasBinding = false;
-    for (var bpid in rt.boundPointerIds) {
-      if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
-      hasBinding = true;
-      var bp = game.pointers[bpid];
-      if (!bp || !bp.down) delete rt.boundPointerIds[bpid];
-    }
-    if (hasBinding) {
-      /* Check if any bindings remain after cleanup */
-      var anyRemaining = false;
-      for (var bpid2 in rt.boundPointerIds) {
-        if (rt.boundPointerIds.hasOwnProperty(bpid2)) { anyRemaining = true; break; }
+    /* 2) Release detection + move-away pruning (per new spec).
+     * nextIdx / current node are needed both here (move-away) and in step 3. */
+    var nextIdx = -1;
+    for (var k0 = 0; k0 < rt.nodes.length; k0++) { if (!rt.nodes[k0].judged) { nextIdx = k0; break; } }
+    var ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
+
+    if (nextIdx >= 0) {
+      var anyBinding = false;
+      var allReleased = true;
+      for (var bpid in rt.boundPointerIds) {
+        if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
+        anyBinding = true;
+        var bp = game.pointers[bpid];
+        if (bp && bp.down) allReleased = false;
+        else delete rt.boundPointerIds[bpid];
       }
-      if (!anyRemaining) {
-        var rNextIdx = -1;
-        for (var k = 0; k < rt.nodes.length; k++) { if (!rt.nodes[k].judged) { rNextIdx = k; break; } }
-        if (rNextIdx >= 0 && !rt.nodes[rNextIdx].tailLockedSPerfect) { rt.nodes[rNextIdx].missLocked = true; rt.nodes[rNextIdx].redWarn = false; }
+      if (anyBinding) {
+        /* Multi-finger: drop off-node fingers only when at least one bound finger
+         * is already on the current node. If none are on it yet (shared start /
+         * travelling between nodes) keep every binding so the correct finger is
+         * retained until it arrives. This is what makes split slides from a shared
+         * start work instead of keeping the wrong (insertion-order-first) finger. */
+        if (ndForCheck) {
+          var onNodeBound = [], offNodeBound = [];
+          for (var mpid in rt.boundPointerIds) {
+            if (!rt.boundPointerIds.hasOwnProperty(mpid)) continue;
+            var mp = game.pointers[mpid];
+            var onNode = !!mp && mp.down &&
+              Math.abs(mp.x - ndForCheck.x) < SLIDE_HIT_HALF &&
+              Math.abs(mp.y - ndForCheck.y) < SLIDE_HIT_HALF;
+            if (onNode) onNodeBound.push(mpid); else offNodeBound.push(mpid);
+          }
+          if (onNodeBound.length > 0) {
+            for (var oi = 0; oi < offNodeBound.length; oi++) delete rt.boundPointerIds[offNodeBound[oi]];
+          }
+        }
+        /* ALL bound pointers released → next unjudged node missLocked.
+         * EXCEPTION: tail node with tailLockedSPerfect already set → skip. */
+        if (allReleased) {
+          var rNextIdx = -1;
+          for (var k = 0; k < rt.nodes.length; k++) { if (!rt.nodes[k].judged) { rNextIdx = k; break; } }
+          if (rNextIdx >= 0 && !rt.nodes[rNextIdx].tailLockedSPerfect) { rt.nodes[rNextIdx].missLocked = true; rt.nodes[rNextIdx].redWarn = false; }
+        }
       }
     }
 
     /* 3) Interact with the current next node */
-    var nextIdx = -1;
-    for (var k2 = 0; k2 < rt.nodes.length; k2++) { if (!rt.nodes[k2].judged) { nextIdx = k2; break; } }
     if (nextIdx < 0) return;
     var cns = rt.nodes[nextIdx];
     var cnd = allNodes[nextIdx];
@@ -2593,15 +2641,18 @@ if (!Object.assign) {
       }
     }
 
-    /* Which pointer may judge this node? Bound → any bound pointer; free → any held. */
-    var insideId = null;
+    /* Which pointers may judge this node? Bound → any bound pointer; free → any held.
+     * Collect EVERY finger currently on the node (multi-finger binding): each
+     * eligible finger inside the hit box is a candidate, not just the first one. */
+    var onNodePids = [];
     var hasBound2 = false;
     for (var bpid3 in rt.boundPointerIds) {
       if (!rt.boundPointerIds.hasOwnProperty(bpid3)) continue;
       hasBound2 = true;
       var p = game.pointers[bpid3];
-      if (p && p.down) {
-        if (Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) { insideId = bpid3; break; }
+      if (p && p.down &&
+          Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) {
+        onNodePids.push(bpid3);
       }
     }
     if (!hasBound2) {
@@ -2609,19 +2660,15 @@ if (!Object.assign) {
         if (!game.pointers.hasOwnProperty(pid)) continue;
         var p2 = game.pointers[pid];
         if (!p2.down) continue;
-        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) { insideId = pid; break; }
+        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
       }
     }
 
-    var hasBound3 = false;
-    for (var bpid4 in rt.boundPointerIds) {
-      if (rt.boundPointerIds.hasOwnProperty(bpid4)) { hasBound3 = true; break; }
-    }
-    if (hasBound3 && insideId !== null) cns.everInZone = true;
+    if (hasBound2 && onNodePids.length > 0) cns.everInZone = true;
 
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && insideId !== null) {
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
       cns.lastInsideTime = curTime;
-      cns.lastInsidePointerId = insideId;
+      cns.lastInsidePointerId = onNodePids[0];
     }
 
     if (dt >= 0 && !cns.judged) {
@@ -2643,15 +2690,18 @@ if (!Object.assign) {
         audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
       } else if (!cns.arrivalChecked) {
         cns.arrivalChecked = true;
-        if (insideId !== null) {
-          cns.judged = true; rt.boundPointerIds[insideId] = true;
+        if (onNodePids.length > 0) {
+          cns.judged = true;
+          /* Bind EVERY finger on the node (multi-finger). */
+          for (var a = 0; a < onNodePids.length; a++) rt.boundPointerIds[onNodePids[a]] = true;
           commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
           audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
         }
-      } else if (insideId !== null && dt <= HIT_WINDOW_MS) {
+      } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
         var j2 = evaluateJudgement(dt);
         if (j2) {
-          cns.judged = true; rt.boundPointerIds[insideId] = true;
+          cns.judged = true;
+          for (var b = 0; b < onNodePids.length; b++) rt.boundPointerIds[onNodePids[b]] = true;
           commitJudge(note.id + '#' + nextIdx, j2, dt);
           audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide');
         }
@@ -2664,7 +2714,7 @@ if (!Object.assign) {
     for (var bpid6 in rt.boundPointerIds) {
       if (rt.boundPointerIds.hasOwnProperty(bpid6)) { hasBound5 = true; break; }
     }
-    if (!cns.judged && hasBound5 && insideId === null && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
+    if (!cns.judged && hasBound5 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
       for (var pid2 in game.pointers) {
         if (!game.pointers.hasOwnProperty(pid2)) continue;
         if (rt.boundPointerIds.hasOwnProperty(pid2)) continue;
@@ -2815,6 +2865,25 @@ if (!Object.assign) {
    * browsers; fall back to Touch Events then Mouse Events for IE11/Safari<13. */
   function bindInput() {
     var canvasEl = document.getElementById('game-canvas');
+
+    /* iOS Safari 15+ shows a text-selection "loupe" (magnifier) on double-tap +
+     * hold that CSS alone cannot suppress (the user-scalable=no viewport meta is
+     * ignored by modern Safari, and touch-action: none only kills the double-tap
+     * ZOOM, not the loupe). The only reliable fix is preventDefault on the native
+     * touchstart — and it MUST be non-passive, because a passive listener's
+     * preventDefault() is ignored. We pin the styles inline (not just in the
+     * stylesheet) so they survive any UA/canvas defaults, and register the
+     * touchstart listener with { passive: false }. Pointer events (used for
+     * gameplay input) still fire normally, so note tapping is completely
+     * unaffected. Scoped to the canvas only: the menu chart-list relies on native
+     * touch scrolling, so we must NOT preventDefault on #app/document. */
+    canvasEl.style.touchAction = 'none';
+    canvasEl.style.userSelect = 'none';
+    canvasEl.style.webkitUserSelect = 'none';
+    canvasEl.style.webkitTouchCallout = 'none';
+    var onCanvasTouchStart = function (e) { e.preventDefault(); };
+    canvasEl.addEventListener('touchstart', onCanvasTouchStart, { passive: false });
+
     /* Cached canvas rect. Recomputing getBoundingClientRect() on every
      * pointermove is expensive on IE11: updateHUD() dirties layout each frame
      * (progress bar style.width + score/acc/rank textContent), so each per-event
@@ -3088,9 +3157,10 @@ if (!Object.assign) {
        manifest (beatmaps.json) difficulty names are for the song-select menu only */
     var diffName = chart.metadata.difficulty || '';
 
+    /* Lead-in is a pure wall-clock delay before the song starts; the audio
+     * offset is not part of it (LiteAudio applies the offset internally). */
     var firstNoteTime = getFirstNoteTime(chart);
-    var userOffsetSec = settings.audioOffsetMs / 1000;
-    var leadIn = Math.max(0, 2 - firstNoteTime + userOffsetSec);
+    var leadIn = Math.max(0, 2 - firstNoteTime);
 
     var startPlaying = function () {
       manualClock.time = 0; manualClock.lastStamp = 0;
@@ -3144,8 +3214,9 @@ if (!Object.assign) {
   }
   function resumeGame() {
     if (game.state !== STATE.PAUSED) return;
-    var t = audio.pauseTime;
-    audio.play(t);
+    /* pauseTime came from getCurrentTime() and play() takes the same
+     * chart-time coordinate, so it round-trips as-is. */
+    audio.play(audio.pauseTime);
     game.state = STATE.PLAYING;
     pauseScreen.classList.add('hidden');
   }

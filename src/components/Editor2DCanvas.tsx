@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { globalAudio } from '../audio/AudioManager';
-import { beatToSecondsMultiBpm } from '../utils/beatTime';
+import { beatToSecondsMultiBpm, secondsToBeatMultiBpm } from '../utils/beatTime';
 import type { ChartData, NoteData } from '../types/game';
 import type { EditorTool } from './VisualChartEditor';
 
@@ -36,50 +36,24 @@ interface Editor2DCanvasProps {
   onSeekBeat: (beat: number) => void;
 }
 
-/** Invert beatToSecondsMultiBpm: time(sec) -> beat. Precompute BPM segments. */
-function buildSegments(chart: ChartData) {
+/* Beat <-> chart-time conversion. Both directions delegate to the shared
+ * implementation in beatTime.ts — this file used to carry its own segment
+ * walker, which was a third copy of the same maths and drifted from the
+ * canonical one. `Tempo` is just the metadata slice they need, cached in a ref
+ * so it only changes when the chart's tempo map does. */
+type Tempo = { bpm: number; offset: number; bpmlist?: ChartData['metadata']['bpmlist'] };
+
+function buildSegments(chart: ChartData): Tempo {
   const { bpm, offset, bpmlist } = chart.metadata;
-  const segs: Array<{ fromSec: number; fromBeat: number; bpm: number }> = [
-    { fromSec: offset, fromBeat: 0, bpm },
-  ];
-  if (bpmlist && bpmlist.length > 0) {
-    const sorted = [...bpmlist].sort((a, b) => a.beat - b.beat);
-    for (const p of sorted) {
-      segs.push({
-        fromSec: beatToSecondsMultiBpm(p.beat, bpm, offset, bpmlist),
-        fromBeat: p.beat,
-        bpm: p.bpm,
-      });
-    }
-  }
-  return segs;
+  return { bpm, offset: offset || 0, bpmlist };
 }
 
-function timeToBeat(t: number, segs: Array<{ fromSec: number; fromBeat: number; bpm: number }>): number {
-  if (t <= segs[0].fromSec) return Math.max(0, ((t - segs[0].fromSec) * segs[0].bpm) / 60);
-  for (let i = 0; i < segs.length - 1; i++) {
-    const a = segs[i];
-    const b = segs[i + 1];
-    if (t >= a.fromSec && t < b.fromSec) {
-      return a.fromBeat + ((t - a.fromSec) * a.bpm) / 60;
-    }
-  }
-  const last = segs[segs.length - 1];
-  return last.fromBeat + ((t - last.fromSec) * last.bpm) / 60;
+function timeToBeat(t: number, tempo: Tempo): number {
+  return secondsToBeatMultiBpm(t, tempo.bpm, tempo.offset, tempo.bpmlist);
 }
 
-/** Inverse of timeToBeat: beat -> time(sec) using the same segments. */
-function beatToSecondsLocal(beat: number, segs: Array<{ fromSec: number; fromBeat: number; bpm: number }>): number {
-  if (beat <= segs[0].fromBeat) return segs[0].fromSec + ((beat - segs[0].fromBeat) * 60) / segs[0].bpm;
-  for (let i = 0; i < segs.length - 1; i++) {
-    const a = segs[i];
-    const b = segs[i + 1];
-    if (beat >= a.fromBeat && beat < b.fromBeat) {
-      return a.fromSec + ((beat - a.fromBeat) * 60) / a.bpm;
-    }
-  }
-  const last = segs[segs.length - 1];
-  return last.fromSec + ((beat - last.fromBeat) * 60) / last.bpm;
+function beatToSecondsLocal(beat: number, tempo: Tempo): number {
+  return beatToSecondsMultiBpm(beat, tempo.bpm, tempo.offset, tempo.bpmlist);
 }
 
 function snap(v: number, step: number): number {
