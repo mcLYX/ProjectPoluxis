@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { globalAudio } from '../audio/AudioManager';
 import { beatToSecondsMultiBpm, secondsToBeatMultiBpm } from '../utils/beatTime';
-import type { ChartData, NoteData } from '../types/game';
+import { EASING_FNS } from '../utils/easing';
+import type { ChartData, NoteData, EasingType } from '../types/game';
 import type { EditorTool } from './VisualChartEditor';
 
 /** World X range used by the game's judgement plane. */
@@ -267,10 +268,14 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         px: number,
         py: number,
         color: string,
-        selected: boolean
+        selected: boolean,
+        angle = 0
       ) => {
         ctx.save();
         ctx.translate(px, py);
+        // Canvas positive rotation is clockwise; we keep +angle = clockwise and
+        // align the 3D view to this convention (3D negates angle on rotation.z).
+        ctx.rotate((angle * Math.PI) / 180);
         if (selected) {
           ctx.shadowColor = '#ffffff';
           ctx.shadowBlur = 14;
@@ -284,7 +289,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
           ctx.fill();
           ctx.stroke();
         } else if (type === 'slide') {
-          ctx.rotate(Math.PI / 4);
+          ctx.rotate(Math.PI / 4); // square → diamond, on top of the node angle
           ctx.fillRect(-NOTE_R * 0.85, -NOTE_R * 0.85, NOTE_R * 1.7, NOTE_R * 1.7);
           ctx.strokeRect(-NOTE_R * 0.85, -NOTE_R * 0.85, NOTE_R * 1.7, NOTE_R * 1.7);
         } else {
@@ -296,35 +301,70 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       };
 
       // Build a flat list of drawable items: head + slide nodes
-      type Item = { id: string; type: NoteData['type']; beat: number; x: number; color: string };
+      type Item = { id: string; type: NoteData['type']; beat: number; x: number; color: string; angle: number };
       const items: Item[] = [];
-      const slideChains: Array<{ color: string; pts: Array<{ x: number; beat: number }> }> = [];
+      const slideChains: Array<{ color: string; pts: Array<{ x: number; beat: number; easing: EasingType }> }> = [];
       for (const n of chart.notes) {
         const color = n.color || noteColor;
-        items.push({ id: n.id, type: n.type, beat: n.beat, x: n.x, color });
-        if (n.type === 'slide' && n.nodes && n.nodes.length > 0) {
-          const pts = [{ x: n.x, beat: n.beat }, ...n.nodes.map((nd) => ({ x: nd.x, beat: nd.beat }))];
+        const headAngle = n.angle ?? 0;
+        items.push({ id: n.id, type: n.type, beat: n.beat, x: n.x, color, angle: headAngle });
+        if (n.nodes && n.nodes.length > 0) {
+          const pts = [
+            { x: n.x, beat: n.beat, easing: n.easing ?? 'linear' },
+            ...n.nodes.map((nd) => ({ x: nd.x, beat: nd.beat, easing: nd.easing ?? n.easing ?? 'linear' })),
+          ];
           slideChains.push({ color, pts });
           n.nodes.forEach((nd, i) => {
-            items.push({ id: `${n.id}#${i + 1}`, type: 'slide', beat: nd.beat, x: nd.x, color });
+            items.push({ id: `${n.id}#${i + 1}`, type: n.type, beat: nd.beat, x: nd.x, color, angle: nd.angle ?? headAngle });
           });
         }
       }
 
-      // Slide connector lines
+      // Slide connectors + playhead markers. The connector is drawn as the easing
+      // curve: the travel axis (horizontal = world x) follows EASING_FNS[easing](τ)
+      // while the time axis (vertical) advances linearly with τ. This bows *along*
+      // the direction of travel, so a left/right slide bows left/right (matching the
+      // 3D pipe). The playhead dot uses the same mapping: eased x, linear-time y.
+      const EASE_STEPS = 24;
       for (const chain of slideChains) {
+        const pxPts = chain.pts.map((pt) => {
+          const tb = beatToSecondsMultiBpm(pt.beat, bpm, offset, bpmlist);
+          return worldToPixel(tb, pt.x, cssW, cssH, curTime);
+        });
         ctx.strokeStyle = chain.color;
         ctx.globalAlpha = 0.55;
         ctx.lineWidth = 3;
         ctx.beginPath();
-        chain.pts.forEach((pt, i) => {
-          const tb = beatToSecondsMultiBpm(pt.beat, bpm, offset, bpmlist);
-          const { px, py } = worldToPixel(tb, pt.x, cssW, cssH, curTime);
-          if (i === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
-        });
+        for (let s = 0; s < pxPts.length - 1; s++) {
+          const a = pxPts[s], b = pxPts[s + 1];
+          const ease = EASING_FNS[chain.pts[s + 1].easing ?? 'linear'] ?? EASING_FNS.linear;
+          if (s === 0) ctx.moveTo(a.px, a.py);
+          for (let k = 1; k <= EASE_STEPS; k++) {
+            const tau = k / EASE_STEPS;
+            const e = ease(tau);
+            const x = a.px + (b.px - a.px) * e;
+            const y = a.py + (b.py - a.py) * tau;
+            ctx.lineTo(x, y);
+          }
+        }
         ctx.stroke();
         ctx.globalAlpha = 1;
+
+        ctx.fillStyle = chain.color;
+        for (let s = 0; s < pxPts.length - 1; s++) {
+          const a = pxPts[s], b = pxPts[s + 1];
+          const tA = beatToSecondsMultiBpm(chain.pts[s].beat, bpm, offset, bpmlist);
+          const tB = beatToSecondsMultiBpm(chain.pts[s + 1].beat, bpm, offset, bpmlist);
+          const segDur = Math.max(1e-4, tB - tA);
+          const tau = Math.min(1, Math.max(0, (curTime - tA) / segDur));
+          if (tau <= 0 || tau >= 1) continue;
+          const e = EASING_FNS[chain.pts[s + 1].easing ?? 'linear'](tau);
+          const mx = a.px + (b.px - a.px) * e;
+          const my = a.py + (b.py - a.py) * tau;
+          ctx.beginPath();
+          ctx.arc(mx, my, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
 
       // Draw notes (future first so near-line notes draw on top)
@@ -332,7 +372,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const tb = beatToSecondsMultiBpm(it.beat, bpm, offset, bpmlist);
         const { px, py } = worldToPixel(tb, it.x, cssW, cssH, curTime);
         if (py < field.top - 60 || py > field.top + field.height + 60) continue;
-        drawNoteShape(it.type, px, py, it.color, it.id === selectedRef.current);
+        drawNoteShape(it.type, px, py, it.color, it.id === selectedRef.current, it.angle);
       }
 
       // close field clip
@@ -368,7 +408,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     };
     for (const n of chart.notes) {
       consider(n.id, n.beat, n.x, n.y);
-      if (n.type === 'slide' && n.nodes) {
+      if (n.nodes) {
         n.nodes.forEach((nd, i) => consider(`${n.id}#${i + 1}`, nd.beat, nd.x, nd.y));
       }
     }
@@ -428,7 +468,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
     // Scrub mode: vertical drag on empty space moves the playhead.
     if (drag.isScrub) {
-      const { height } = fieldRect(w, h);
       const pxPerBeat = pxPerBeatRef.current;
       const dy = py - drag.lastPy;
       drag.lastPy = py;

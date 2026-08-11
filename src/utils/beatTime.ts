@@ -1,4 +1,4 @@
-import { ChartData, ResolvedNote, ResolvedEvent, BpmPoint } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, BpmPoint, EasingType } from '../types/game';
 
 /** A point where scroll speed changes, in absolute seconds + speed multiplier */
 export interface SpeedPoint {
@@ -175,14 +175,52 @@ export function getBpmAtBeat(beat: number, baseBpm: number, bpmlist?: BpmPoint[]
  */
 export function resolveChart(chart: ChartData): ResolvedNote[] {
   const { bpm, offset, bpmlist } = chart.metadata;
-  const resolved = chart.notes.map((n) => ({
-    ...n,
-    timeSec: beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist),
-    resolvedNodes:
-      n.type === 'slide'
-        ? (n.nodes ?? []).map((sn) => ({ ...sn, timeSec: beatToSecondsMultiBpm(sn.beat, bpm, offset, bpmlist) }))
-        : undefined,
-  }));
+  const resolved: ResolvedNote[] = [];
+  chart.notes.forEach((n) => {
+    // Resolve the head's global angle (degrees→radians) and easing. Child nodes
+    // fall back to these when they don't specify their own.
+    const headAngle = ((n.angle ?? 0) * Math.PI) / 180;
+    const headEasing: EasingType = n.easing ?? 'linear';
+    if (n.type === 'slide') {
+      resolved.push({
+        ...n,
+        timeSec: beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist),
+        angle: headAngle,
+        easing: headEasing,
+        resolvedNodes: (n.nodes ?? []).map((sn) => ({
+          ...sn,
+          timeSec: beatToSecondsMultiBpm(sn.beat, bpm, offset, bpmlist),
+          angle: ((sn.angle ?? n.angle ?? 0) * Math.PI) / 180,
+          easing: sn.easing ?? n.easing ?? 'linear',
+        })),
+      });
+      return;
+    }
+    // tap / touch chains: every child node is an independent note of the same
+    // type, inheriting the head node's parameters (color, angle, easing, ...).
+    resolved.push({
+      ...n,
+      nodes: undefined,
+      timeSec: beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist),
+      angle: headAngle,
+      easing: headEasing,
+      resolvedNodes: undefined,
+    });
+    (n.nodes ?? []).forEach((sn, k) => {
+      resolved.push({
+        ...n,
+        nodes: undefined,
+        id: `${n.id}#${k + 1}`,
+        beat: sn.beat,
+        x: sn.x,
+        y: sn.y,
+        timeSec: beatToSecondsMultiBpm(sn.beat, bpm, offset, bpmlist),
+        resolvedNodes: undefined,
+        angle: ((sn.angle ?? n.angle ?? 0) * Math.PI) / 180,
+        easing: sn.easing ?? n.easing ?? 'linear',
+      });
+    });
+  });
   resolved.sort((a, b) => a.timeSec - b.timeSec);
   return resolved;
 }
@@ -254,8 +292,5 @@ export function getChartDuration(chart: ChartData): number {
  * Count all scoreable notes: tap/touch = 1 each; slide = head + each child node (1 each).
  */
 export function countPlayableNotes(chart: ChartData): number {
-  return chart.notes.reduce(
-    (acc, n) => acc + 1 + (n.type === 'slide' ? (n.nodes?.length ?? 0) : 0),
-    0
-  );
+  return chart.notes.reduce((acc, n) => acc + 1 + (n.nodes?.length ?? 0), 0);
 }

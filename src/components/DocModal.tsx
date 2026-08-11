@@ -103,7 +103,7 @@ export const DocModal: React.FC<DocModalProps> = ({ isOpen, onClose }) => {
               </div>
             </div>
           </div>
-          <p>v0.0.2.1</p>
+          <p>v0.0.3</p>
         </div>
         
         <div className="p-4 border-t border-white/10 flex justify-end bg-white/[0.03]">

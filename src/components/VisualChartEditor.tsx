@@ -1,7 +1,9 @@
-import React, { useState, useRef } from 'react';
-import { ChartData, NoteData, EventData, EventType, BpmPoint } from '../types/game';
+import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData } from '../types/game';
 import { exportChartJson, parseAndValidateChart } from '../utils/chartParser';
 import { countPlayableNotes, getMaxBeat, beatToSecondsMultiBpm } from '../utils/beatTime';
+import { EASING_TYPES } from '../utils/easing';
 import {
   ChevronLeft,
   ChevronRight,
@@ -22,6 +24,7 @@ import {
   LayoutGrid,
   FlipHorizontal,
   FlipVertical,
+  RefreshCw,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
@@ -81,6 +84,168 @@ interface VisualChartEditorProps {
   viewMode: '3d' | '2d';
   onSetViewMode: (mode: '3d' | '2d') => void;
   onApplyQuickCreateDelta?: (delta: QuickCreateDelta) => void;
+}
+
+/** Numeric field that allows an EMPTY state (commits `null` on empty). The
+ *  displayed text is decoupled from the committed value so deleting all digits
+ *  does not force an immediate "0" — the chart gets the default (0) while the
+ *  field stays empty for easy retyping. Syncs from props only while not focused. */
+function NumField({
+  value,
+  onCommit,
+  step,
+  min,
+  max,
+  placeholder,
+  className,
+}: {
+  value: number;
+  onCommit: (v: number | null) => void;
+  step?: number | string;
+  min?: number;
+  max?: number;
+  placeholder?: string;
+  className?: string;
+}) {
+  const [text, setText] = useState(value === 0 ? '' : String(value));
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current && document.activeElement !== ref.current) {
+      setText(value === 0 ? '' : String(value));
+    }
+  }, [value]);
+  return (
+    <input
+      ref={ref}
+      type="number"
+      step={step}
+      min={min}
+      max={max}
+      value={text}
+      placeholder={placeholder}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setText(raw);
+        if (raw === '') { onCommit(null); return; }
+        const n = parseFloat(raw);
+        if (!Number.isNaN(n)) onCommit(n);
+      }}
+      onBlur={() => {
+        const n = parseFloat(text);
+        const v = Number.isNaN(n) ? null : n;
+        onCommit(v);
+        setText(v === 0 || v === null ? '' : String(v));
+      }}
+      className={className}
+    />
+  );
+}
+
+/** Self-styled frosted-glass dropdown for the easing value (no native <select>,
+ *  so it follows the editor's dark glass theme). Includes a "default" option
+ *  that removes the key (inherits the head node's value). The popup is rendered
+ *  through a portal to <body> with fixed positioning so it FLOATS above the
+ *  editor panel (which has overflow/transform and would otherwise clip/resize it). */
+const EasingSelect: React.FC<{
+  value: EasingType | 'default';
+  onChange: (v: EasingType | 'default') => void;
+}> = ({ value, onChange }) => {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setRect(btnRef.current?.getBoundingClientRect() ?? null);
+    // Close on any scroll/resize: the panel can move, and since we position
+    // against the viewport the menu would otherwise detach from the trigger.
+    const close = () => setOpen(false);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+  const options: Array<{ value: EasingType | 'default'; label: string }> = [
+    { value: 'default', label: t('editor.default') },
+    ...EASING_TYPES.map((et) => ({ value: et, label: et })),
+  ];
+  const current = options.find((o) => o.value === value) ?? options[0];
+  return (
+    <div className="col-span-4 relative">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`w-full glass-input border rounded px-1.5 py-0.5 text-amber-300 text-left cursor-pointer flex items-center justify-between ${
+          open ? 'border-cyan-400/60' : 'border-white/12'
+        }`}
+      >
+        <span>{current.label}</span>
+        <span className="text-white/40 text-[9px]">▾</span>
+      </button>
+      {open && rect &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-[60]" onMouseDown={() => setOpen(false)} />
+            <div
+              className="fixed z-[61] glass-panel-strong rounded-xl border-white/15 p-1 space-y-0.5 max-h-44 overflow-y-auto"
+              style={{ left: rect.left, top: rect.bottom + 4, minWidth: rect.width }}
+            >
+              {options.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => { onChange(o.value); setOpen(false); }}
+                  className={`w-full text-left px-2 py-1.5 rounded-lg text-[11px] font-mono transition cursor-pointer ${
+                    o.value === value
+                      ? 'bg-cyan-500/25 text-cyan-200'
+                      : 'text-white/70 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </>,
+          document.body,
+        )}
+    </div>
+  );
+};
+
+/** Compact row editing a node's rotation angle (deg) and segment easing. */
+function AngleEasingRow({
+  angle,
+  easing,
+  onAngle,
+  onEasing,
+  labelAngle,
+  labelEasing,
+}: {
+  angle: number | null; // null = 缺省（empty input / inherits head / 0）
+  easing: EasingType | 'default'; // 'default' = 缺省（inherits head / linear）
+  onAngle: (v: number | null) => void;
+  onEasing: (v: EasingType | 'default') => void;
+  labelAngle: string;
+  labelEasing: string;
+}) {
+  return (
+    <div className="col-span-12 grid grid-cols-12 gap-1.5 items-center px-2 pb-1.5 text-[10px] font-mono">
+      <span className="col-span-2 text-white/60">{labelAngle}</span>
+      <NumField
+        value={angle ?? 0}
+        onCommit={onAngle}
+        step={5}
+        placeholder="—"
+        className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-amber-300 w-full placeholder:text-white/25"
+      />
+      <span className="col-span-2 text-white/60">{labelEasing}</span>
+      <EasingSelect value={easing} onChange={onEasing} />
+      <span className="col-span-1" />
+    </div>
+  );
 }
 
 export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
@@ -315,14 +480,33 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     onUpdateChart({ ...chart, notes: updatedNotes });
   };
 
-  const handlePatchSlideNode = (childIdx: number, patch: Partial<{ beat: number; x: number; y: number }>) => {
-    if (!selectedNote || selectedNote.type !== 'slide' || !selectedNote.nodes) return;
+  const handlePatchSlideNode = (childIdx: number, patch: Partial<SlideNodeData>) => {
+    if (!selectedNote || !selectedNote.nodes) return;
     const nodes = selectedNote.nodes.map((sn, i) => (i === childIdx ? { ...sn, ...patch } : sn));
     handleModifySelected({ nodes });
   };
 
+  // Click a node box in the chain editor (only on blank area — see row onClick):
+  // first click selects the node, a second click on the already-selected node
+  // seeks the playhead to its beat.
+  const handleNodeClick = (subId: string, beat: number) => {
+    if (selectedNoteId === subId) {
+      onSeekBeat(beat);
+    } else {
+      onSelectNote(subId);
+    }
+  };
+
+  // Cycle the note type through Tap → Touch → Slide (and back) in a single button.
+  const TYPE_CYCLE: NoteType[] = ['tap', 'touch', 'slide'];
+  const cycleType = () => {
+    const idx = TYPE_CYCLE.indexOf(selectedNote!.type);
+    const next = TYPE_CYCLE[(idx + 1) % TYPE_CYCLE.length];
+    handleModifySelected({ type: next });
+  };
+
   const handleAddSlideNode = () => {
-    if (!selectedNote || selectedNote.type !== 'slide') return;
+    if (!selectedNote) return;
     const nodes = selectedNote.nodes ?? [];
     const last = nodes.length > 0 ? nodes[nodes.length - 1] : { beat: selectedNote.beat, x: selectedNote.x, y: selectedNote.y };
     const newNode = { beat: Math.round((last.beat + 1) * 1000) / 1000, x: last.x, y: last.y };
@@ -330,7 +514,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   };
 
   const handleRemoveSlideNode = (childIdx: number) => {
-    if (!selectedNote || selectedNote.type !== 'slide' || !selectedNote.nodes) return;
+    if (!selectedNote || !selectedNote.nodes) return;
     const nodes = selectedNote.nodes.filter((_, i) => i !== childIdx);
     handleModifySelected({ nodes });
     onSelectNote(selectedNote.id);
@@ -341,6 +525,38 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     const updatedNotes = chart.notes.filter((n) => n.id !== selectedBaseId);
     onUpdateChart({ ...chart, notes: updatedNotes });
     onSelectNote(null);
+  };
+
+  // Remove the head node: promote the first child to become the new head (its
+  // explicit angle/easing win, otherwise it inherits the old head's effective
+  // values so behavior is unchanged). If there are no children, deleting the
+  // head deletes the entire chain.
+  const handleRemoveHeadNode = () => {
+    if (!selectedNote) return;
+    const nodes = selectedNote.nodes ?? [];
+    if (nodes.length === 0) {
+      handleDeleteSelected();
+      return;
+    }
+    const [newHead, ...rest] = nodes;
+    handleModifySelected({
+      beat: newHead.beat,
+      x: newHead.x,
+      y: newHead.y,
+      angle: newHead.angle ?? selectedNote.angle,
+      easing: newHead.easing ?? selectedNote.easing,
+      nodes: rest,
+    });
+    // A child node was selected → its index shifts down by one (node #1 became head).
+    if (selectedNoteId && selectedNoteId !== selectedNote.id) {
+      const hashIdx = selectedNoteId.indexOf('#');
+      if (hashIdx >= 0) {
+        const k = parseInt(selectedNoteId.slice(hashIdx + 1), 10);
+        if (!Number.isNaN(k)) {
+          onSelectNote(k <= 1 ? selectedNote.id : `${selectedNote.id}#${k - 1}`);
+        }
+      }
+    }
   };
 
   const handleAudioUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -483,7 +699,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
       case 'place-slide':
         return (
           <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeSlide')}>
-            <span className="w-3 h-3 border-2 border-emerald-300 block rotate-45" />
+            <span className="w-3 h-3 border-2 border-cyan-300 block rotate-45" />
           </button>
         );
       case 'quick-create':
@@ -623,7 +839,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                     )}
                     <button onClick={() => onSetActiveTool('place-tap')} className={toolBtnCls('place-tap')}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block" /><span>{t('editor.placeTap')}</span></button>
                     <button onClick={() => onSetActiveTool('place-touch')} className={toolBtnCls('place-touch')}><span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" /><span>{t('editor.placeTouch')}</span></button>
-                    <button onClick={() => onSetActiveTool('place-slide')} className={toolBtnCls('place-slide')}><span className="w-3.5 h-3.5 border-2 border-emerald-300 block rotate-45" /><span>{t('editor.placeSlide')}</span></button>
+                    <button onClick={() => onSetActiveTool('place-slide')} className={toolBtnCls('place-slide')}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block rotate-45" /><span>{t('editor.placeSlide')}</span></button>
                   </div>
                   {viewMode === '2d' ? (
                     <p className="text-[10px] text-white/50">
@@ -698,7 +914,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                     <button onClick={() => handleAddEvent('note_color_change')} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 text-[11px] transition cursor-pointer">
                       {t('editor.evt.noteColor')}
                     </button>
-                    <button onClick={() => handleAddEvent('bg_change')} className="py-1.5 px-2 rounded glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 text-[11px] transition cursor-pointer">
+                    <button onClick={() => handleAddEvent('bg_change')} className="py-1.5 px-2 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-emerald-200 text-[11px] transition cursor-pointer">
                       {t('editor.evt.bg')}
                     </button>
                   </div>
@@ -818,7 +1034,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 <span>{t('editor.batch')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.batch ? '−' : '+'}</span>
               </button>
-              {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-emerald-400 font-mono">{t('editor.batchNotes', { n: notesInBatch.length })}</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchStart')}: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : t('editor.batchUnset')}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchEnd')}: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : t('editor.batchUnset')}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">{t('editor.batchRange')}: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> {t('editor.clone')}</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> {t('editor.delete')}</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">{t('editor.confirmQ')}</button>}</div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={handleBatchFlipX} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipHorizontal size={12} /> {t('editor.flipX')}</button><button onClick={handleBatchFlipY} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipVertical size={12} /> {t('editor.flipY')}</button></div></div>}</div>}
+              {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-cyan-400 font-mono">{t('editor.batchNotes', { n: notesInBatch.length })}</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchStart')}: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : t('editor.batchUnset')}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchEnd')}: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : t('editor.batchUnset')}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">{t('editor.batchRange')}: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> {t('editor.clone')}</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> {t('editor.delete')}</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">{t('editor.confirmQ')}</button>}</div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={handleBatchFlipX} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipHorizontal size={12} /> {t('editor.flipX')}</button><button onClick={handleBatchFlipY} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipVertical size={12} /> {t('editor.flipY')}</button></div></div>}</div>}
             </div>
 
             <div className={sectionClass}>
@@ -836,117 +1052,61 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         )}
       </div>
 
-      {/* 2. Draggable & Semi-Transparent Floating Quick Editor */}
-      {selectedNote && selectedNote.type !== 'slide' && (
+      {/* 2. Draggable & Semi-Transparent Floating Note Chain Editor.
+          Tap / Touch / Slide all share this chain-based editor: a chain is a
+          head node plus optional child nodes, and the whole chain can be
+          switched between the three note types. */}
+      {selectedNote && (
         <div
-          className="glass-panel-strong absolute pointer-events-auto border-cyan-400/40 rounded-2xl p-3.5 text-white flex items-center gap-4 z-40 transition-colors select-none"
+          className="glass-panel-strong absolute pointer-events-auto border-cyan-400/40 rounded-2xl p-4 text-white z-40 w-[26rem] max-h-[50vh] overflow-y-auto select-none"
           style={{
             transform: `translate(${panelPos.x}px, ${panelPos.y}px)`,
             left: '24rem',
             top: '1rem',
           }}
         >
-          {/* Drag Handle */}
-          <div
-            onPointerDown={onPanelPointerDown}
-            onPointerMove={onPanelPointerMove}
-            onPointerUp={onPanelPointerUp}
-            className="w-5 h-8 flex items-center justify-center text-cyan-400/50 hover:text-cyan-400 active:text-cyan-300 cursor-grab active:cursor-grabbing border-r border-white/10 pr-1.5 select-none shrink-0"
-            title={t('editor.dragPanel')}
-          >
-            <Compass size={14} className="animate-pulse" />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-xs text-cyan-300 font-mono">#{selectedNote.id}</span>
-            <button
-              onClick={() => handleModifySelected({ type: selectedNote.type === 'tap' ? 'touch' : 'tap' })}
-              className="px-2.5 py-1 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 text-xs font-bold hover:bg-cyan-500/40 cursor-pointer"
-            >
-              {t('editor.switchTo')} {selectedNote.type === 'tap' ? '● Touch' : '■ Tap'}
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span>Beat:</span>
-            <input
-              type="number" step={snapSubdivision} value={selectedNote.beat}
-              onChange={(e) => handleModifySelected({ beat: parseFloat(e.target.value) || 0 })}
-              className="w-18 glass-input border border-white/12 rounded px-2 py-0.5 text-cyan-300 font-mono"
-            />
-          </div>
-
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span>X:</span>
-            <input
-              type="number" step="0.1" min="-2.4" max="2.4" value={selectedNote.x}
-              onChange={(e) => handleModifySelected({ x: parseFloat(e.target.value) || 0 })}
-              className="w-14 glass-input border border-white/12 rounded px-1 py-0.5 text-cyan-300"
-            />
-            <span>Y:</span>
-            <input
-              type="number" step="0.1" min="-1.5" max="1.5" value={selectedNote.y}
-              onChange={(e) => handleModifySelected({ y: parseFloat(e.target.value) || 0 })}
-              className="w-14 glass-input border border-white/12 rounded px-1 py-0.5 text-cyan-300"
-            />
-          </div>
-
-          <div className="flex items-center gap-1 text-xs font-mono">
-            <input
-              type="color"
-              value={selectedNote.color || chart.metadata.noteColor || '#00f0ff'}
-              onChange={(e) => handleModifySelected({ color: e.target.value })}
-              className="w-6 h-6 rounded border border-cyan-500/40 bg-transparent cursor-pointer"
-              title={t('editor.overwriteColor')}
-              onDoubleClick={() => handleModifySelected({ color: undefined })}
-            />
-          </div>
-
-          <button onClick={handleDeleteSelected} className="p-1.5 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 hover:bg-red-800 hover:text-white transition cursor-pointer" title="删除选中的音符">
-            <Trash2 size={16} />
-          </button>
-          <button onClick={() => onSelectNote(null)} className="p-1 text-white/50 hover:text-white">
-            <X size={16} />
-          </button>
-        </div>
-      )}
-
-      {/* 2b. Draggable & Semi-Transparent Floating Slide Chain Editor */}
-      {selectedNote && selectedNote.type === 'slide' && (
-        <div
-          className="glass-panel-strong absolute pointer-events-auto border-emerald-400/40 rounded-2xl p-4 text-white z-40 w-[26rem] max-h-[50vh] overflow-y-auto select-none"
-          style={{
-            transform: `translate(${panelPos.x}px, ${panelPos.y}px)`,
-            left: '24rem',
-            top: '1rem',
-          }}
-        >
-          <div className="flex items-center justify-between mb-3 border-b border-emerald-500/20 pb-2">
+          <div className="flex items-center justify-between mb-3 border-b border-cyan-500/20 pb-2">
             <div className="flex items-center gap-2">
               {/* Drag Handle */}
               <div
                 onPointerDown={onPanelPointerDown}
                 onPointerMove={onPanelPointerMove}
                 onPointerUp={onPanelPointerUp}
-                className="w-5 h-5 flex items-center justify-center text-emerald-400/50 hover:text-emerald-400 active:text-emerald-300 cursor-grab active:cursor-grabbing mr-1 select-none shrink-0 animate-pulse"
+                className="w-5 h-5 flex items-center justify-center text-cyan-400/50 hover:text-cyan-400 active:text-cyan-300 cursor-grab active:cursor-grabbing mr-1 select-none shrink-0 animate-pulse"
                 title={t('editor.dragPanel')}
               >
                 <Compass size={14} />
               </div>
-              <span className="w-3 h-3 border-2 border-emerald-300 rotate-45 block" />
-              <span className="font-bold text-sm text-emerald-300 font-orbitron">{t('editor.slideChain')}</span>
+              <span
+                className={
+                  selectedNote.type === 'touch'
+                    ? 'w-3 h-3 border-2 border-cyan-300 rounded-full block'
+                    : selectedNote.type === 'slide'
+                      ? 'w-3 h-3 border-2 border-cyan-300 rotate-45 block'
+                      : 'w-3 h-3 border-2 border-cyan-300 block'
+                }
+              />
+              <span className="font-bold text-sm text-cyan-300 font-orbitron">{t('editor.noteChain')}</span>
               <span className="text-[10px] text-white/50 font-mono">#{selectedNote.id}</span>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={cycleType}
+                title={t('editor.cycleType')}
+                className="flex items-center gap-1 rounded overflow-hidden border border-cyan-400/40 bg-cyan-500/20 px-2 py-0.5 text-[10px] font-bold text-white cursor-pointer hover:bg-cyan-500/35 transition"
+              >
+                <RefreshCw size={11} />
+                {selectedNote.type === 'tap' ? '■ Tap' : selectedNote.type === 'touch' ? '● Touch' : '◆ Slide'}
+              </button>
               <input
                 type="color"
                 value={selectedNote.color || chart.metadata.noteColor || '#00f0ff'}
                 onChange={(e) => handleModifySelected({ color: e.target.value })}
-                className="w-6 h-6 bg-transparent cursor-pointer rounded border border-emerald-400/40"
+                className="w-6 h-6 bg-transparent cursor-pointer rounded border border-cyan-400/40"
                 title={t('editor.setChainColor')}
                 onDoubleClick={() => handleModifySelected({ color: undefined })}
               />
-              <button onClick={handleDeleteSelected} className="p-1.5 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 hover:bg-red-800 hover:text-white transition cursor-pointer" title="删除整条 Slide">
+              <button onClick={handleDeleteSelected} className="p-1.5 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 hover:bg-red-800 hover:text-white transition cursor-pointer" title={t('editor.deleteChain')}>
                 <Trash2 size={14} />
               </button>
               <button onClick={() => onSelectNote(null)} className="p-1 text-white/50 hover:text-white">
@@ -955,56 +1115,110 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             </div>
           </div>
 
-          {/* Head node row */}
-          <div className={`grid grid-cols-12 gap-1.5 items-center p-2 rounded-lg mb-1.5 text-xs font-mono ${
-            selectedNoteId === selectedNote.id ? 'bg-emerald-900/40 border border-emerald-400/50' : 'glass-sub border-white/10'
-          }`}>
-            <span className="col-span-2 text-emerald-300 font-bold">{t('editor.headNode')}</span>
-            <input
-              type="number" step={snapSubdivision} value={selectedNote.beat}
-              onChange={(e) => handleModifySelected({ beat: parseFloat(e.target.value) || 0 })}
-              className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300"
+          {/* Head node box — click anywhere in the row (text, padding) to select
+              (first click) or seek (second click on the already-selected head).
+              Clicks on inputs/buttons are ignored so editing never jumps.
+              The angle/easing row is boxed INSIDE, exactly like child nodes. */}
+          <div
+            onClick={(e) => { const el = e.target as HTMLElement; if (el.tagName === 'INPUT' || el.tagName === 'BUTTON') return; handleNodeClick(selectedNote.id, selectedNote.beat); }}
+            className={`grid grid-cols-12 gap-1.5 items-center p-2 rounded-lg mb-1.5 text-xs font-mono ${
+              selectedNoteId === selectedNote.id ? 'bg-cyan-500/15 border border-cyan-400/50' : 'glass-sub border-white/10'
+            }`}
+          >
+            <span className="col-span-2 text-white/70">{t('editor.headNode')}</span>
+            <NumField
+              value={selectedNote.beat}
+              onCommit={(v) => handleModifySelected({ beat: v ?? 0 })}
+              step={snapSubdivision}
+              placeholder="0"
+              className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
-            <input
-              type="number" step="0.1" min="-2.4" max="2.4" value={selectedNote.x}
-              onChange={(e) => handleModifySelected({ x: parseFloat(e.target.value) || 0 })}
-              className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300"
+            <NumField
+              value={selectedNote.x}
+              onCommit={(v) => handleModifySelected({ x: v ?? 0 })}
+              step={0.1} min={-2.4} max={2.4}
+              placeholder="0"
+              className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
-            <input
-              type="number" step="0.1" min="-1.5" max="1.5" value={selectedNote.y}
-              onChange={(e) => handleModifySelected({ y: parseFloat(e.target.value) || 0 })}
-              className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300"
+            <NumField
+              value={selectedNote.y}
+              onCommit={(v) => handleModifySelected({ y: v ?? 0 })}
+              step={0.1} min={-1.5} max={1.5}
+              placeholder="0"
+              className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
-            <span className="col-span-1" />
+            <button
+              onClick={(e) => { e.stopPropagation(); handleRemoveHeadNode(); }}
+              className="col-span-1 flex justify-center text-red-400 hover:text-red-300 cursor-pointer"
+              title={t('editor.deleteHeadNode')}
+            >
+              <Trash2 size={13} />
+            </button>
+            {/* Angle + easing for the head (global default). Boxed inside the node.
+                Shown only when the head is the selected node. */}
+            {selectedNoteId === selectedNote.id && (
+              <AngleEasingRow
+                labelAngle={t('editor.angle')}
+                labelEasing={t('editor.easing')}
+                angle={selectedNote.angle ?? null}
+                easing={selectedNote.easing ?? 'default'}
+                onAngle={(v) => handleModifySelected({ angle: v ?? undefined })}
+                onEasing={(v) => handleModifySelected({ easing: v === 'default' ? undefined : v })}
+              />
+            )}
           </div>
 
-          {/* Child node rows */}
+          {/* Child node rows — click anywhere in the row (text, padding) to select
+              (first click) or seek (second click). Inputs/buttons are ignored, and
+              the delete button stops propagation. */}
           {(selectedNote.nodes ?? []).map((sn, i) => (
             <div
               key={i}
+              onClick={(e) => { const el = e.target as HTMLElement; if (el.tagName === 'INPUT' || el.tagName === 'BUTTON') return; handleNodeClick(`${selectedNote.id}#${i + 1}`, sn.beat); }}
               className={`grid grid-cols-12 gap-1.5 items-center p-2 rounded-lg mb-1.5 text-xs font-mono ${
-                selectedNoteId === `${selectedNote.id}#${i + 1}` ? 'bg-emerald-900/40 border border-emerald-400/50' : 'glass-sub border-white/10'
+                selectedNoteId === `${selectedNote.id}#${i + 1}` ? 'bg-cyan-500/15 border border-cyan-400/50' : 'glass-sub border-white/10'
               }`}
             >
               <span className="col-span-2 text-white/70">{t('editor.nodeN', { n: i + 1 })}</span>
-              <input
-                type="number" step={snapSubdivision} value={sn.beat}
-                onChange={(e) => handlePatchSlideNode(i, { beat: parseFloat(e.target.value) || 0 })}
-                className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300"
+              <NumField
+                value={sn.beat}
+                onCommit={(v) => handlePatchSlideNode(i, { beat: v ?? 0 })}
+                step={snapSubdivision}
+                placeholder="0"
+                className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
-              <input
-                type="number" step="0.1" min="-2.4" max="2.4" value={sn.x}
-                onChange={(e) => handlePatchSlideNode(i, { x: parseFloat(e.target.value) || 0 })}
-                className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300"
+              <NumField
+                value={sn.x}
+                onCommit={(v) => handlePatchSlideNode(i, { x: v ?? 0 })}
+                step={0.1} min={-2.4} max={2.4}
+                placeholder="0"
+                className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
-              <input
-                type="number" step="0.1" min="-1.5" max="1.5" value={sn.y}
-                onChange={(e) => handlePatchSlideNode(i, { y: parseFloat(e.target.value) || 0 })}
-                className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300"
+              <NumField
+                value={sn.y}
+                onCommit={(v) => handlePatchSlideNode(i, { y: v ?? 0 })}
+                step={0.1} min={-1.5} max={1.5}
+                placeholder="0"
+                className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
-              <button onClick={() => handleRemoveSlideNode(i)} className="col-span-1 flex justify-center text-red-400 hover:text-red-300 cursor-pointer">
+              <button
+                onClick={(e) => { e.stopPropagation(); handleRemoveSlideNode(i); }}
+                className="col-span-1 flex justify-center text-red-400 hover:text-red-300 cursor-pointer"
+              >
                 <Trash2 size={13} />
               </button>
+              {/* Angle + easing for this node, shown only when it is selected.
+                  Empty = 缺省(inherits head → 0); 'default' = inherits head → linear. */}
+              {selectedNoteId === `${selectedNote.id}#${i + 1}` && (
+                <AngleEasingRow
+                  labelAngle={t('editor.angle')}
+                  labelEasing={t('editor.easing')}
+                  angle={sn.angle ?? null}
+                  easing={sn.easing ?? 'default'}
+                  onAngle={(v) => handlePatchSlideNode(i, { angle: v ?? undefined })}
+                  onEasing={(v) => handlePatchSlideNode(i, { easing: v === 'default' ? undefined : v })}
+                />
+              )}
             </div>
           ))}
 
@@ -1018,7 +1232,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
           <button
             onClick={handleAddSlideNode}
-            className="w-full py-1.5 rounded-lg border-2 border-dashed border-emerald-500/40 hover:bg-emerald-500/10 text-emerald-300 font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1"
+            className="w-full py-1.5 rounded-lg border-2 border-dashed border-cyan-500/40 hover:bg-cyan-500/10 text-cyan-300 font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1"
           >
             <Plus size={13} /> {t('editor.appendNode')}
           </button>
@@ -1190,7 +1404,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
     speed_change: { border: 'border-purple-400/40', text: 'text-purple-300 hover:text-purple-200' },
     text_display: { border: 'border-amber-400/40', text: 'text-amber-300 hover:text-amber-200' },
     note_color_change: { border: 'border-cyan-400/40', text: 'text-cyan-300 hover:text-cyan-200' },
-    bg_change: { border: 'border-emerald-400/40', text: 'text-emerald-300 hover:text-emerald-200' },
+    bg_change: { border: 'border-cyan-400/40', text: 'text-cyan-300 hover:text-emerald-200' },
   };
 
   const color = typeColor[event.eventType];

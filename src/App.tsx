@@ -157,6 +157,11 @@ export function App() {
   // same gradient, so visuals are unchanged but React never re-renders.
   const ambientBgRef = useRef<HTMLDivElement | null>(null);
   const bgSchemeRef = useRef<any>(null);
+  // Live mirror of the current chart so editor callbacks can read fresh notes
+  // without adding `currentChart` to their dependency arrays (which would make
+  // the place handler stale between rapid placements).
+  const currentChartRef = useRef(currentChart);
+  currentChartRef.current = currentChart;
   // Gameplay HUD is driven imperatively (no React re-render during play):
   const progressRef = useRef<HTMLDivElement | null>(null);
   const chartDurationRef = useRef(0);
@@ -773,43 +778,35 @@ export function App() {
   const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number) => {
     const exactBeat = Math.round((beat ?? currentBeatRef.current) * 1000) / 1000;
 
-    if (editorTool === 'place-slide') {
-      const base = selectedNoteId ? selectedNoteId.split('#')[0] : null;
+    const noteType: NoteData['type'] =
+      editorTool === 'place-slide' ? 'slide' : editorTool === 'place-touch' ? 'touch' : 'tap';
+
+    const base = selectedNoteId ? selectedNoteId.split('#')[0] : null;
+    const sel = base ? currentChartRef.current.notes.find((n) => n.id === base) : undefined;
+
+    // Only the slide tool auto-chains: placing while a node of an existing slide
+    // chain is selected appends a child node (selection stays on the head).
+    // Tap/Touch (and any non-chainable case) place a standalone note and select it.
+    if (editorTool === 'place-slide' && sel && sel.type === noteType) {
+      const lastBeat = sel.nodes && sel.nodes.length > 0 ? sel.nodes[sel.nodes.length - 1].beat : sel.beat;
+      const step = Math.max(snapSubdivision, 0.05);
+      const newBeat = exactBeat > lastBeat + 0.001
+        ? exactBeat
+        : Math.round((lastBeat + step) * 1000) / 1000;
       setCurrentChart((prev) => {
-        const sel = base ? prev.notes.find((n) => n.id === base) : undefined;
-        if (sel && sel.type === 'slide') {
-          const lastBeat = sel.nodes && sel.nodes.length > 0 ? sel.nodes[sel.nodes.length - 1].beat : sel.beat;
-          const step = Math.max(snapSubdivision, 0.05);
-          const newBeat = exactBeat > lastBeat + 0.001
-            ? exactBeat
-            : Math.round((lastBeat + step) * 1000) / 1000;
-          const updatedNotes = prev.notes.map((n) =>
-            n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x, y }] } : n
-          );
-          return { ...prev, notes: updatedNotes };
-        }
-        const newNoteId = `ed-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 1000)}`;
-        const newNote: NoteData = { id: newNoteId, beat: exactBeat, x, y, type: 'slide', nodes: [] };
-        setSelectedNoteId(newNoteId);
-        return { ...prev, notes: [...prev.notes, newNote].sort((a, b) => a.beat - b.beat) };
+        const updatedNotes = prev.notes.map((n) =>
+          n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x, y }] } : n
+        );
+        return { ...prev, notes: updatedNotes };
       });
       return;
     }
 
-    const noteType = editorTool === 'place-touch' ? 'touch' : 'tap';
-    const newNoteId = `ed-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 1000)}`;
-    const newNote: NoteData = {
-      id: newNoteId,
-      beat: exactBeat,
-      x,
-      y,
-      type: noteType,
-    };
-    setCurrentChart((prev) => {
-      const updatedNotes = [...prev.notes, newNote].sort((a, b) => a.beat - b.beat);
-      return { ...prev, notes: updatedNotes };
-    });
+    // Short, collision-resistant id: a 7-char base36 random (~78e9 combos).
+    const newNoteId = `ed-${Math.random().toString(36).slice(2, 9)}`;
+    const newNote: NoteData = { id: newNoteId, beat: exactBeat, x, y, type: noteType, nodes: [] };
     setSelectedNoteId(newNoteId);
+    setCurrentChart((prev) => ({ ...prev, notes: [...prev.notes, newNote].sort((a, b) => a.beat - b.beat) }));
   }, [editorTool, selectedNoteId, snapSubdivision]);
 
   const handleMoveEditorNote = useCallback((id: string, x: number, y: number, beat?: number) => {
@@ -841,14 +838,14 @@ export function App() {
   type QcSlideEntry = NonNullable<QuickCreateDelta['slides']>[number];
   const handleApplyQuickCreateDelta = useCallback((delta: QuickCreateDelta) => {
     const newTaps: NoteData[] = (delta.taps ?? []).map((t) => ({
-      id: `qc-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 90000 + 10000)}`,
+      id: `qc-${Math.random().toString(36).slice(2, 9)}`,
       beat: t.beat,
       x: t.x,
       y: t.y,
       type: 'tap',
     }));
     const newTouches: NoteData[] = (delta.touches ?? []).map((t) => ({
-      id: `qc-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 90000 + 10000)}`,
+      id: `qc-${Math.random().toString(36).slice(2, 9)}`,
       beat: t.beat,
       x: t.x,
       y: t.y,
@@ -895,7 +892,7 @@ export function App() {
       const newSlides: NoteData[] = slidePatches
         .filter((p) => p.matchId === null)
         .map((p) => ({
-          id: `qc-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 90000 + 10000)}`,
+          id: `qc-${Math.random().toString(36).slice(2, 9)}`,
           beat: p.head.headBeat,
           x: p.head.headX,
           y: p.head.headY,

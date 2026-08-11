@@ -1,5 +1,14 @@
 export type NoteType = 'tap' | 'touch' | 'slide';
 
+/** Easing curve for the segment connecting a slide node to its previous node.
+ *  - 'linear'  : straight line (default).
+ *  - 'sine-in' : curve leaves the previous node perpendicularly, then bends in
+ *                (slow "ease-in" start) — visually a smooth entry.
+ *  - 'sine-out': straight start, perpendicular exit (smooth "ease-out" end).
+ *  - 'sine-io' : perpendicular at both ends (smooth S-curve).
+ *  Used by the slide pipe renderer to bend the pipe between two nodes. */
+export type EasingType = 'linear' | 'sine-in' | 'sine-out' | 'sine-io';
+
 export type EventType = 'speed_change' | 'text_display' | 'bg_change' | 'note_color_change';
 
 export type JudgementType = 'S-Perfect' | 'Perfect' | 'Good' | 'Miss';
@@ -20,6 +29,12 @@ export interface SlideNodeData {
   beat: number;
   x: number;
   y: number;
+  /** Rotation (degrees) of this node's visual (note + cross-section) around its
+   *  center. Defaults to the head node's `angle` (or 0 if unset) when omitted. */
+  angle?: number;
+  /** Easing for the segment connecting THIS node to the PREVIOUS node.
+   *  Defaults to the head node's `easing` (or 'linear') when omitted. */
+  easing?: EasingType;
 }
 
 /** BPM change point: from this beat onward, use the new BPM for time calculation. */
@@ -67,6 +82,11 @@ export interface NoteData {
   color?: string;
   /** Slide only: child nodes following the head node, each judged independently (1 note each). */
   nodes?: SlideNodeData[];
+  /** Global rotation (degrees) applied to this chain's visuals. Child nodes may
+   *  override it. Touch notes ignore it (a rotated circle looks identical). */
+  angle?: number;
+  /** Slide only: default easing for all child segments (overridable per child). */
+  easing?: EasingType;
   hit?: boolean;
   judgement?: JudgementType;
   deltaT?: number;
@@ -75,6 +95,10 @@ export interface NoteData {
 
 export interface ResolvedSlideNode extends SlideNodeData {
   timeSec: number;
+  /** Effective (resolved) angle in radians for rendering. */
+  angle: number;
+  /** Effective (resolved) easing for the segment leading into this node. */
+  easing: EasingType;
 }
 
 /** A rectangular hit region (axis-aligned) in note-space, used by the
@@ -89,6 +113,10 @@ export interface HitRegion {
 /** Runtime-resolved note with absolute time in seconds */
 export interface ResolvedNote extends NoteData {
   timeSec: number;
+  /** Resolved (effective) rotation in radians for this note's visual. */
+  angle?: number;
+  /** Resolved (effective) easing for this note (slide head/children only). */
+  easing?: EasingType;
   /** Slide only: resolved child nodes */
   resolvedNodes?: ResolvedSlideNode[];
   /** Extra hit regions (besides the note's own TAP_HIT_HALF box) gained from

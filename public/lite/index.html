@@ -739,6 +739,8 @@ if (!Object.assign) {
   var SLIDE_HIT_HALF = 1.2;
   var HIT_WINDOW_MS = 160;
   var SLIDE_RED = '#ff0000';
+  /* Easing identifiers valid in the chart spec (mirrors src/utils/easing.ts). */
+  var EASING_TYPES = ['linear', 'sine-in', 'sine-out', 'sine-io'];
   var CAMERA_VFOV = 52;
   var FIT_HALF = 2.42;
   var CAMERA_AXIS_Y = 0;
@@ -791,18 +793,52 @@ if (!Object.assign) {
     var bpm = chart.metadata.bpm, offset = chart.metadata.offset || 0;
     var bpmlist = chart.metadata.bpmlist || null;
     var out = [];
+    function validEasing(v) { return EASING_TYPES.indexOf(v) >= 0 ? v : null; }
+    function nodeTimeSec(beat) { return beatToSecondsMultiBpm(beat, bpm, offset, bpmlist); }
     for (var i = 0; i < chart.notes.length; i++) {
       var n = chart.notes[i];
-      var r = { id: n.id, beat: n.beat, x: n.x, y: n.y, type: n.type, color: n.color, timeSec: beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist) };
-      if (n.type === 'slide' && n.nodes) {
+      var headAngle = (typeof n.angle === 'number') ? n.angle : 0;
+      var headEasing = validEasing(n.easing) || 'linear';
+      var head = {
+        id: n.id, beat: n.beat, x: n.x, y: n.y, type: n.type, color: n.color,
+        timeSec: nodeTimeSec(n.beat),
+        angle: headAngle, easing: headEasing,
+        nodes: undefined, resolvedNodes: undefined, isSlide: false
+      };
+      if (n.type === 'slide' && n.nodes && n.nodes.length) {
+        /* Slide: one head + children kept as a chain (pipe rendered between them).
+         * Children inherit the head's angle/easing when they don't specify their own. */
         var kids = [];
         for (var k = 0; k < n.nodes.length; k++) {
           var sn = n.nodes[k];
-          kids.push({ beat: sn.beat, x: sn.x, y: sn.y, timeSec: beatToSecondsMultiBpm(sn.beat, bpm, offset, bpmlist) });
+          kids.push({
+            beat: sn.beat, x: sn.x, y: sn.y, timeSec: nodeTimeSec(sn.beat),
+            angle: (typeof sn.angle === 'number') ? sn.angle : headAngle,
+            easing: validEasing(sn.easing) || headEasing
+          });
         }
-        r.resolvedNodes = kids;
+        head.isSlide = true;
+        head.resolvedNodes = kids;
+        out.push(head);
+      } else if (n.nodes && n.nodes.length) {
+        /* Tap/Touch with child nodes: per the full spec each child is an
+         * INDEPENDENT note of the SAME type (inheriting angle/easing from head).
+         * Expand into the head plus one note per child node. */
+        out.push(head);
+        var childNodes = n.nodes.slice().sort(function (a, b) { return (a.beat || 0) - (b.beat || 0); });
+        for (var c = 0; c < childNodes.length; c++) {
+          var cn = childNodes[c];
+          out.push({
+            id: n.id + '#' + c, beat: cn.beat, x: cn.x, y: cn.y, type: n.type, color: n.color,
+            timeSec: nodeTimeSec(cn.beat),
+            angle: (typeof cn.angle === 'number') ? cn.angle : headAngle,
+            easing: validEasing(cn.easing) || headEasing,
+            nodes: undefined, resolvedNodes: undefined, isSlide: false
+          });
+        }
+      } else {
+        out.push(head);
       }
-      out.push(r);
     }
     out.sort(function (a, b) { return a.timeSec - b.timeSec; });
     return out;
@@ -897,7 +933,7 @@ if (!Object.assign) {
     var t = 0;
     for (var i = 0; i < chart.notes.length; i++) {
       var n = chart.notes[i];
-      t += 1 + (n.type === 'slide' ? (n.nodes ? n.nodes.length : 0) : 0);
+      t += 1 + ((n.nodes && n.nodes.length) ? n.nodes.length : 0);
     }
     return t;
   }
@@ -1390,14 +1426,10 @@ if (!Object.assign) {
     this.init();
     leadInSec = leadInSec || 0;
     this.leadInTime = leadInSec;
-    /* The single chart -> audio conversion point.
-     *   audioTime = chartTime − userOffset
-     * NOT clamped: a negative result means "before the audio track's first
-     * sample" and is handled as silence (the buffer is scheduled to start in
-     * the future). Clamping here was the old bug — with a positive offset the
-     * editor could never return to beat 0, and with a negative offset the game
-     * started mid-song. */
-    var offsetSec = (startChartSec || 0) - this.userOffset;
+    /* The single chart -> audio conversion point. Clamped at 0 because the
+     * buffer cannot start before its first sample; clamping consistently
+     * (clock anchor and buffer start both use offsetSec) keeps them in sync. */
+    var offsetSec = Math.max(0, (startChartSec || 0) - this.userOffset);
     var self = this;
     if (this.useHtml5) {
       this.stop();
@@ -1428,24 +1460,18 @@ if (!Object.assign) {
     if (!this.ctx) return; this.stop();
     /* startTime is shifted forward by leadInSec so that getCurrentTime()
      * returns offsetSec - leadInSec + userOffset right after play(),
-     * counting up normally. Real audio starts when the audio clock hits 0. */
+     * counting up normally. Real audio starts leadInSec seconds later
+     * from offsetSec, preserving note <-> audio synchronisation. */
     this.startTime = this.ctx.currentTime - offsetSec + leadInSec;
     this.isPlaying = true;
     var useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
-    // Schedule the buffer so buffer-offset 0 is heard exactly when the audio
-    // clock hits 0 (audioTime == 0 ⇔ chartTime == offset). If the start was
-    // requested while audioTime would be negative, `when` lands in the future
-    // and the source stays silent until then; the chart clock already counts
-    // up from startChartSec, so the playhead is correct. Otherwise (`when` ==
-    // now) we begin immediately at the matching buffer offset.
-    var when = Math.max(this.ctx.currentTime, this.startTime);
-    var bufferOffset = Math.max(0, (when - this.startTime));
+    var audioStartInCtx = this.ctx.currentTime + leadInSec;
     if (useBuffer && this.bgmBuffer && this.bgmGain) {
       this.bgmSource = this.ctx.createBufferSource(); this.bgmSource.buffer = this.bgmBuffer;
       this.bgmSource.connect(this.bgmGain);
-      this.bgmSource.start(when, bufferOffset);
+      this.bgmSource.start(audioStartInCtx, Math.max(0, offsetSec));
     } else {
-      this.startSynthesizedMusic(offsetSec);
+      this.startSynthesizedMusic(Math.max(0, offsetSec), leadInSec);
     }
   };
   LiteAudio.prototype.pause = function () { if (!this.isPlaying) return; this.pauseTime = this.getCurrentTime(); this.stop(); };
@@ -1477,57 +1503,54 @@ if (!Object.assign) {
     if (!this.ctx) return this.pauseTime;
     return (this.ctx.currentTime - this.startTime) + this.userOffset;
   };
-  /* Synth BGM — ported from AudioManager.ts (4-chord arp + kick + hat).
-   * Mirrors the buffer path: the synth stays silent until the audio clock
-   * reaches 0 (this.startTime), then begins from step 0. */
-  LiteAudio.prototype.startSynthesizedMusic = function (startAudioSec) {
+  /* Synth BGM — ported from AudioManager.ts L293-336 (4-chord arp + kick + hat) */
+  LiteAudio.prototype.startSynthesizedMusic = function (startOffset, leadInSec) {
     if (!this.ctx || !this.bgmGain) return;
     var beatInterval = 60 / this.synthBpm;
-    var intervalMs = (beatInterval / 4) * 1000;
-    // Wall-clock time at which audioTime reaches 0 (synth position 0).
-    var startWall = this.startTime;
-    var delayMs = Math.max(0, (startWall - this.ctx.currentTime) * 1000);
+    var step = Math.floor(startOffset / (beatInterval / 4));
+    var chords = [[220,277.18,329.63,440],[174.61,220,261.63,349.23],[261.63,329.63,392,523.25],[196,246.94,293.66,392]];
     var self = this;
-    var begin = function () {
+    var tick = function () {
       if (!self.isPlaying || !self.ctx || !self.bgmGain) return;
-      var step = Math.max(0, Math.floor(startAudioSec / (beatInterval / 4)));
-      var chords = [[220,277.18,329.63,440],[174.61,220,261.63,349.23],[261.63,329.63,392,523.25],[196,246.94,293.66,392]];
-      var tick = function () {
-        if (!self.isPlaying || !self.ctx || !self.bgmGain) return;
-        var t = self.ctx.currentTime;
-        var beat16 = step % 16, bar = Math.floor(step / 16) % chords.length, chord = chords[bar];
-        if (beat16 % 4 === 0) {
-          var o = self.ctx.createOscillator(), g = self.ctx.createGain();
-          o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.08);
-          g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-          o.connect(g); g.connect(self.bgmGain); o.start(t); o.stop(t + 0.12);
-        }
-        if (beat16 === 4 || beat16 === 12) {
-          var h = self.ctx.createOscillator(), hg = self.ctx.createGain();
-          h.type = 'triangle'; h.frequency.setValueAtTime(240, t); h.frequency.exponentialRampToValueAtTime(80, t + 0.09);
-          hg.gain.setValueAtTime(0.5, t); hg.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-          h.connect(hg); hg.connect(self.bgmGain); h.start(t); h.stop(t + 0.1);
-        }
-        if (beat16 % 2 === 1) {
-          var hs = self.ctx.createOscillator(), hsg = self.ctx.createGain();
-          hs.type = 'triangle'; hs.frequency.setValueAtTime(3000, t);
-          hsg.gain.setValueAtTime(0.15, t); hsg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
-          hs.connect(hsg); hsg.connect(self.bgmGain); hs.start(t); hs.stop(t + 0.04);
-        }
-        var arp = chord[beat16 % chord.length];
-        var ao = self.ctx.createOscillator(), ag = self.ctx.createGain();
-        ao.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine'; ao.frequency.setValueAtTime(arp, t);
-        ag.gain.setValueAtTime(0.25, t); ag.gain.exponentialRampToValueAtTime(0.001, t + beatInterval * 0.35);
-        ao.connect(ag); ag.connect(self.bgmGain); ao.start(t); ao.stop(t + beatInterval * 0.35);
-        step++;
-      };
-      tick();
-      self.synthInterval = window.setInterval(tick, intervalMs);
+      var t = self.ctx.currentTime;
+      var beat16 = step % 16, bar = Math.floor(step / 16) % chords.length, chord = chords[bar];
+      if (beat16 % 4 === 0) {
+        var o = self.ctx.createOscillator(), g = self.ctx.createGain();
+        o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.08);
+        g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        o.connect(g); g.connect(self.bgmGain); o.start(t); o.stop(t + 0.12);
+      }
+      if (beat16 === 4 || beat16 === 12) {
+        var h = self.ctx.createOscillator(), hg = self.ctx.createGain();
+        h.type = 'triangle'; h.frequency.setValueAtTime(240, t); h.frequency.exponentialRampToValueAtTime(80, t + 0.09);
+        hg.gain.setValueAtTime(0.5, t); hg.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+        h.connect(hg); hg.connect(self.bgmGain); h.start(t); h.stop(t + 0.1);
+      }
+      if (beat16 % 2 === 1) {
+        var hs = self.ctx.createOscillator(), hsg = self.ctx.createGain();
+        hs.type = 'triangle'; hs.frequency.setValueAtTime(3000, t);
+        hsg.gain.setValueAtTime(0.15, t); hsg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+        hs.connect(hsg); hsg.connect(self.bgmGain); hs.start(t); hs.stop(t + 0.04);
+      }
+      var arp = chord[beat16 % chord.length];
+      var ao = self.ctx.createOscillator(), ag = self.ctx.createGain();
+      ao.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine'; ao.frequency.setValueAtTime(arp, t);
+      ag.gain.setValueAtTime(0.25, t); ag.gain.exponentialRampToValueAtTime(0.001, t + beatInterval * 0.35);
+      ao.connect(ag); ag.connect(self.bgmGain); ao.start(t); ao.stop(t + beatInterval * 0.35);
+      step++;
     };
-    if (delayMs > 0) {
-      window.setTimeout(begin, delayMs);
+    var intervalMs = (beatInterval / 4) * 1000;
+    if (leadInSec > 0) {
+      /* Defer the first tick by leadInSec so the synth starts exactly when the
+       * game clock reaches zero — same lockstep as buffer audio. */
+      window.setTimeout(function () {
+        if (!self.isPlaying) return;
+        tick();
+        self.synthInterval = window.setInterval(tick, intervalMs);
+      }, leadInSec * 1000);
     } else {
-      begin();
+      tick();
+      this.synthInterval = window.setInterval(tick, intervalMs);
     }
   };
   var audio = new LiteAudio();
@@ -1583,11 +1606,14 @@ if (!Object.assign) {
   }
 
   /* Draw a tap note (square outline + 0.94 filled plane). Mirrors mkTap. */
-  function drawTap(p, color, vScale) {
+  function drawTap(p, color, vScale, angle) {
     var size = TAP_SIZE * view.pxPerUnit * p.scale * vScale;
     if (size < 2) return;
     ctx.save();
     ctx.translate(p.x, p.y);
+    /* Rotate the square by its angle. +angle = clockwise (screen y is down),
+     * consistent with the 2D editor and the 3D view. */
+    if (angle) ctx.rotate(angle * Math.PI / 180);
     ctx.globalAlpha = p.alpha * 0.18;
     ctx.fillStyle = color;
     ctx.fillRect(-size * 0.47, -size * 0.47, size * 0.94, size * 0.94);
@@ -1597,8 +1623,10 @@ if (!Object.assign) {
     ctx.strokeRect(-size / 2, -size / 2, size, size);
     ctx.restore();
   }
-  /* Draw a touch note (filled disc + outline). Mirrors mkTouch (32 seg). */
-  function drawTouch(p, color, vScale) {
+  /* Draw a touch note (filled disc + outline). Mirrors mkTouch (32 seg).
+   * Touch notes ignore rotation (a rotated circle looks identical), so `angle`
+   * is intentionally not applied here. */
+  function drawTouch(p, color, vScale, angle) {
     var r = (TOUCH_SIZE / 2) * view.pxPerUnit * p.scale * vScale;
     if (r < 1) return;
     ctx.save();
@@ -1615,11 +1643,12 @@ if (!Object.assign) {
     ctx.restore();
   }
   /* Draw a slide node (45° diamond). Mirrors mkSlide diamondPts. */
-  function drawSlideNode(p, color, vScale, isHead) {
+  function drawSlideNode(p, color, vScale, isHead, angle) {
     var half = SLIDE_HALF * view.pxPerUnit * p.scale * vScale;
     if (half < 1) return;
     ctx.save();
     ctx.translate(p.x, p.y);
+    if (angle) ctx.rotate(angle * Math.PI / 180);
     ctx.beginPath();
     ctx.moveTo(0, -half);
     ctx.lineTo(half, 0);
@@ -1667,12 +1696,12 @@ if (!Object.assign) {
     var cg = parseInt(color.substr(3, 2), 16);
     var cb = parseInt(color.substr(5, 2), 16);
     /* Opacity bands (per user spec "整体透明程度调低一些/更不透明"):
-     *   fill 0.22 → 0.30 (ribbon body), stroke 0.55 → 0.70 (edge definition).
+     *   fill 0.22 → 0.45 (ribbon body), stroke 0.55 → 0.6 (edge definition).
      *   brightness still scales these (held ≈2.3× → capped at 1.0 by Math.min). */
-    var fillA = Math.min(1, alphaA * 0.30 * brightness);
-    var fillB = Math.min(1, alphaB * 0.30 * brightness);
-    var strA = Math.min(1, alphaA * 0.70 * brightness);
-    var strB = Math.min(1, alphaB * 0.70 * brightness);
+    var fillA = Math.min(1, alphaA * 0.45 * brightness);
+    var fillB = Math.min(1, alphaB * 0.45 * brightness);
+    var strA = Math.min(1, alphaA * 0.6 * brightness);
+    var strB = Math.min(1, alphaB * 0.6 * brightness);
     ctx.save();
     /* Filled ribbon (semi-transparent, gives body) — gradient fill so the
      * ribbon fades independently at each end. */
@@ -1706,8 +1735,7 @@ if (!Object.assign) {
   }
   /* Draw a pipe cap — a filled (no wireframe) semi-transparent diamond at a
    * projected point. Used at judge-plane cross-sections to make the cut pipe
-   * look like it has a solid 3D end, not a flat edge. User spec: "加个和note
-   * 一样但没有线框的半透明菱形盖住，假装截面是立体的" */
+   * look like it has a solid 3D end, not a flat edge. */
   function drawPipeCap(p, color, alpha, scale) {
     if (!p) return;
     var half = Math.max(1.5, SLIDE_HALF * view.pxPerUnit * scale);
@@ -2238,8 +2266,8 @@ if (!Object.assign) {
            * clamped to spawnLimit → fadeB hits 0. drawPipe builds a gradient
            * from fadeA→fadeB so the pipe stays visible at the in-view end and
            * fades toward the clamped end, instead of vanishing entirely. */
-          var fadeA = Math.max(0, Math.min(1, (rZA - spawnLimit) / FADE_ZONE));
-          var fadeB = Math.max(0, Math.min(1, (rZB - spawnLimit) / FADE_ZONE));
+          var fadeA = Math.max(.1, Math.min(1, (rZA - spawnLimit) / FADE_ZONE));
+          var fadeB = Math.max(.1, Math.min(1, (rZB - spawnLimit) / FADE_ZONE));
 
           /* --- Slide pipe color/brightness effects (mirrors GameCanvas.tsx
            *   L1220-1230) ---
@@ -2294,7 +2322,7 @@ if (!Object.assign) {
           if (game.judged[slideNodeKey]) continue;
           var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed);
           var np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
-          if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj });
+          if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj, angle: allNodes[nj].angle });
           /* Projection guide for slide head only (children inherit head's path). */
           if (nj === 0) drawProjection({ type: 'slide', timeSec: allNodes[nj].timeSec, x: allNodes[nj].x, y: allNodes[nj].y }, nc, vScale, curTime);
         }
@@ -2305,7 +2333,7 @@ if (!Object.assign) {
         var tz = noteZPos(note.timeSec, curTime, baseSpeed);
         var tp = project(note.x, note.y, tz, spawnLimit);
         if (tp) {
-          toDrawNotes.push({ p: tp, kind: note.type, color: nc, noteId: note.id, wx: note.x, wy: note.y, timeSec: note.timeSec });
+          toDrawNotes.push({ p: tp, kind: note.type, color: nc, noteId: note.id, wx: note.x, wy: note.y, timeSec: note.timeSec, angle: note.angle });
           /* Landing projection guide at the judge plane. */
           drawProjection(note, nc, vScale, curTime);
         }
@@ -2318,13 +2346,13 @@ if (!Object.assign) {
 
     for (var d = 0; d < toDrawNotes.length; d++) {
       var item = toDrawNotes[d];
-      if (item.kind === 'tap') drawTap(item.p, item.color, vScale);
-      else if (item.kind === 'touch') drawTouch(item.p, item.color, vScale);
+      if (item.kind === 'tap') drawTap(item.p, item.color, vScale, item.angle);
+      else if (item.kind === 'touch') drawTouch(item.p, item.color, vScale, item.angle);
       else {
         /* Red-warn slide nodes (bound pointer off-node) flash red. */
         var rt = game.slideStates[item.noteId];
         var isRed = rt && rt.nodes[item.nodeIdx] && rt.nodes[item.nodeIdx].redWarn;
-        drawSlideNode(item.p, isRed ? SLIDE_RED : item.color, vScale, item.isHead);
+        drawSlideNode(item.p, isRed ? SLIDE_RED : item.color, vScale, item.isHead, item.angle);
       }
     }
 
@@ -2535,11 +2563,7 @@ if (!Object.assign) {
 
   /* Per-frame slide judgment — faithful port of GameCanvas.processSlide.
    * Key rule: nodes are judged ONLY when dt>=0 (node reached the plane),
-   * never early on proximity alone. This fixes the "early judgment" bug.
-   * Multi-finger binding: every finger on a node is bound; a bound finger that
-   * lifts is removed; a bound finger still down but off the current node is
-   * dropped ONLY when another bound finger is already on that node (so split
-   * slides sharing a start keep the correct fingers, not the wrong one). */
+   * never early on proximity alone. This fixes the "early judgment" bug. */
   function processSlide(note, curTime) {
     var allNodes = getAllSlideNodes(note);
     var rt = getSlideRt(note.id, allNodes.length);
@@ -2555,53 +2579,31 @@ if (!Object.assign) {
       }
     }
 
-    /* 2) Release detection + move-away pruning (per new spec).
-     * nextIdx / current node are needed both here (move-away) and in step 3. */
-    var nextIdx = -1;
-    for (var k0 = 0; k0 < rt.nodes.length; k0++) { if (!rt.nodes[k0].judged) { nextIdx = k0; break; } }
-    var ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
-
-    if (nextIdx >= 0) {
-      var anyBinding = false;
-      var allReleased = true;
-      for (var bpid in rt.boundPointerIds) {
-        if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
-        anyBinding = true;
-        var bp = game.pointers[bpid];
-        if (bp && bp.down) allReleased = false;
-        else delete rt.boundPointerIds[bpid];
+    /* 2) Release detection: ALL bound pointers released → next unjudged node missLocked
+     * EXCEPTION: tail node with tailLockedSPerfect already set → skip missLocked. */
+    var hasBinding = false;
+    for (var bpid in rt.boundPointerIds) {
+      if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
+      hasBinding = true;
+      var bp = game.pointers[bpid];
+      if (!bp || !bp.down) delete rt.boundPointerIds[bpid];
+    }
+    if (hasBinding) {
+      /* Check if any bindings remain after cleanup */
+      var anyRemaining = false;
+      for (var bpid2 in rt.boundPointerIds) {
+        if (rt.boundPointerIds.hasOwnProperty(bpid2)) { anyRemaining = true; break; }
       }
-      if (anyBinding) {
-        /* Multi-finger: drop off-node fingers only when at least one bound finger
-         * is already on the current node. If none are on it yet (shared start /
-         * travelling between nodes) keep every binding so the correct finger is
-         * retained until it arrives. This is what makes split slides from a shared
-         * start work instead of keeping the wrong (insertion-order-first) finger. */
-        if (ndForCheck) {
-          var onNodeBound = [], offNodeBound = [];
-          for (var mpid in rt.boundPointerIds) {
-            if (!rt.boundPointerIds.hasOwnProperty(mpid)) continue;
-            var mp = game.pointers[mpid];
-            var onNode = !!mp && mp.down &&
-              Math.abs(mp.x - ndForCheck.x) < SLIDE_HIT_HALF &&
-              Math.abs(mp.y - ndForCheck.y) < SLIDE_HIT_HALF;
-            if (onNode) onNodeBound.push(mpid); else offNodeBound.push(mpid);
-          }
-          if (onNodeBound.length > 0) {
-            for (var oi = 0; oi < offNodeBound.length; oi++) delete rt.boundPointerIds[offNodeBound[oi]];
-          }
-        }
-        /* ALL bound pointers released → next unjudged node missLocked.
-         * EXCEPTION: tail node with tailLockedSPerfect already set → skip. */
-        if (allReleased) {
-          var rNextIdx = -1;
-          for (var k = 0; k < rt.nodes.length; k++) { if (!rt.nodes[k].judged) { rNextIdx = k; break; } }
-          if (rNextIdx >= 0 && !rt.nodes[rNextIdx].tailLockedSPerfect) { rt.nodes[rNextIdx].missLocked = true; rt.nodes[rNextIdx].redWarn = false; }
-        }
+      if (!anyRemaining) {
+        var rNextIdx = -1;
+        for (var k = 0; k < rt.nodes.length; k++) { if (!rt.nodes[k].judged) { rNextIdx = k; break; } }
+        if (rNextIdx >= 0 && !rt.nodes[rNextIdx].tailLockedSPerfect) { rt.nodes[rNextIdx].missLocked = true; rt.nodes[rNextIdx].redWarn = false; }
       }
     }
 
     /* 3) Interact with the current next node */
+    var nextIdx = -1;
+    for (var k2 = 0; k2 < rt.nodes.length; k2++) { if (!rt.nodes[k2].judged) { nextIdx = k2; break; } }
     if (nextIdx < 0) return;
     var cns = rt.nodes[nextIdx];
     var cnd = allNodes[nextIdx];
@@ -2641,18 +2643,15 @@ if (!Object.assign) {
       }
     }
 
-    /* Which pointers may judge this node? Bound → any bound pointer; free → any held.
-     * Collect EVERY finger currently on the node (multi-finger binding): each
-     * eligible finger inside the hit box is a candidate, not just the first one. */
-    var onNodePids = [];
+    /* Which pointer may judge this node? Bound → any bound pointer; free → any held. */
+    var insideId = null;
     var hasBound2 = false;
     for (var bpid3 in rt.boundPointerIds) {
       if (!rt.boundPointerIds.hasOwnProperty(bpid3)) continue;
       hasBound2 = true;
       var p = game.pointers[bpid3];
-      if (p && p.down &&
-          Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) {
-        onNodePids.push(bpid3);
+      if (p && p.down) {
+        if (Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) { insideId = bpid3; break; }
       }
     }
     if (!hasBound2) {
@@ -2660,15 +2659,19 @@ if (!Object.assign) {
         if (!game.pointers.hasOwnProperty(pid)) continue;
         var p2 = game.pointers[pid];
         if (!p2.down) continue;
-        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
+        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) { insideId = pid; break; }
       }
     }
 
-    if (hasBound2 && onNodePids.length > 0) cns.everInZone = true;
+    var hasBound3 = false;
+    for (var bpid4 in rt.boundPointerIds) {
+      if (rt.boundPointerIds.hasOwnProperty(bpid4)) { hasBound3 = true; break; }
+    }
+    if (hasBound3 && insideId !== null) cns.everInZone = true;
 
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && insideId !== null) {
       cns.lastInsideTime = curTime;
-      cns.lastInsidePointerId = onNodePids[0];
+      cns.lastInsidePointerId = insideId;
     }
 
     if (dt >= 0 && !cns.judged) {
@@ -2690,18 +2693,15 @@ if (!Object.assign) {
         audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
       } else if (!cns.arrivalChecked) {
         cns.arrivalChecked = true;
-        if (onNodePids.length > 0) {
-          cns.judged = true;
-          /* Bind EVERY finger on the node (multi-finger). */
-          for (var a = 0; a < onNodePids.length; a++) rt.boundPointerIds[onNodePids[a]] = true;
+        if (insideId !== null) {
+          cns.judged = true; rt.boundPointerIds[insideId] = true;
           commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
           audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
         }
-      } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
+      } else if (insideId !== null && dt <= HIT_WINDOW_MS) {
         var j2 = evaluateJudgement(dt);
         if (j2) {
-          cns.judged = true;
-          for (var b = 0; b < onNodePids.length; b++) rt.boundPointerIds[onNodePids[b]] = true;
+          cns.judged = true; rt.boundPointerIds[insideId] = true;
           commitJudge(note.id + '#' + nextIdx, j2, dt);
           audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide');
         }
@@ -2714,7 +2714,7 @@ if (!Object.assign) {
     for (var bpid6 in rt.boundPointerIds) {
       if (rt.boundPointerIds.hasOwnProperty(bpid6)) { hasBound5 = true; break; }
     }
-    if (!cns.judged && hasBound5 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
+    if (!cns.judged && hasBound5 && insideId === null && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
       for (var pid2 in game.pointers) {
         if (!game.pointers.hasOwnProperty(pid2)) continue;
         if (rt.boundPointerIds.hasOwnProperty(pid2)) continue;
@@ -2865,25 +2865,6 @@ if (!Object.assign) {
    * browsers; fall back to Touch Events then Mouse Events for IE11/Safari<13. */
   function bindInput() {
     var canvasEl = document.getElementById('game-canvas');
-
-    /* iOS Safari 15+ shows a text-selection "loupe" (magnifier) on double-tap +
-     * hold that CSS alone cannot suppress (the user-scalable=no viewport meta is
-     * ignored by modern Safari, and touch-action: none only kills the double-tap
-     * ZOOM, not the loupe). The only reliable fix is preventDefault on the native
-     * touchstart — and it MUST be non-passive, because a passive listener's
-     * preventDefault() is ignored. We pin the styles inline (not just in the
-     * stylesheet) so they survive any UA/canvas defaults, and register the
-     * touchstart listener with { passive: false }. Pointer events (used for
-     * gameplay input) still fire normally, so note tapping is completely
-     * unaffected. Scoped to the canvas only: the menu chart-list relies on native
-     * touch scrolling, so we must NOT preventDefault on #app/document. */
-    canvasEl.style.touchAction = 'none';
-    canvasEl.style.userSelect = 'none';
-    canvasEl.style.webkitUserSelect = 'none';
-    canvasEl.style.webkitTouchCallout = 'none';
-    var onCanvasTouchStart = function (e) { e.preventDefault(); };
-    canvasEl.addEventListener('touchstart', onCanvasTouchStart, { passive: false });
-
     /* Cached canvas rect. Recomputing getBoundingClientRect() on every
      * pointermove is expensive on IE11: updateHUD() dirties layout each frame
      * (progress bar style.width + score/acc/rank textContent), so each per-event

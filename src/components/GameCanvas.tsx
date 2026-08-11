@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType } from '../types/game';
 import { evaluateJudgement, calculateNoteScore, JUDGEMENT_COLORS } from '../utils/scoring';
 import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
+import { EASING_FNS } from '../utils/easing';
+
 import { globalAudio } from '../audio/AudioManager';
 
 interface QuickCreateDelta {
@@ -84,15 +86,13 @@ const diamondPts = (h: number) => [
 const _vNaturalA = new THREE.Vector3();
 const _vNaturalB = new THREE.Vector3();
 const _vCrossPoint = new THREE.Vector3();
-const _vRenderA = new THREE.Vector3();
-const _vRenderB = new THREE.Vector3();
-// Scratch for placeDiamondPipe: dir = b - a, and the constant up-axis.
-// setFromUnitVectors does not modify its inputs, so _UP_Y is safe to share.
-const _vPipeDir = new THREE.Vector3();
-const _UP_Y = new THREE.Vector3(0, 1, 0);
+// Scratch vectors for eased slide-pipe consumption (reused per segment).
+const _vConsP = new THREE.Vector3();
 // Scratch for ultra-mode light pool: midpoint of a slide pipe segment.
-// midpoint = pipe.position + pipe.quaternion * (0, pipe.scale.y / 2, 0)
+// Computed from the pipe's stored endpoints (pipe.mid) each frame.
 const _vLightMid = new THREE.Vector3();
+// Scratch for per-pipe tube geometry rebuild (relative end offset A→B).
+const _vTubeEnd = new THREE.Vector3();
 // Reused per-frame inside tick() so slide-note Z lists don't allocate a new
 // array on every frame (GC churn is amplified ~2.4x at 144Hz displays).
 const _slideZs: number[] = [];
@@ -109,14 +109,20 @@ const _slideZs: number[] = [];
  */
 const _allNodesCache = new WeakMap<
   ResolvedNote,
-  Array<{ x: number; y: number; timeSec: number }>
+  Array<{ x: number; y: number; timeSec: number; angle: number; easing: EasingType }>
 >();
-function getAllNodes(note: ResolvedNote): Array<{ x: number; y: number; timeSec: number }> {
+function getAllNodes(note: ResolvedNote): Array<{ x: number; y: number; timeSec: number; angle: number; easing: EasingType }> {
   let cached = _allNodesCache.get(note);
   if (!cached) {
     cached = [
-      { x: note.x, y: note.y, timeSec: note.timeSec },
-      ...(note.resolvedNodes ?? []),
+      { x: note.x, y: note.y, timeSec: note.timeSec, angle: note.angle ?? 0, easing: note.easing ?? 'linear' },
+      ...(note.resolvedNodes ?? []).map((rn) => ({
+        x: rn.x,
+        y: rn.y,
+        timeSec: rn.timeSec,
+        angle: rn.angle,
+        easing: rn.easing,
+      })),
     ];
     _allNodesCache.set(note, cached);
   }
@@ -124,56 +130,95 @@ function getAllNodes(note: ResolvedNote): Array<{ x: number; y: number; timeSec:
 }
 
 /**
- * Build a diamond-cross-section pipe (square extruded along a segment).
- * Vertices layout:
- *  0..3 near diamond, 4..7 far diamond.
- * The diamond lies in the plane perpendicular to the pipe axis.
+ * Build a slide-pipe tube along a curve from the local origin (node A) to `end`
+ * (node B, as a relative offset). The centerline is a cubic Bézier whose
+ * endpoint tangents are rotated away from the straight A→B direction by an
+ * angle dictated by `easing`, producing a smooth curve (linear = straight line).
+ * The diamond cross-section is rotated around the tube axis from `angleStart`
+ * (at A) to `angleEnd` (at B), so each node's `angle` is honoured even where
+ * two consecutive nodes differ.
+ *
+ * Built in LOCAL space (A at the origin); the caller positions the mesh at world
+ * A and applies a uniform scale equal to the note visual scale (the cross-section
+ * is already sized to `half`).
  */
-function buildDiamondPipeGeometry(half: number): THREE.BufferGeometry {
-  // Local space: axis = +Y (0 → 1). Diamond in XZ plane.
-  // Order: top(+Z), right(+X), bottom(-Z), left(-X)
-  const near = [
-    [0, 0, half],
-    [half, 0, 0],
-    [0, 0, -half],
-    [-half, 0, 0],
-  ];
-  const far = near.map(([x, , z]) => [x, 1, z]);
-  const positions = new Float32Array([
-    ...near.flat(),
-    ...far.flat(),
-  ]);
+function buildSlideTubeGeometry(opts: {
+  end: THREE.Vector3;
+  angleStart: number;
+  angleEnd: number;
+  easing: EasingType;
+  half: number;
+  lengthSegments?: number;
+}): THREE.BufferGeometry {
+  const { end, angleStart, angleEnd, easing, half } = opts;
+  const lengthSegments = opts.lengthSegments ?? 32;
+  const radialSegments = 4; // diamond cross-section
+  const ease = EASING_FNS[easing] ?? EASING_FNS.linear;
 
-  // 4 side quads as triangles. No caps (open pipe).
-  const indices = [
-    0, 1, 5, 0, 5, 4,
-    1, 2, 6, 1, 6, 5,
-    2, 3, 7, 2, 7, 6,
-    3, 0, 4, 3, 4, 7,
-  ];
+  // The slide interpolates its travel position by `ease(τ)` while time (z) advances
+  // linearly with τ. Endpoints coincide with A and B (ease(0)=0, ease(1)=1), so the
+  // pipe still connects the two nodes exactly. Because the bow is along the
+  // direction of travel (x,y) as a function of time (z) — not perpendicular — a
+  // left/right slide bows left/right and an up/down slide bows up/down. E.g. for
+  // x:0→2.5 at the temporal midpoint: linear 1.25, sine-out 2.5·sin45°≈1.767,
+  // sine-in 2.5·(1−sin45°)≈0.732, sine-io 1.25 (matches linear at mid, differs at ends).
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i <= lengthSegments; i++) {
+    const tau = i / lengthSegments;
+    const e = ease(tau);
+    pts.push(new THREE.Vector3(end.x * e, end.y * e, end.z * tau));
+  }
 
+  const positions: number[] = [];
+  const up = new THREE.Vector3(0, 1, 0);
+  const p = new THREE.Vector3();
+  const tan = new THREE.Vector3();
+  const N = new THREE.Vector3();
+  const Bn = new THREE.Vector3();
+  for (let i = 0; i <= lengthSegments; i++) {
+    p.copy(pts[i]);
+    const tau = i / lengthSegments;
+    // Tangent via central difference (robust where easing'(τ)=0, e.g. sine-in at τ=0).
+    const a = pts[Math.max(0, i - 1)];
+    const b = pts[Math.min(lengthSegments, i + 1)];
+    tan.subVectors(b, a);
+    if (tan.lengthSq() < 1e-12) tan.set(0, 0, 1);
+    tan.normalize();
+    N.copy(up).cross(tan);
+    if (N.lengthSq() < 1e-6) N.set(1, 0, 0);
+    N.normalize();
+    Bn.copy(tan).cross(N).normalize();
+    // Inter-node rotation follows the easing too: the cross-section's angle is
+    // interpolated by `ease(τ)` so the twist rate matches the travel easing
+    // (e.g. sin-in twists slowly then fast), not a linear ramp. The tube's
+    // cross-section frame (N × ... ) twists opposite to `rotation.z` for the same
+    // sign, so we keep +angle here to match the node visuals (which negate angle
+    // on `rotation.z`); the net result is +angle = clockwise, like the 2D editor.
+    const ang = angleStart + (angleEnd - angleStart) * ease(tau);
+    for (let k = 0; k < radialSegments; k++) {
+      const phi = ang + (k * Math.PI * 2) / radialSegments;
+      positions.push(
+        p.x + half * (Math.cos(phi) * N.x + Math.sin(phi) * Bn.x),
+        p.y + half * (Math.cos(phi) * N.y + Math.sin(phi) * Bn.y),
+        p.z + half * (Math.cos(phi) * N.z + Math.sin(phi) * Bn.z),
+      );
+    }
+  }
+  const indices: number[] = [];
+  for (let i = 0; i < lengthSegments; i++) {
+    for (let k = 0; k < radialSegments; k++) {
+      const a = i * radialSegments + k;
+      const b = i * radialSegments + ((k + 1) % radialSegments);
+      const c = (i + 1) * radialSegments + ((k + 1) % radialSegments);
+      const dd = (i + 1) * radialSegments + k;
+      indices.push(a, b, c, a, c, dd);
+    }
+  }
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
   geo.setIndex(indices);
   geo.computeVertexNormals();
   return geo;
-}
-
-/** Place a diamond-pipe mesh from world point a → b (mesh local Y-axis maps onto a→b). */
-function placeDiamondPipe(
-  mesh: THREE.Mesh,
-  a: THREE.Vector3,
-  b: THREE.Vector3,
-  crossSectionScale: number = 1
-): number {
-  // Reuse module scratch vector instead of allocating per call.
-  const dir = _vPipeDir.subVectors(b, a);
-  const len = Math.max(dir.length(), 0.001);
-  mesh.position.copy(a);
-  mesh.quaternion.setFromUnitVectors(_UP_Y, dir.normalize());
-  // Local Y follows the segment length; X/Z scale the diamond cross-section.
-  mesh.scale.set(crossSectionScale, len, crossSectionScale);
-  return len;
 }
 
 /**
@@ -221,8 +266,8 @@ const _touchFillGeo = markShared(new THREE.CircleGeometry((TOUCH_SIZE / 2) * 0.9
 const _slideOutlineGeo = markShared(new THREE.BufferGeometry().setFromPoints(diamondPts(SLIDE_HALF)));
 const _slideFillGeo = markShared(new THREE.PlaneGeometry(SLIDE_SIZE * 0.94, SLIDE_SIZE * 0.94));
 
-// Slide pipe: diamond cross-section (one shared geometry; per-pipe length via mesh.scale).
-const _slidePipeGeo = markShared(buildDiamondPipeGeometry(SLIDE_PIPE_HALF));
+// Slide pipes no longer share a geometry: each builds its own curved,
+// angle-rotated tube (see buildSlideTubeGeometry) so easing/angle vary per segment.
 
 interface TouchTrackState {
   lastInsideTime: number | null;
@@ -269,6 +314,14 @@ interface SlideMeshSet {
     /** 1 = clipped at judgement plane, 0 = full natural segment. */
     clipAmount: number;
     lastUpdateMs: number;
+    /** World-space clip planes: judgePlane hides z > cutZ (already-passed part),
+     *  farPlane hides z < spawnLimit (beyond the far render plane, editor only). */
+    judgePlane: THREE.Plane;
+    farPlane: THREE.Plane;
+    /** Geometry cache key; rebuilt only when the segment shape actually changes. */
+    geoKey: string | null;
+    /** World-space midpoint, reused by the ultra light pool. */
+    mid: THREE.Vector3;
   }>;
 }
 
@@ -597,7 +650,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       });
       sm.pipes.forEach((p) => {
         if (scene) scene.remove(p.mesh);
-        // p.geo is the shared _slidePipeGeo — never dispose it here.
+        // Each pipe owns its geometry; dispose it (shared geos are tagged and skipped).
         if (!isSharedGeo(p.geo)) p.geo.dispose();
         p.mat.dispose();
       });
@@ -737,6 +790,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       alpha: true,
       powerPreference: 'high-performance'
     });
+    // Per-material clipping planes drive the slide-pipe "clip at the judgement
+    // plane" behaviour (and the editor far-plane trim) without rebuilding geometry.
+    renderer.localClippingEnabled = true;
     renderer.setSize(w, h);
     // Low quality mode locks pixel ratio to exactly 1.0 (saves up to 3x GPU power on 2K displays)
     renderer.setPixelRatio(isLow ? 1.0 : Math.min(window.devicePixelRatio, 1.5));
@@ -1638,13 +1694,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         side: THREE.DoubleSide,
         depthWrite: false,
       });
-      // Diamond-cross-section pipe, slightly smaller than the slide node.
-      // Geometry is shared (_slidePipeGeo); per-pipe length is via mesh.scale
-      // set in placeDiamondPipe, so one geo serves all pipes.
-      const geo = _slidePipeGeo;
+      // Each pipe owns its geometry: a curved, angle-rotated tube built lazily
+      // in the render loop from its two endpoints (cached by shape). We start
+      // with an empty geometry and let the loop populate it on first frame.
+      const geo = new THREE.BufferGeometry();
       const mesh = new THREE.Mesh(geo, mat);
       mesh.layers.enable(BLOOM_LAYER); // slide pipes also bloom
       mesh.visible = false;
+      // Two world-space clip planes: the judge plane hides the already-passed
+      // portion (z > cutZ); the far plane hides the part beyond the far render
+      // plane in editor mode. Both are intersected by three.js clipping.
+      const judgePlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), JUDGE_Z);
+      const farPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), Number.NEGATIVE_INFINITY);
+      mat.clippingPlanes = [judgePlane, farPlane];
       scene.add(mesh);
       pipes.push({
         mesh,
@@ -1653,6 +1715,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         // Editor and Auto-Play must be clipped from the very first frame.
         clipAmount: isEditorModeRef.current || autoPlayRef.current ? 1 : 0,
         lastUpdateMs: performance.now(),
+        judgePlane,
+        farPlane,
+        geoKey: null,
+        mid: new THREE.Vector3(),
       });
     }
     sm = { nodes, pipes };
@@ -1887,10 +1953,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         const hashIdx = selId.indexOf('#');
         const base = hashIdx >= 0 ? selId.slice(0, hashIdx) : selId;
         const childIdx = hashIdx >= 0 ? parseInt(selId.slice(hashIdx + 1)) : 0;
-        const n = notes.find((nn) => nn.id === base);
+        // tap/touch chains are expanded into standalone resolved notes whose id
+        // already carries the "#i" suffix — prefer an exact match.
+        const exact = hashIdx >= 0 ? notes.find((nn) => nn.id === selId) : undefined;
+        const n = exact ?? notes.find((nn) => nn.id === base);
         if (n) {
           let px = n.x, py = n.y, pt = n.timeSec;
-          if (childIdx >= 1 && n.resolvedNodes && n.resolvedNodes[childIdx - 1]) {
+          if (!exact && childIdx >= 1 && n.resolvedNodes && n.resolvedNodes[childIdx - 1]) {
             const c = n.resolvedNodes[childIdx - 1];
             px = c.x; py = c.y; pt = c.timeSec;
           }
@@ -2031,6 +2100,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           if (vis) {
             nm.group.position.set(allNodes[i].x, allNodes[i].y, z);
             nm.group.scale.set(vScale, vScale, 1);
+            // Rotate the node visual (note + cross-section) around its center by
+            // the node's own angle. Three's rotation.z is counterclockwise for
+            // +, but we want +angle = clockwise (matching the 2D editor), so negate.
+            nm.group.rotation.z = -(allNodes[i].angle ?? 0);
+            if (nm.proj) nm.proj.rotation.z = -(allNodes[i].angle ?? 0);
             nm.wire?.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
             nm.fill.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
 
@@ -2164,44 +2238,83 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             if (pipe.clipAmount < 0.002) pipe.clipAmount = 0;
           }
 
-          // Reuse scratch vectors instead of naturalA.clone() / naturalB.clone().
-          const renderA = _vRenderA.copy(naturalA);
-          const renderB = _vRenderB.copy(naturalB);
+          // --- Geometry + world-space clipping ---
+          // Eased consumption along the segment, in ALL modes (editor / autoplay /
+          // manual). The pipe is consumed from node A toward node B following the
+          // eased curve; τ is the normalized TIME within [tA, tB] and advances
+          // LINEARLY (easing is NOT applied to time). At τ=0 nothing is consumed
+          // (whole pipe); at τ=1 it is fully gone (playhead reaches node B).
+          const ax = allNodes[i].x, ay = allNodes[i].y, az = _slideZs[i];
+          const bx = allNodes[i + 1].x, by = allNodes[i + 1].y, bz = _slideZs[i + 1];
+          const segDur = Math.max(1e-4, allNodes[i + 1].timeSec - allNodes[i].timeSec);
+          const tau = THREE.MathUtils.clamp((curTime - allNodes[i].timeSec) / segDur, 0, 1);
+          const ease = EASING_FNS[allNodes[i + 1].easing ?? 'linear'] ?? EASING_FNS.linear;
+          const e = ease(tau);
+          const ex = bx - ax, ey = by - ay, ez = bz - az;
+          // Playhead = point on the eased curve at the current linear-time fraction τ:
+          // G(τ) = A + (ease(τ)·Δx, ease(τ)·Δy, τ·Δz). The clip plane passes through
+          // G(τ) with the curve TANGENT as its normal, so the cut stays perpendicular
+          // to the tube and tracks the playhead exactly. This must NOT place the cut
+          // along the straight A→B segment by ease(τ)·segLen — that mislocates the
+          // truncation (and makes it stretch) whenever the pipe bows in X/Y.
+          const eLo = ease(Math.max(0, tau - 0.005));
+          const eHi = ease(Math.min(1, tau + 0.005));
+          _vConsP.set(ax + ex * e, ay + ey * e, az + ez * tau);
+          pipe.judgePlane.normal.set(ex * (eHi - eLo) / 0.01, ey * (eHi - eLo) / 0.01, ez).normalize();
+          pipe.judgePlane.constant = -pipe.judgePlane.normal.dot(_vConsP);
+          // Editor additionally trims at the far render plane; gameplay clips nothing.
+          pipe.farPlane.constant = isEditorModeRef.current ? -spawnLimit : Number.POSITIVE_INFINITY;
 
-          // A fully forced clip (Editor/Auto-Play) hides segments wholly beyond Z=0.
+          // Once the segment is fully consumed (playhead at node B in TIME) there is
+          // nothing left. Gate on τ, not on the eased position: for sine-out etc.
+          // `ease(τ)` reaches ~0.999 well before τ=1, which would hide a long pipe
+          // while a visible tail near node B still remained ("end disappears").
+          if (tau >= 0.999) {
+            pipe.mesh.visible = false;
+            continue;
+          }
+
+          // A wholly-future segment (Editor/Auto-Play) is not shown until it reaches
+          // the judge region — keeps the timeline readable.
           if (forceClip && naturalA.z > JUDGE_Z && naturalB.z > JUDGE_Z) {
             pipe.mesh.visible = false;
             continue;
           }
 
-          if (crossPoint && pipe.clipAmount > 0) {
-            // Smoothly interpolate only the endpoint outside the judgement plane.
-            // clipAmount=1 → endpoint exactly at plane; 0 → natural full segment.
-            if (naturalA.z > JUDGE_Z) {
-              renderA.lerpVectors(naturalA, crossPoint, pipe.clipAmount);
-            } else if (naturalB.z > JUDGE_Z) {
-              renderB.lerpVectors(naturalB, crossPoint, pipe.clipAmount);
-            }
-          }
-
-          // Editor and Auto-Play must never render any residual outside-plane section.
-          if (forceClip && crossPoint) {
-            if (naturalA.z > JUDGE_Z) renderA.copy(crossPoint);
-            if (naturalB.z > JUDGE_Z) renderB.copy(crossPoint);
-          }
-
           // Manual, fully released pipes may render naturally, but not wholly behind camera.
-          if (!forceClip && renderA.z > 8 && renderB.z > 8) {
+          if (!forceClip && naturalA.z > 8 && naturalB.z > 8) {
             pipe.mesh.visible = false;
             continue;
           }
 
-          const len = placeDiamondPipe(pipe.mesh, renderA, renderB, vScale);
-          if (len < 0.02) {
-            pipe.mesh.visible = false;
-            continue;
+          // Build/refresh the curved tube geometry. Cached by shape so it only
+          // rebuilds when the segment's endpoints, angles, easing, or note scale
+          // actually change — not every frame.
+          const angleStart = allNodes[i].angle ?? 0;
+          const angleEnd = allNodes[i + 1].angle ?? 0;
+          const easing = allNodes[i + 1].easing ?? 'linear';
+          const endX = bx - ax, endY = by - ay, endZ = bz - az;
+          const geoKey =
+            `${angleStart.toFixed(4)}|${angleEnd.toFixed(4)}|${easing}|` +
+            `${endX.toFixed(3)}|${endY.toFixed(3)}|${endZ.toFixed(3)}|${SLIDE_PIPE_HALF * vScale}`;
+          if (pipe.geoKey !== geoKey) {
+            if (pipe.geo) pipe.geo.dispose();
+            pipe.geo = buildSlideTubeGeometry({
+              end: _vTubeEnd.set(endX, endY, endZ),
+              angleStart,
+              angleEnd,
+              easing,
+              half: SLIDE_PIPE_HALF * vScale,
+            });
+            pipe.mesh.geometry = pipe.geo;
+            pipe.geoKey = geoKey;
           }
+          pipe.mesh.position.set(ax, ay, az);
+          pipe.mesh.scale.set(1, 1, 1);
+          pipe.mesh.quaternion.identity();
           pipe.mesh.visible = true;
+          // Cache world midpoint for the ultra light pool.
+          pipe.mid.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
 
           const nodeRt = rt?.nodes[i + 1];
           const isRed = !!nodeRt && (nodeRt.missLocked || nodeRt.redWarn) && !nextJudged;
@@ -2242,6 +2355,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         }
         entry.group.position.set(note.x, note.y, nz);
         entry.group.scale.set(vScale, vScale, 1);
+        entry.group.rotation.z = -(note.angle ?? 0);
         entry.group.visible = true;
 
         // Smooth fade-in animation as note enters the render distance
@@ -2271,6 +2385,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         entry.projectionGroup.visible = po > 0;
         entry.projectionGroup.position.set(note.x, note.y, JUDGE_Z + 0.01);
         entry.projectionGroup.scale.set(vScale, vScale, 1);
+        entry.projectionGroup.rotation.z = -(note.angle ?? 0);
         entry.projectionGroup.children.forEach((c) => {
           if ((c as THREE.Line).material) {
             const material = (c as THREE.Line).material as THREE.LineBasicMaterial;
@@ -2353,9 +2468,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         // length. Use the pipe's midpoint (position + quat * (0, len/2, 0)).
         sm.pipes.forEach((pp) => {
           if (!pp.mesh.visible) return;
-          const pos = pp.mesh.position;
-          const len = pp.mesh.scale.y; // pipe length stored in local Y scale
-          _vLightMid.set(0, len / 2, 0).applyQuaternion(pp.mesh.quaternion).add(pos);
+          _vLightMid.copy(pp.mid);
           const mat = pp.mat as THREE.MeshBasicMaterial;
           candidates.push({ z: _vLightMid.z, x: _vLightMid.x, y: _vLightMid.y, color: mat.color });
         });

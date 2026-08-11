@@ -1,4 +1,5 @@
-import { ChartData, NoteData, SlideNodeData, EventData } from '../types/game';
+import { ChartData, NoteData, SlideNodeData, EventData, EasingType } from '../types/game';
+import { EASING_TYPES } from './easing';
 
 export interface ValidationResult {
   valid: boolean;
@@ -41,18 +42,18 @@ export function parseAndValidateChart(jsonText: string): ValidationResult {
       if (n.type !== 'tap' && n.type !== 'touch' && n.type !== 'slide') {
         return { valid: false, error: `音符 #${i + 1} 的 type 必须为 "tap"、"touch" 或 "slide"。` };
       }
-      if (n.type === 'slide' && n.nodes !== undefined) {
+      if (n.nodes !== undefined) {
         if (!Array.isArray(n.nodes)) {
-          return { valid: false, error: `Slide 音符 #${i + 1} 的 nodes 必须为数组。` };
+          return { valid: false, error: `音符 #${i + 1} 的 nodes 必须为数组。` };
         }
         for (let k = 0; k < n.nodes.length; k++) {
           const sn = n.nodes[k];
           const snBeat = sn.beat ?? sn.time;
           if (typeof snBeat !== 'number' || snBeat < 0) {
-            return { valid: false, error: `Slide 音符 #${i + 1} 的子节点 #${k + 1} 缺少有效 beat。` };
+            return { valid: false, error: `音符 #${i + 1} 的子节点 #${k + 1} 缺少有效 beat。` };
           }
           if (typeof sn.x !== 'number' || typeof sn.y !== 'number') {
-            return { valid: false, error: `Slide 音符 #${i + 1} 的子节点 #${k + 1} 坐标必须为数字。` };
+            return { valid: false, error: `音符 #${i + 1} 的子节点 #${k + 1} 坐标必须为数字。` };
           }
         }
       }
@@ -87,14 +88,22 @@ export function parseAndValidateChart(jsonText: string): ValidationResult {
           y: n.y as number,
           type: (n.type as 'tap' | 'touch' | 'slide') || 'tap',
           color: typeof n.color === 'string' && n.color.trim() ? (n.color as string) : undefined,
+          angle: typeof n.angle === 'number' ? n.angle : undefined,
+          easing: (typeof n.easing === 'string' && EASING_TYPES.includes(n.easing as EasingType))
+            ? (n.easing as EasingType)
+            : undefined,
         };
-        if (base.type === 'slide') {
-          const rawNodes = (n.nodes as Array<Record<string, unknown>> | undefined) ?? [];
-          const nodes: SlideNodeData[] = rawNodes
+        const rawNodes = n.nodes as Array<Record<string, unknown>> | undefined;
+        if (base.type === 'slide' || rawNodes !== undefined) {
+          const nodes: SlideNodeData[] = (rawNodes ?? [])
             .map((sn) => ({
               beat: ((sn.beat ?? sn.time) as number),
               x: sn.x as number,
               y: sn.y as number,
+              angle: typeof sn.angle === 'number' ? sn.angle : undefined,
+              easing: (typeof sn.easing === 'string' && EASING_TYPES.includes(sn.easing as EasingType))
+                ? (sn.easing as EasingType)
+                : undefined,
             }))
             .sort((a, b) => a.beat - b.beat);
           return { ...base, nodes };
