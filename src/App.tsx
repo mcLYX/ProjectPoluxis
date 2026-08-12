@@ -645,13 +645,26 @@ export function App() {
   const handleEditorTogglePlay = () => {
     if (editorPreviewPlaying) {
       globalAudio.pause();
+      // Snapshot the live position so resume (globalAudio.play(gameTime)) is
+      // exact — the editor rAF loop stops driving gameTime the moment preview
+      // playback halts, so without this a mid-song pause would resume from 0.
+      setGameTime(globalAudio.getCurrentTime());
       setEditorPreviewPlaying(false);
     } else {
       globalAudio.setOffset(audioOffsetMs / 1000);
       if (!hasCustomAudio) {
         globalAudio.setSynthesizedTrack(currentChart.metadata.bpm);
       }
-      globalAudio.play(gameTime);
+      // Give the chart clock a short lead-in that reaches the audio offset when
+      // it is negative, so the song's true beginning (audioTime == 0, at
+      // chartTime == offset, i.e. during the lead-in with chartTime < 0) plays
+      // instead of starting from the middle. For positive offsets no lead-in is
+      // needed (audio stays silent until the offset is reached).
+      // Only pre-roll from the very top (gameTime <= 0): resuming mid-song must
+      // continue from the snapshotted position, otherwise the lead-in would shove
+      // the chart clock back to the offset and progress would jump backwards.
+      const leadIn = (audioOffsetMs < 0 && gameTime <= 0) ? Math.max(0, -audioOffsetMs / 1000) : 0;
+      globalAudio.play(gameTime, leadIn);
       setEditorPreviewPlaying(true);
     }
   };

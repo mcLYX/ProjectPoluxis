@@ -149,11 +149,22 @@ function buildSlideTubeGeometry(opts: {
   easing: EasingType;
   half: number;
   lengthSegments?: number;
+  /**
+   * Local-Z (relative to node A) for a given normalized-time τ.
+   * Defaults to `end.z * τ` — correct for constant scroll speed. When a
+   * `speed_change` event lies inside the segment, the caller passes a sampler
+   * that follows the real scroll-distance integral so the pipe's Z profile (and
+   * therefore its visual length) honours the speed change instead of ramping
+   * linearly (which made it look too far on acceleration / too close on
+   * deceleration).
+   */
+  zAt?: (tau: number) => number;
 }): THREE.BufferGeometry {
   const { end, angleStart, angleEnd, easing, half } = opts;
   const lengthSegments = opts.lengthSegments ?? 32;
   const radialSegments = 4; // diamond cross-section
   const ease = EASING_FNS[easing] ?? EASING_FNS.linear;
+  const zAt = opts.zAt ?? ((tau: number) => end.z * tau);
 
   // The slide interpolates its travel position by `ease(τ)` while time (z) advances
   // linearly with τ. Endpoints coincide with A and B (ease(0)=0, ease(1)=1), so the
@@ -166,7 +177,7 @@ function buildSlideTubeGeometry(opts: {
   for (let i = 0; i <= lengthSegments; i++) {
     const tau = i / lengthSegments;
     const e = ease(tau);
-    pts.push(new THREE.Vector3(end.x * e, end.y * e, end.z * tau));
+    pts.push(new THREE.Vector3(end.x * e, end.y * e, zAt(tau)));
   }
 
   const positions: number[] = [];
@@ -2246,21 +2257,43 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // (whole pipe); at τ=1 it is fully gone (playhead reaches node B).
           const ax = allNodes[i].x, ay = allNodes[i].y, az = _slideZs[i];
           const bx = allNodes[i + 1].x, by = allNodes[i + 1].y, bz = _slideZs[i + 1];
-          const segDur = Math.max(1e-4, allNodes[i + 1].timeSec - allNodes[i].timeSec);
-          const tau = THREE.MathUtils.clamp((curTime - allNodes[i].timeSec) / segDur, 0, 1);
+          const tA = allNodes[i].timeSec, tB = allNodes[i + 1].timeSec;
+          const segDur = Math.max(1e-4, tB - tA);
+          const tau = THREE.MathUtils.clamp((curTime - tA) / segDur, 0, 1);
           const ease = EASING_FNS[allNodes[i + 1].easing ?? 'linear'] ?? EASING_FNS.linear;
           const e = ease(tau);
-          const ex = bx - ax, ey = by - ay, ez = bz - az;
-          // Playhead = point on the eased curve at the current linear-time fraction τ:
-          // G(τ) = A + (ease(τ)·Δx, ease(τ)·Δy, τ·Δz). The clip plane passes through
-          // G(τ) with the curve TANGENT as its normal, so the cut stays perpendicular
-          // to the tube and tracks the playhead exactly. This must NOT place the cut
-          // along the straight A→B segment by ease(τ)·segLen — that mislocates the
-          // truncation (and makes it stretch) whenever the pipe bows in X/Y.
+          const ex = bx - ax, ey = by - ay;
+          // A speed_change event strictly between A and B makes the segment's Z
+          // non-linear in τ. In that case sample the true scroll-distance profile so the
+          // pipe length / playhead honour the speed change; otherwise fall back to the
+          // cheap linear ramp (prior behaviour, no per-frame getScrollDistance calls).
+          let midSpeed = false;
+          for (const p of sp) {
+            if (p.timeSec > tA && p.timeSec < tB) { midSpeed = true; break; }
+          }
+          const scrollDistA = midSpeed ? getScrollDistance(tA, sp) : 0;
+          const zAt = midSpeed
+            ? (tauN: number) =>
+                (scrollDistA - getScrollDistance(tA + tauN * segDur, sp)) * unitPerSecond
+            : undefined;
+          const localZ = (tauN: number) => (zAt ? zAt(tauN) : (bz - az) * tauN);
+          // Playhead = point on the eased curve at the current linear-time fraction τ.
+          // X/Y follow `ease(τ)`; Z follows the scroll-distance profile above. The clip
+          // plane passes through G(τ) with the curve TANGENT as its normal, so the cut
+          // stays perpendicular to the tube and tracks the playhead exactly. (Placing the
+          // cut along the straight A→B segment by ease(τ)·segLen mislocates the
+          // truncation and makes it stretch whenever the pipe bows in X/Y.)
           const eLo = ease(Math.max(0, tau - 0.005));
           const eHi = ease(Math.min(1, tau + 0.005));
-          _vConsP.set(ax + ex * e, ay + ey * e, az + ez * tau);
-          pipe.judgePlane.normal.set(ex * (eHi - eLo) / 0.01, ey * (eHi - eLo) / 0.01, ez).normalize();
+          const zNow = az + localZ(tau);
+          const zLo = az + localZ(Math.max(0, tau - 0.005));
+          const zHi = az + localZ(Math.min(1, tau + 0.005));
+          _vConsP.set(ax + ex * e, ay + ey * e, zNow);
+          pipe.judgePlane.normal.set(
+            ex * (eHi - eLo) / 0.01,
+            ey * (eHi - eLo) / 0.01,
+            (zHi - zLo) / 0.01,
+          ).normalize();
           pipe.judgePlane.constant = -pipe.judgePlane.normal.dot(_vConsP);
           // Editor additionally trims at the far render plane; gameplay clips nothing.
           pipe.farPlane.constant = isEditorModeRef.current ? -spawnLimit : Number.POSITIVE_INFINITY;
@@ -2288,15 +2321,27 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           }
 
           // Build/refresh the curved tube geometry. Cached by shape so it only
-          // rebuilds when the segment's endpoints, angles, easing, or note scale
-          // actually change — not every frame.
+          // rebuilds when the segment's endpoints, angles, easing, note scale, or
+          // (when a speed change lands inside the segment) its Z profile actually
+          // change — not every frame.
           const angleStart = allNodes[i].angle ?? 0;
           const angleEnd = allNodes[i + 1].angle ?? 0;
           const easing = allNodes[i + 1].easing ?? 'linear';
           const endX = bx - ax, endY = by - ay, endZ = bz - az;
-          const geoKey =
+          let geoKey =
             `${angleStart.toFixed(4)}|${angleEnd.toFixed(4)}|${easing}|` +
             `${endX.toFixed(3)}|${endY.toFixed(3)}|${endZ.toFixed(3)}|${SLIDE_PIPE_HALF * vScale}`;
+          if (midSpeed) {
+            // Signature of the interior Z profile so different speed curves in the
+            // segment get distinct cached geometries (4 interior samples suffice).
+            const prof: string[] = [];
+            for (let s = 1; s <= 4; s++) {
+              prof.push(
+                ((scrollDistA - getScrollDistance(tA + (s / 5) * segDur, sp)) * unitPerSecond).toFixed(3),
+              );
+            }
+            geoKey += `|P:${prof.join(',')}`;
+          }
           if (pipe.geoKey !== geoKey) {
             if (pipe.geo) pipe.geo.dispose();
             pipe.geo = buildSlideTubeGeometry({
@@ -2305,6 +2350,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
               angleEnd,
               easing,
               half: SLIDE_PIPE_HALF * vScale,
+              zAt,
             });
             pipe.mesh.geometry = pipe.geo;
             pipe.geoKey = geoKey;

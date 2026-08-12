@@ -306,13 +306,15 @@ export class AudioManager {
    * offset themselves — the conversion happens here and only here.
    * ------------------------------------------------------------------------ */
 
-  /** chart time -> audio time. Clamped at 0: the audio buffer cannot start
-   *  before its first sample. Clamping consistently (both the clock anchor and
-   *  the buffer start use the clamped value) keeps audio and chart in sync;
-   *  the only effect is that with a positive offset the song begins at
-   *  chartTime == offset instead of 0, which is inaudible (tens of ms). */
+  /** chart time -> audio time. NOTE: NOT clamped. The audio time may go
+   *  negative (before the buffer's first sample), which just means "the song
+   *  hasn't started yet — stay silent". The chart clock (getCurrentTime) must
+   *  stay exact and keep reading the real chart time even when it is below the
+   *  offset (including negative values during lead-in). The buffer is started
+   *  later (at the ctx time when audio time reaches 0, i.e. chart time ==
+   *  userAudioOffset) so the two coordinates never desync. */
   private toAudioTime(chartSec: number): number {
-    return Math.max(0, chartSec - this.userAudioOffset);
+    return chartSec - this.userAudioOffset;
   }
 
   /** audio time -> chart time. */
@@ -418,10 +420,12 @@ export class AudioManager {
     this.stop();
 
     this.leadInTime = leadInSec;
-    /* Convert once, here. `audioStartSec` is the buffer position we start at;
-     * `startTime` is the ctx timestamp at which that position would have been
-     * 0, i.e. the anchor of the audio clock. getCurrentTime() converts back to
-     * chart time, so at audio start it reads exactly `startChartSec`. */
+    /* Convert once, here. `audioStartSec` is the buffer position that
+     * corresponds to `startChartSec` (may be negative — the song hasn't begun
+     * yet). `startTime` anchors the chart clock so getCurrentTime() reads the
+     * exact chart time, even below the offset (negative during lead-in).
+     * The buffer itself is started separately, at the ctx time when audio time
+     * reaches 0 (chart time == userAudioOffset), with offset 0. */
     const audioStartSec = this.toAudioTime(startChartSec);
     this.startTime = this.ctx.currentTime - audioStartSec / this.playbackRate + leadInSec;
     this.isPlaying = true;
@@ -439,23 +443,33 @@ export class AudioManager {
     this.beatPulseAttackAt = -Infinity;
 
     const useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
-    const audioStartInCtx = this.ctx.currentTime + leadInSec;
+    // The ctx time at which audio time reaches 0 (chart time == offset). The
+    // buffer begins its true start there (offset 0); before that the chart
+    // clock keeps advancing but no audio plays.
+    const baseStart = this.ctx.currentTime + leadInSec - audioStartSec / this.playbackRate;
 
     if (useBuffer && this.bgmBuffer && this.bgmGain) {
       /* Plain rate change: apply playbackRate directly to the source. The pitch
        * shifts with speed (acceptable for an editor chart-making aid). The game
-       * clock is scaled by the same rate so notes scroll in lockstep with audio. */
+       * clock is scaled by the same rate so notes scroll in lockstep with audio.
+       * If the song hasn't started yet (baseStart still in the future) we begin
+       * it at offset 0 when the chart clock reaches the offset; otherwise we're
+       * seeking into the middle and start now at the correct offset. */
       this.bgmSource = this.ctx.createBufferSource();
       this.bgmSource.buffer = this.bgmBuffer;
       this.bgmSource.playbackRate.value = this.playbackRate;
       this.bgmSource.connect(this.bgmGain);
-      this.bgmSource.start(audioStartInCtx, audioStartSec);
+      if (baseStart >= this.ctx.currentTime) {
+        this.bgmSource.start(baseStart, 0);
+      } else {
+        this.bgmSource.start(this.ctx.currentTime, audioStartSec);
+      }
     } else {
-      /* The synthesizer is a setInterval-based loop that starts immediately by
-       * default, but the game clock (via startTime) already accounts for the
-       * lead-in. We delay the first tick by leadInSec so the synth audio
-       * actually begins at the same moment the game clock reaches zero — in
-       * lockstep with the notes, just like the buffer-source path. */
+      /* The synthesizer is a setInterval-based loop. We delay its first tick
+       * until the chart clock reaches the offset (audio time 0), so synth audio
+       * begins in lockstep with the buffer path — including during lead-in when
+       * the offset is negative (song starts partway) or positive (silence until
+       * the offset). */
       this.startSynthesizedMusic(audioStartSec, leadInSec);
     }
   }
@@ -540,28 +554,40 @@ export class AudioManager {
     const useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
 
     // Single conversion point: chart time in, audio time used everywhere below.
-    const targetSec = this.toAudioTime(targetChartSec);
-    this.startTime = this.ctx.currentTime - targetSec / this.playbackRate;
+    // The audio time may be negative (the song hasn't begun yet); the chart
+    // clock is anchored so getCurrentTime() reads the exact target immediately.
+    const audioTarget = this.toAudioTime(targetChartSec);
+    this.startTime = this.ctx.currentTime - audioTarget / this.playbackRate;
 
     if (useBuffer && this.bgmBuffer && this.bgmGain) {
-      // Stop old source, start new one from the new offset
+      // Stop old source, start new one. If the target is before the song's true
+      // start (audioTarget < 0) the buffer begins silently at offset 0 when the
+      // audio time reaches 0 (a future ctx time); otherwise start now at the
+      // exact offset.
       if (this.bgmSource) {
         try { this.bgmSource.stop(); this.bgmSource.disconnect(); } catch {}
         this.bgmSource = null;
       }
+      const when = audioTarget >= 0
+        ? this.ctx.currentTime
+        : this.ctx.currentTime + (-audioTarget) / this.playbackRate;
+      const offset = Math.max(0, audioTarget);
       this.bgmSource = this.ctx.createBufferSource();
       this.bgmSource.buffer = this.bgmBuffer;
       this.bgmSource.playbackRate.value = this.playbackRate;
       this.bgmSource.connect(this.bgmGain);
-      this.bgmSource.start(0, Math.max(0, targetSec));
+      this.bgmSource.start(when, offset);
     } else {
-      // Synthesised: restart the interval loop from the matching step
+      // Synthesised: restart the interval loop from the matching step, but
+      // defer the first tick (silent) until the audio time reaches 0 if the
+      // target is before the song's true beginning.
       if (this.synthInterval) {
         window.clearInterval(this.synthInterval);
         this.synthInterval = null;
       }
       const beatInterval = 60 / this.synthBpm;
-      let step = Math.floor(targetSec / (beatInterval / 4));
+      let step = Math.max(0, Math.floor(audioTarget / (beatInterval / 4)));
+      const delayMs = audioTarget < 0 ? (-audioTarget) / this.playbackRate * 1000 : 0;
       const chords = [
         [220, 277.18, 329.63, 440],
         [174.61, 220, 261.63, 349.23],
@@ -600,8 +626,16 @@ export class AudioManager {
         o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + beatInterval * 0.35);
         step++;
       };
-      tick();
-      this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
+      if (delayMs > 0) {
+        window.setTimeout(() => {
+          if (!this.isPlaying) return;
+          tick();
+          this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
+        }, delayMs);
+      } else {
+        tick();
+        this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
+      }
     }
   }
 
@@ -906,8 +940,18 @@ export class AudioManager {
 
   private startSynthesizedMusic(startOffset: number, leadInSec = 0) {
     if (!this.ctx || !this.bgmGain) return;
+    const rate = this.playbackRate;
     const beatInterval = 60 / this.synthBpm;
-    let step = Math.floor(startOffset / (beatInterval / 4));
+    // Clamp the starting step at 0 so a negative offset (song hasn't begun) just
+    // starts from the beginning rather than ticking at a negative step.
+    let step = Math.max(0, Math.floor(startOffset / (beatInterval / 4)));
+    // The ctx time at which the audio time reaches 0 (chart time == offset).
+    // Defer the first tick until then so the synth stays silent during lead-in
+    // when appropriate (positive offset) or begins mid-song only once audio
+    // time is non-negative (negative offset) — exactly like the buffer path.
+    const baseStart = this.ctx.currentTime + leadInSec - startOffset / rate;
+    const delayMs = Math.max(0, (baseStart - this.ctx.currentTime) * 1000);
+    const intervalMs = (beatInterval / 4) * 1000;
     const chords = [
       [220, 277.18, 329.63, 440],
       [174.61, 220, 261.63, 349.23],
@@ -946,12 +990,8 @@ export class AudioManager {
       o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + beatInterval * 0.35);
       step++;
     };
-    const intervalMs = (beatInterval / 4) * 1000;
-    if (leadInSec > 0) {
-      /* Defer the first tick by leadInSec so the synth starts exactly when
-       * the game clock reaches zero — the same lockstep as buffer audio. */
-      const delayMs = leadInSec * 1000;
-      setTimeout(() => {
+    if (delayMs > 0) {
+      window.setTimeout(() => {
         if (!this.isPlaying) return;
         tick(); // first note
         this.synthInterval = window.setInterval(tick, intervalMs);
