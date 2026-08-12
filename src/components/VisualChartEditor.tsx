@@ -25,6 +25,8 @@ import {
   FlipHorizontal,
   FlipVertical,
   RefreshCw,
+  AlertTriangle,
+  CheckCircle,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
@@ -306,6 +308,89 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     batch: false,
     importExport: false,
   });
+
+  // ----- Chart integrity check -----
+  type CheckKind = 'negativeBeat' | 'chainOrder' | 'coordRange';
+  interface CheckIssue {
+    kind: CheckKind;
+    /** Translated category label (drives the coloured tag). */
+    cat: string;
+    /** Human-readable detail line (built in code, numbers already formatted). */
+    detail: string;
+    /** Beat to seek to when the warning is clicked. */
+    targetBeat: number;
+    /** Note id to select (skipped for event issues). */
+    targetId?: string;
+    isEvent?: boolean;
+  }
+  const X_MIN = -2.4, X_MAX = 2.4, Y_MIN = -1.5, Y_MAX = 1.5;
+  const [checkIssues, setCheckIssues] = useState<CheckIssue[]>([]);
+  const [showCheck, setShowCheck] = useState(false);
+  const [checkRan, setCheckRan] = useState(false);
+
+  const runChartCheck = () => {
+    const issues: CheckIssue[] = [];
+    for (const note of chart.notes) {
+      if (note.beat < -1e-6) {
+        issues.push({
+          kind: 'negativeBeat',
+          cat: t('editor.checkCatNegative'),
+          detail: `${t('editor.checkTypeNote')} ${note.id} · ${t('editor.beat')} ${note.beat.toFixed(2)}`,
+          targetBeat: note.beat,
+          targetId: note.id,
+        });
+      }
+      if (note.x < X_MIN - 1e-6 || note.x > X_MAX + 1e-6 || note.y < Y_MIN - 1e-6 || note.y > Y_MAX + 1e-6) {
+        issues.push({
+          kind: 'coordRange',
+          cat: t('editor.checkCatCoord'),
+          detail: `${t('editor.checkTypeNote')} ${note.id} · x=${note.x.toFixed(2)}, y=${note.y.toFixed(2)}`,
+          targetBeat: note.beat,
+          targetId: note.id,
+        });
+      }
+      if (note.nodes && note.nodes.length) {
+        let prevBeat = note.beat;
+        let prevLabel = t('editor.headNode');
+        for (let i = 0; i < note.nodes.length; i++) {
+          const sn = note.nodes[i];
+          if (sn.beat < prevBeat - 1e-6) {
+            issues.push({
+              kind: 'chainOrder',
+              cat: t('editor.checkCatChainOrder'),
+              detail: `${t('editor.checkTypeNote')} ${note.id} · ${t('editor.nodeN', { n: i + 1 })} (${t('editor.beat')} ${sn.beat.toFixed(2)}) < ${prevLabel} (${prevBeat.toFixed(2)})`,
+              targetBeat: sn.beat,
+              targetId: note.id,
+            });
+          }
+          prevBeat = sn.beat;
+          prevLabel = `${t('editor.nodeN', { n: i + 1 })}`;
+        }
+      }
+    }
+    const events = chart.events ?? [];
+    for (const evt of events) {
+      if (evt.beat < -1e-6) {
+        issues.push({
+          kind: 'negativeBeat',
+          cat: t('editor.checkCatNegative'),
+          detail: `${t('editor.checkTypeEvent')} ${evt.id} · ${t('editor.beat')} ${evt.beat.toFixed(2)}`,
+          targetBeat: evt.beat,
+          isEvent: true,
+        });
+      }
+    }
+    issues.sort((a, b) => a.targetBeat - b.targetBeat);
+    setCheckIssues(issues);
+    setCheckRan(true);
+    setShowCheck(true);
+  };
+
+  const jumpToIssue = (issue: CheckIssue) => {
+    onSeekBeat(issue.targetBeat);
+    if (issue.targetId) onSelectNote(issue.targetId);
+    setShowCheck(false);
+  };
 
   // Dragging State for Floating Quick Edit and Snapping Panels
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
@@ -1045,6 +1130,49 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button></div>}
             </div>
 
+            <button
+              onClick={() => { runChartCheck(); setShowCheck(true); }}
+              className="glass-btn w-full py-2.5 rounded-xl text-amber-200 font-bold flex items-center justify-center gap-2 border border-amber-400/30"
+            >
+              <AlertTriangle size={15} />
+              {t('editor.chartCheck')}
+            </button>
+            {showCheck && (
+              <div className="mt-2 rounded-xl glass-sub border-white/12 p-3 space-y-2">
+                {checkRan && (
+                  <div className="space-y-1 max-h-60 overflow-y-auto pr-1">
+                    {checkIssues.length === 0 ? (
+                      <div className="flex items-center gap-2 text-emerald-300 text-xs py-1">
+                        <CheckCircle size={14} />
+                        {t('editor.chartCheckNoIssue')}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-[11px] text-amber-200 font-bold">
+                          {t('editor.chartCheckIssueCount', { n: checkIssues.length })}
+                        </div>
+                        {checkIssues.map((issue, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => jumpToIssue(issue)}
+                            className="w-full text-left rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 p-2 transition cursor-pointer"
+                          >
+                            <div className="text-[10px] font-bold text-amber-300">{issue.cat}</div>
+                            <div className="text-[11px] text-white/80 font-mono">{issue.detail}</div>
+                          </button>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
+                <button
+                  onClick={() => setShowCheck(false)}
+                  className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 text-xs transition"
+                >
+                  {t('editor.chartCheckClose')}
+                </button>
+              </div>
+            )}
             <button onClick={onExitEditor} className="glass-btn w-full py-2.5 rounded-xl text-white/80 font-bold">
               {t('editor.exitEditor')}
             </button>
@@ -1136,14 +1264,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             <NumField
               value={selectedNote.x}
               onCommit={(v) => handleModifySelected({ x: v ?? 0 })}
-              step={0.1} min={-2.4} max={2.4}
+              step="any" min={-2.4} max={2.4}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
             <NumField
               value={selectedNote.y}
               onCommit={(v) => handleModifySelected({ y: v ?? 0 })}
-              step={0.1} min={-1.5} max={1.5}
+              step="any" min={-1.5} max={1.5}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
@@ -1190,14 +1318,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               <NumField
                 value={sn.x}
                 onCommit={(v) => handlePatchSlideNode(i, { x: v ?? 0 })}
-                step={0.1} min={-2.4} max={2.4}
+                step="any" min={-2.4} max={2.4}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
               <NumField
                 value={sn.y}
                 onCommit={(v) => handlePatchSlideNode(i, { y: v ?? 0 })}
-                step={0.1} min={-1.5} max={1.5}
+                step="any" min={-1.5} max={1.5}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
@@ -1320,7 +1448,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
         <div className="text-[9px] text-white/40 font-mono leading-none mt-0.5">{t('editor.tune')}</div>
         <button
-          onClick={() => onSeekBeat(Math.max(0, Math.floor((currentBeat - 1e-6) / snapSubdivision) * snapSubdivision))}
+          onClick={() => onSeekBeat(Math.floor((currentBeat - 1e-6) / snapSubdivision) * snapSubdivision)}
           className="w-10 h-10 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 flex items-center justify-center font-bold text-sm transition cursor-pointer"
           title={t('editor.snapPrev')}
         >
@@ -1450,7 +1578,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
               <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldSpeed')}</label>
               <input
                 type="number"
-                step="0.1"
+                step="any"
                 min="0.1"
                 max="5"
                 value={event.speed ?? 1}
@@ -1486,7 +1614,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                   <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldX')}</label>
                   <input
                     type="number"
-                    step="0.1"
+                    step="any"
                     value={event.x ?? 0}
                     onChange={(e) => onUpdate({ x: parseFloat(e.target.value) || 0 })}
                     className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
@@ -1496,7 +1624,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                   <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldY')}</label>
                   <input
                     type="number"
-                    step="0.1"
+                    step="any"
                     value={event.y ?? -0.33}
                     onChange={(e) => onUpdate({ y: parseFloat(e.target.value) || 0 })}
                     className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"

@@ -121,12 +121,12 @@ export const ChartEditorModal: React.FC<ChartEditorModalProps> = ({
                     className="col-span-2 bg-[#070e20] border border-cyan-500/30 rounded px-2 py-1 text-cyan-300 font-mono text-xs"
                   />
                   <input
-                    type="number" step="0.1" min="-2.4" max="2.4" value={note.x}
+                    type="number" step="any" min="-2.4" max="2.4" value={note.x}
                     onChange={(e) => handleNoteChange(idx, 'x', parseFloat(e.target.value) || 0)}
                     className="col-span-3 bg-[#070e20] border border-cyan-500/30 rounded px-2 py-1 text-cyan-300 font-mono text-xs"
                   />
                   <input
-                    type="number" step="0.1" min="-1.5" max="1.5" value={note.y}
+                    type="number" step="any" min="-1.5" max="1.5" value={note.y}
                     onChange={(e) => handleNoteChange(idx, 'y', parseFloat(e.target.value) || 0)}
                     className="col-span-3 bg-[#070e20] border border-cyan-500/30 rounded px-2 py-1 text-cyan-300 font-mono text-xs"
                   />

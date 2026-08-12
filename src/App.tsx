@@ -655,30 +655,26 @@ export function App() {
       if (!hasCustomAudio) {
         globalAudio.setSynthesizedTrack(currentChart.metadata.bpm);
       }
-      // Give the chart clock a short lead-in that reaches the audio offset when
-      // it is negative, so the song's true beginning (audioTime == 0, at
-      // chartTime == offset, i.e. during the lead-in with chartTime < 0) plays
-      // instead of starting from the middle. For positive offsets no lead-in is
-      // needed (audio stays silent until the offset is reached).
-      // Only pre-roll from the very top (gameTime <= 0): resuming mid-song must
-      // continue from the snapshotted position, otherwise the lead-in would shove
-      // the chart clock back to the offset and progress would jump backwards.
-      const leadIn = (audioOffsetMs < 0 && gameTime <= 0) ? Math.max(0, -audioOffsetMs / 1000) : 0;
-      globalAudio.play(gameTime, leadIn);
+      // Play from the current position (gameTime). The chart clock starts exactly
+      // here (beat 0.00 stays at 0.00) and the audio plays from its corresponding
+      // position (audioTime = chartTime - userAudioOffset), not from the song's
+      // beginning. Unlike gameplay we apply no lead-in — a negative offset must NOT
+      // shove the chart back to a negative position to restart the audio from 0.
+      globalAudio.play(gameTime);
       setEditorPreviewPlaying(true);
     }
   };
 
   const handleSeekBeat = (beat: number) => {
     const snappedBeat = Math.round(beat / snapSubdivision) * snapSubdivision;
-    const targetSec = Math.max(
-      0,
-      beatToSecondsMultiBpm(
-        snappedBeat,
-        currentChart.metadata.bpm,
-        currentChart.metadata.offset || 0,
-        currentChart.metadata.bpmlist
-      )
+    // No lower clamp: the editor must be able to represent and display beats
+    // before 0 (e.g. negative-offset lead-in or notes placed before beat 0), so
+    // the various beat read-outs correctly show negative values.
+    const targetSec = beatToSecondsMultiBpm(
+      snappedBeat,
+      currentChart.metadata.bpm,
+      currentChart.metadata.offset || 0,
+      currentChart.metadata.bpmlist
     );
     setGameTime(targetSec);
     if (gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)) {
@@ -695,7 +691,7 @@ export function App() {
     const dir = e.deltaY > 0 ? 1 : -1;
     const deltaBeats = dir * (snapSubdivision || 0.25);
     const curBeat = secondsToBeatMultiBpm(gameTime, bpm, offset || 0, bpmlist);
-    handleSeekBeat(Math.max(0, curBeat + deltaBeats));
+    handleSeekBeat(curBeat + deltaBeats);
   }, [gameState, gameTime, currentChart, snapSubdivision, handleSeekBeat]);
 
   useEffect(() => {

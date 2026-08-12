@@ -38,6 +38,13 @@ export class AudioManager {
   private userAudioOffset: number = 0;
   private leadInTime: number = 0;
   private synthInterval: number | null = null;
+  /** Handle for the one-shot `setTimeout` that defers the first synth tick when
+   *  playback starts before the song's true beginning (audio time < 0, i.e. a
+   *  negative offset or a seek into negative beats). MUST be cleared whenever
+   *  the synth loop is (re)started or stopped — otherwise repeated seeks leave
+   *  multiple pending timers, each of which later spawns its own `setInterval`,
+   *  and the stacked loops play on top of each other ("叠加播放"). */
+  private synthStartTimer: number | null = null;
   private synthBpm: number = 140;
   /** Editor-only playback rate multiplier (0.25x / 0.5x / 1x / 2x). 1 = normal.
    *  Applied directly to the AudioBufferSource (so the pitch shifts with speed —
@@ -501,11 +508,15 @@ export class AudioManager {
         this.bgmSource.stop(stopTime);
       } catch {}
     }
-    if (this.synthInterval) {
+    if (this.synthInterval || this.synthStartTimer) {
       window.setTimeout(() => {
         if (this.synthInterval) {
           window.clearInterval(this.synthInterval);
           this.synthInterval = null;
+        }
+        if (this.synthStartTimer) {
+          window.clearTimeout(this.synthStartTimer);
+          this.synthStartTimer = null;
         }
       }, duration * 1000);
     }
@@ -533,6 +544,10 @@ export class AudioManager {
     if (this.synthInterval) {
       window.clearInterval(this.synthInterval);
       this.synthInterval = null;
+    }
+    if (this.synthStartTimer) {
+      window.clearTimeout(this.synthStartTimer);
+      this.synthStartTimer = null;
     }
   }
 
@@ -585,6 +600,10 @@ export class AudioManager {
         window.clearInterval(this.synthInterval);
         this.synthInterval = null;
       }
+      if (this.synthStartTimer) {
+        window.clearTimeout(this.synthStartTimer);
+        this.synthStartTimer = null;
+      }
       const beatInterval = 60 / this.synthBpm;
       let step = Math.max(0, Math.floor(audioTarget / (beatInterval / 4)));
       const delayMs = audioTarget < 0 ? (-audioTarget) / this.playbackRate * 1000 : 0;
@@ -627,7 +646,8 @@ export class AudioManager {
         step++;
       };
       if (delayMs > 0) {
-        window.setTimeout(() => {
+        this.synthStartTimer = window.setTimeout(() => {
+          this.synthStartTimer = null;
           if (!this.isPlaying) return;
           tick();
           this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
@@ -940,6 +960,17 @@ export class AudioManager {
 
   private startSynthesizedMusic(startOffset: number, leadInSec = 0) {
     if (!this.ctx || !this.bgmGain) return;
+    // Defensive: cancel any still-pending synth start timer (e.g. from a
+    // previous play/seek) so we never end up with two stacked loops. stop()
+    // also clears these, but this guards the play()->this path directly.
+    if (this.synthInterval) {
+      window.clearInterval(this.synthInterval);
+      this.synthInterval = null;
+    }
+    if (this.synthStartTimer) {
+      window.clearTimeout(this.synthStartTimer);
+      this.synthStartTimer = null;
+    }
     const rate = this.playbackRate;
     const beatInterval = 60 / this.synthBpm;
     // Clamp the starting step at 0 so a negative offset (song hasn't begun) just
@@ -991,7 +1022,8 @@ export class AudioManager {
       step++;
     };
     if (delayMs > 0) {
-      window.setTimeout(() => {
+      this.synthStartTimer = window.setTimeout(() => {
+        this.synthStartTimer = null;
         if (!this.isPlaying) return;
         tick(); // first note
         this.synthInterval = window.setInterval(tick, intervalMs);

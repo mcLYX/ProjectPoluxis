@@ -114,8 +114,10 @@ export function beatToSecondsMultiBpm(
  * `note.timeSec` by `resolveChart`). It is removed here so callers never have
  * to touch `metadata.offset` themselves.
  *
- * Times before the offset map to beat 0 (clamped) — there is no musical beat
- * before the chart starts.
+ * Times before the offset map to a NEGATIVE beat (no longer clamped to 0):
+ * the editor must be able to represent and display beats before 0 (e.g.
+ * negative-offset lead-in, or notes placed before beat 0), so the HUD beat
+ * read-out correctly shows negative values.
  */
 export function secondsToBeatMultiBpm(
   sec: number,
@@ -124,7 +126,6 @@ export function secondsToBeatMultiBpm(
   bpmlist?: BpmPoint[]
 ): number {
   const t = sec - offset;
-  if (t <= 0) return 0;
 
   if (!bpmlist || bpmlist.length === 0) {
     return (t * baseBpm) / 60;

@@ -454,7 +454,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
     // placement tools
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    const beat = Math.max(0, snap(timeToBeat(t, segsRef.current), snapRef.current));
+    const beat = snap(timeToBeat(t, segsRef.current), snapRef.current);
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     const x = snap(worldX, xStep);
     onPlaceRef.current(x, 0, beat);
@@ -474,14 +474,14 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // Drag down = forward through the chart (playhead advances).
       const dBeat = (dy / pxPerBeat);
       const curBeat = timeToBeat(curTime, segsRef.current);
-      onSeekRef.current(Math.max(0, curBeat + dBeat));
+      onSeekRef.current(curBeat + dBeat);
       drag.moved = true;
       return;
     }
 
     if (!drag.id) return;
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    let beat = Math.max(0, snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
+    let beat = snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current);
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     let x = snap(worldX - drag.offX, xStep);
     drag.moved = true;
@@ -502,7 +502,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const deltaBeats = dir * (snapRef.current || 0.25);
     const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
     const curBeat = timeToBeat(curTime, segsRef.current);
-    onSeekRef.current(Math.max(0, curBeat + deltaBeats));
+    onSeekRef.current(curBeat + deltaBeats);
   };
 
   return (
