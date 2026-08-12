@@ -2473,7 +2473,7 @@ if (!Object.assign) {
       if (n.type !== 'tap') continue;
       if (game.judged[n.id]) continue;
       var dtMs = Math.abs((curTime - n.timeSec) * 1000);
-      if (dtMs > HIT_WINDOW_MS) continue;
+      if (dtMs >= HIT_WINDOW_MS) continue;
       var inOwn = Math.abs(n.x - wx) < TAP_HIT_HALF && Math.abs(n.y - wy) < TAP_HIT_HALF;
       var extra = n.extraHitRegions;
       var inExtra = false;
@@ -2579,31 +2579,47 @@ if (!Object.assign) {
       }
     }
 
-    /* 2) Release detection: ALL bound pointers released → next unjudged node missLocked
-     * EXCEPTION: tail node with tailLockedSPerfect already set → skip missLocked. */
-    var hasBinding = false;
-    for (var bpid in rt.boundPointerIds) {
-      if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
-      hasBinding = true;
-      var bp = game.pointers[bpid];
-      if (!bp || !bp.down) delete rt.boundPointerIds[bpid];
-    }
-    if (hasBinding) {
-      /* Check if any bindings remain after cleanup */
-      var anyRemaining = false;
-      for (var bpid2 in rt.boundPointerIds) {
-        if (rt.boundPointerIds.hasOwnProperty(bpid2)) { anyRemaining = true; break; }
+    /* Determine the next unjudged node early — needed for the off-node pruning
+     * below AND for step 3. Mirrors GameCanvas.processSlide. */
+    var nextIdx = -1;
+    for (var k0 = 0; k0 < rt.nodes.length; k0++) { if (!rt.nodes[k0].judged) { nextIdx = k0; break; } }
+    var ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
+
+    /* 2) Release detection + off-node pruning (faithful to GameCanvas).
+     * A still-down bound finger that has slid OFF the next node is dropped ONLY
+     * when another bound finger is already ON that node. This keeps the correct
+     * finger bound through split slides / shared starts, instead of dropping it
+     * and wrongly binding whatever was grabbed first. */
+    var boundKeys = Object.keys(rt.boundPointerIds);
+    if (boundKeys.length > 0) {
+      var allReleased = true;
+      for (var bpid in rt.boundPointerIds) {
+        if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
+        var bp = game.pointers[bpid];
+        if (bp && bp.down) { allReleased = false; }
+        else { delete rt.boundPointerIds[bpid]; }
       }
-      if (!anyRemaining) {
-        var rNextIdx = -1;
-        for (var k = 0; k < rt.nodes.length; k++) { if (!rt.nodes[k].judged) { rNextIdx = k; break; } }
-        if (rNextIdx >= 0 && !rt.nodes[rNextIdx].tailLockedSPerfect) { rt.nodes[rNextIdx].missLocked = true; rt.nodes[rNextIdx].redWarn = false; }
+      if (ndForCheck && Object.keys(rt.boundPointerIds).length > 0) {
+        var onNodeBound = [], offNodeBound = [];
+        for (var pidc in rt.boundPointerIds) {
+          if (!rt.boundPointerIds.hasOwnProperty(pidc)) continue;
+          var bpc = game.pointers[pidc];
+          var onNode = !!bpc && bpc.down &&
+            Math.abs(bpc.x - ndForCheck.x) < SLIDE_HIT_HALF &&
+            Math.abs(bpc.y - ndForCheck.y) < SLIDE_HIT_HALF;
+          (onNode ? onNodeBound : offNodeBound).push(pidc);
+        }
+        if (onNodeBound.length > 0) {
+          for (var oi = 0; oi < offNodeBound.length; oi++) delete rt.boundPointerIds[offNodeBound[oi]];
+        }
+      }
+      if (allReleased && Object.keys(rt.boundPointerIds).length === 0 && nextIdx >= 0) {
+        var nns = rt.nodes[nextIdx];
+        if (!nns.judged && !nns.tailLockedSPerfect) { nns.missLocked = true; nns.redWarn = false; }
       }
     }
 
-    /* 3) Interact with the current next node */
-    var nextIdx = -1;
-    for (var k2 = 0; k2 < rt.nodes.length; k2++) { if (!rt.nodes[k2].judged) { nextIdx = k2; break; } }
+    /* 3) Interact with the current next node (nextIdx / ndForCheck computed above) */
     if (nextIdx < 0) return;
     var cns = rt.nodes[nextIdx];
     var cnd = allNodes[nextIdx];
@@ -2643,35 +2659,33 @@ if (!Object.assign) {
       }
     }
 
-    /* Which pointer may judge this node? Bound → any bound pointer; free → any held. */
-    var insideId = null;
-    var hasBound2 = false;
-    for (var bpid3 in rt.boundPointerIds) {
-      if (!rt.boundPointerIds.hasOwnProperty(bpid3)) continue;
-      hasBound2 = true;
-      var p = game.pointers[bpid3];
-      if (p && p.down) {
-        if (Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) { insideId = bpid3; break; }
+    /* Collect EVERY finger currently on the node (multi-finger binding, mirrors
+     * GameCanvas onNodePids). Bound chain → any bound pointer; free → any held. */
+    var boundCount = Object.keys(rt.boundPointerIds).length;
+    var onNodePids = [];
+    if (boundCount > 0) {
+      for (var bpid3 in rt.boundPointerIds) {
+        if (!rt.boundPointerIds.hasOwnProperty(bpid3)) continue;
+        var p = game.pointers[bpid3];
+        if (p && p.down &&
+            Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) {
+          onNodePids.push(bpid3);
+        }
       }
-    }
-    if (!hasBound2) {
+    } else {
       for (var pid in game.pointers) {
         if (!game.pointers.hasOwnProperty(pid)) continue;
         var p2 = game.pointers[pid];
         if (!p2.down) continue;
-        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) { insideId = pid; break; }
+        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
       }
     }
 
-    var hasBound3 = false;
-    for (var bpid4 in rt.boundPointerIds) {
-      if (rt.boundPointerIds.hasOwnProperty(bpid4)) { hasBound3 = true; break; }
-    }
-    if (hasBound3 && insideId !== null) cns.everInZone = true;
+    if (boundCount > 0 && onNodePids.length > 0) cns.everInZone = true;
 
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && insideId !== null) {
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
       cns.lastInsideTime = curTime;
-      cns.lastInsidePointerId = insideId;
+      cns.lastInsidePointerId = onNodePids[0];
     }
 
     if (dt >= 0 && !cns.judged) {
@@ -2679,11 +2693,7 @@ if (!Object.assign) {
        * Doesn't require being in the spatial zone, just holding through the end. */
       if (isTail && cns.tailLockedSPerfect) {
         cns.judged = true;
-        var hasBound4 = false;
-        for (var bpid5 in rt.boundPointerIds) {
-          if (rt.boundPointerIds.hasOwnProperty(bpid5)) { hasBound4 = true; break; }
-        }
-        if (!hasBound4) {
+        if (boundCount === 0) {
           for (var tpid2 in game.pointers) {
             if (!game.pointers.hasOwnProperty(tpid2)) continue;
             if (game.pointers[tpid2].down) rt.boundPointerIds[tpid2] = true;
@@ -2693,15 +2703,17 @@ if (!Object.assign) {
         audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
       } else if (!cns.arrivalChecked) {
         cns.arrivalChecked = true;
-        if (insideId !== null) {
-          cns.judged = true; rt.boundPointerIds[insideId] = true;
+        if (onNodePids.length > 0) {
+          cns.judged = true;
+          for (var bi = 0; bi < onNodePids.length; bi++) rt.boundPointerIds[onNodePids[bi]] = true;
           commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
           audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
         }
-      } else if (insideId !== null && dt <= HIT_WINDOW_MS) {
+      } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
         var j2 = evaluateJudgement(dt);
         if (j2) {
-          cns.judged = true; rt.boundPointerIds[insideId] = true;
+          cns.judged = true;
+          for (var bi2 = 0; bi2 < onNodePids.length; bi2++) rt.boundPointerIds[onNodePids[bi2]] = true;
           commitJudge(note.id + '#' + nextIdx, j2, dt);
           audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide');
         }
@@ -2710,11 +2722,7 @@ if (!Object.assign) {
 
     /* 4) Red warning: NONE of the bound pointers are on node but another held pointer is on it */
     cns.redWarn = false;
-    var hasBound5 = false;
-    for (var bpid6 in rt.boundPointerIds) {
-      if (rt.boundPointerIds.hasOwnProperty(bpid6)) { hasBound5 = true; break; }
-    }
-    if (!cns.judged && hasBound5 && insideId === null && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
+    if (!cns.judged && boundCount > 0 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
       for (var pid2 in game.pointers) {
         if (!game.pointers.hasOwnProperty(pid2)) continue;
         if (rt.boundPointerIds.hasOwnProperty(pid2)) continue;
@@ -2826,7 +2834,7 @@ if (!Object.assign) {
     if (!n) return;
     var dtMs = (curTime - n.timeSec) * 1000;
     var j = evaluateJudgement(dtMs);
-    if (!j) j = 'Good'; /* within radius but borderline timing */
+    if (!j) return; /* outside judgement window → leave for per-frame miss detection (matches full version) */
     commitJudge(n.id, j, dtMs);
     audio.playHitSound('tap'); spawnBurst(n.x, n.y, j, 'tap');
   }
