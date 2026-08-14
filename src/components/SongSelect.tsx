@@ -4,12 +4,16 @@ import { SongCard } from './SongCard';
 import { ChartData, GameStats } from '../types/game';
 import type { ClearBadge } from '../utils/scoreStore';
 import {
-  loadBeatmapsManifest,
+  assembleManifest,
+  invalidateManifestCache,
   loadChartForDifficulty,
   getFallbackChart,
   isFallbackSong,
-  resolveBeatmapUrl
+  resolveBeatmapUrl,
+  findAlbumById
 } from '../data/beatmapLoader';
+import { onLibraryChanged } from '../data/libraryStore';
+import { onServersChanged } from '../data/onlineServers';
 import { globalAudio } from '../audio/AudioManager';
 import { useI18n } from '../i18n';
 import { ArrowLeft, Loader2, BookOpen, Sliders, FileCode, Upload, Smartphone, Tv } from 'lucide-react';
@@ -26,6 +30,15 @@ function dimAccentGradient(hex: string): string {
   const g = (num >> 8) & 255;
   const b = num & 255;
   return `linear-gradient(160deg, rgba(${r}, ${g}, ${b}, 0.45) 0%, rgba(10, 13, 18, 0.92) 100%)`;
+}
+
+/** Glowing dot used to separate the 内置 · 在线 · 本地 source segments. */
+function SegmentDivider() {
+  return (
+    <div className="flex-shrink-0 w-8 flex items-center justify-center self-center" aria-hidden>
+      <div className="w-2.5 h-2.5 rounded-full bg-gradient-to-br from-cyan-300 to-amber-300 shadow-[0_0_16px_rgba(34,211,238,0.85)]" />
+    </div>
+  );
 }
 
 /** Post-play result shown on the enlarged song card ("结算卡片"). */
@@ -134,7 +147,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     let cancelled = false;
     (async () => {
       try {
-        const m = await loadBeatmapsManifest();
+        const m = await assembleManifest();
         if (!cancelled) {
           setManifest(m);
           setLoading(false);
@@ -149,12 +162,30 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     return () => { cancelled = true; };
   }, []);
 
+  // Refresh the manifest whenever the local library or the active online
+  // server changes (FileManager edits, downloads, server switch, ...).
+  useEffect(() => {
+    const reload = async () => {
+      invalidateManifestCache();
+      try {
+        const m = await assembleManifest();
+        setManifest(m);
+      } catch (e) {
+        console.error('刷新谱面清单失败', e);
+      }
+    };
+    const unsubLib = onLibraryChanged(reload);
+    const unsubSrv = onServersChanged(reload);
+    return () => {
+      unsubLib();
+      unsubSrv();
+    };
+  }, []);
+
   const getCurrentItems = useCallback((): BeatmapItem[] => {
     if (!manifest) return [];
     if (viewDepth === 'album' && currentAlbumId) {
-      const album = manifest.items.find(
-        (i) => i.type === 'album' && i.id === currentAlbumId
-      ) as AlbumItem | undefined;
+      const album = findAlbumById(manifest.items, currentAlbumId);
       return album ? album.songs : manifest.items;
     }
     return manifest.items;
@@ -408,7 +439,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
   const items = getCurrentItems();
   const currentAlbum = viewDepth === 'album' && currentAlbumId
-    ? (manifest?.items.find((i) => i.type === 'album' && i.id === currentAlbumId) as AlbumItem | undefined)
+    ? (findAlbumById(manifest?.items ?? [], currentAlbumId) ?? undefined)
     : null;
 
   return (
@@ -577,7 +608,10 @@ export const SongSelect: React.FC<SongSelectProps> = ({
             );
           }
 
-          return renderList.map((item) => {
+          const showDividers = !result;
+          return renderList.map((item, i) => {
+            const prevItem = i > 0 ? renderList[i - 1] : null;
+            const showDivider = showDividers && !!prevItem && (item.source ?? 'builtin') !== (prevItem.source ?? 'builtin');
             // In manifest-result mode, figure out which card is the played one.
             const isPlayedResult = !!result && !!result.songId && item.id === result.songId;
             // In custom-result mode there's only one synthetic card — it's always the played one.
@@ -614,7 +648,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
             // viewport" bug.
             const shouldCenterOnExpanded = justExitedResult && isExpanded;
 
-            return (
+            const card = (
               <SongCard
                 key={item.id}
                 item={item}
@@ -633,6 +667,15 @@ export const SongSelect: React.FC<SongSelectProps> = ({
                 centerWhenExpanded={shouldCenterOnExpanded}
               />
             );
+            if (showDivider) {
+              return (
+                <React.Fragment key={`frag-${item.id}`}>
+                  <SegmentDivider />
+                  {card}
+                </React.Fragment>
+              );
+            }
+            return card;
           });
         })()}
       </div>

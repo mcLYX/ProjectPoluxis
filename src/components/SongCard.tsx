@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { BeatmapItem, SongItem, AlbumItem } from '../types/beatmap';
-import { resolveBeatmapUrl, isFallbackSong } from '../data/beatmapLoader';
+import { resolveBeatmapUrl, isFallbackSong, countLeafSongs, albumHasPlayableSong } from '../data/beatmapLoader';
 import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft } from 'lucide-react';
 import { getHighScore, HighScoreEntry, ClearBadge } from '../utils/scoreStore';
 import { GameStats } from '../types/game';
@@ -79,14 +79,17 @@ function rgba(hex: string, a: number): string {
 
 function isAvailable(item: BeatmapItem): boolean {
   if (item.type === 'album') {
-    return item.songs.length > 0;
+    // 递归检查任意后代是否含可玩歌曲（支持嵌套专辑/空专辑）
+    return albumHasPlayableSong(item);
   }
   // Built-in (fallback) songs are always available — they use synth audio
   // and have their chart data bundled in the app.
   if (isFallbackSong(item.id)) {
     return item.difficulties.length > 0;
   }
-  return item.difficulties.length > 0 && !!item.audio;
+  // Local / online songs: a difficulty is enough to play (synth audio when no
+  // audio file is present).
+  return item.difficulties.length > 0;
 }
 
 export const SongCard: React.FC<SongCardProps> = ({
@@ -283,6 +286,20 @@ export const SongCard: React.FC<SongCardProps> = ({
           </div>
         )}
       </div>
+
+      {/* Source badge (top-right, expanded only) */}
+      {isExpanded && item.source && item.source !== 'builtin' && (
+        <div
+          className="absolute top-5 right-5 z-10 px-2.5 py-1 rounded-full text-[10px] font-bold font-orbitron tracking-wider border backdrop-blur-sm"
+          style={{
+            color: item.source === 'online' ? '#22d3ee' : '#fbbf24',
+            borderColor: item.source === 'online' ? 'rgba(34,211,238,0.5)' : 'rgba(251,191,36,0.5)',
+            background: item.source === 'online' ? 'rgba(34,211,238,0.12)' : 'rgba(251,191,36,0.12)',
+          }}
+        >
+          {item.source === 'online' ? t('filemgr.online') : t('filemgr.local')}
+        </div>
+      )}
 
       {/* Result overlay: judgement breakdown panel (result mode only) */}
       {item.type === 'song' && resultData && (
@@ -521,7 +538,7 @@ export const SongCard: React.FC<SongCardProps> = ({
           `}
         >
           <div className="text-white/60 text-xs font-bold font-orbitron tracking-wider">
-            {item.songs.length} {item.songs.length === 1 ? t('songcard.track') : t('songcard.tracks')}
+            {countLeafSongs(item)} {countLeafSongs(item) === 1 ? t('songcard.track') : t('songcard.tracks')}
           </div>
         </div>
       )}

@@ -7,12 +7,18 @@ export interface ValidationResult {
   chart?: ChartData;
 }
 
-export function parseAndValidateChart(jsonText: string): ValidationResult {
+export function parseAndValidateChart(input: string | unknown): ValidationResult {
+  let raw: unknown;
   try {
-    const data = JSON.parse(jsonText);
-    if (!data || typeof data !== 'object') {
-      return { valid: false, error: 'JSON 文件格式不正确，根元素必须是一个对象。' };
-    }
+    // 兼容两种情况：传入 JSON 字符串，或已解析的对象（如 fetch 的 res.json()）。
+    raw = typeof input === 'string' ? JSON.parse(input) : input;
+  } catch (err: unknown) {
+    return { valid: false, error: `JSON 解析失败: ${(err as Error).message}` };
+  }
+  if (!raw || typeof raw !== 'object') {
+    return { valid: false, error: 'JSON 文件格式不正确，根元素必须是一个对象。' };
+  }
+  const data = raw as Record<string, any>;
 
     if (!data.metadata || typeof data.metadata !== 'object') {
       return { valid: false, error: '缺少 metadata 元数据对象 (含 title, artist, bpm 等)。' };
@@ -160,9 +166,6 @@ export function parseAndValidateChart(jsonText: string): ValidationResult {
     }
 
     return { valid: true, chart };
-  } catch (err: unknown) {
-    return { valid: false, error: `JSON 解析失败: ${(err as Error).message}` };
-  }
 }
 
 export function exportChartJson(chart: ChartData): string {

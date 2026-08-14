@@ -1,142 +1,97 @@
-import React, { useState } from 'react';
-import { ChartData } from '../types/game';
-import { parseAndValidateChart } from '../utils/chartParser';
-import { Upload, Music, FileCode, CheckCircle, AlertCircle, X } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
 import { useI18n } from '../i18n';
+import type { ChartData } from '../types/game';
+import { LibraryManager } from './filemgr/LibraryManager';
+import { ZipImport } from './filemgr/ZipImport';
+import { ServerManager } from './filemgr/ServerManager';
 
-interface FileManagerModalProps {
+interface Props {
   isOpen: boolean;
   onClose: () => void;
   onSelectCustomSong: (chart: ChartData, audioFile?: File) => void;
 }
 
-export const FileManagerModal: React.FC<FileManagerModalProps> = ({
-  isOpen,
-  onClose,
-  onSelectCustomSong,
-}) => {
-  const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [chartData, setChartData] = useState<ChartData | null>(null);
-  const [chartFileName, setChartFileName] = useState<string>('');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+type Tab = 'library' | 'zip' | 'servers';
+
+export function FileManagerModal({ isOpen, onClose, onSelectCustomSong }: Props) {
   const { t } = useI18n();
+  const [tab, setTab] = useState<Tab>('library');
+  const [message, setMessage] = useState('');
+  const msgTimer = useRef<number | null>(null);
+
+  const showMessage = (msg: string) => {
+    setMessage(msg);
+    if (msgTimer.current) window.clearTimeout(msgTimer.current);
+    msgTimer.current = window.setTimeout(() => setMessage(''), 2600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (msgTimer.current) window.clearTimeout(msgTimer.current);
+    };
+  }, []);
 
   if (!isOpen) return null;
 
-  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setAudioFile(e.target.files[0]);
-    }
-  };
-
-  const handleChartUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setChartFileName(file.name);
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-        const text = evt.target?.result as string;
-        const res = parseAndValidateChart(text);
-        if (res.valid && res.chart) {
-          setChartData(res.chart);
-          setErrorMessage(null);
-        } else {
-          setErrorMessage(res.error || t('filemanager.formatError'));
-          setChartData(null);
-        }
-      };
-      reader.readAsText(file);
-    }
-  };
-
-  const handleConfirm = () => {
-    if (!chartData) {
-      setErrorMessage(t('filemanager.noJson'));
-      return;
-    }
-    onSelectCustomSong(chartData, audioFile || undefined);
+  const handlePlay = (chart: ChartData, audioFile?: File) => {
     onClose();
+    onSelectCustomSong(chart, audioFile);
   };
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'library', label: t('filemgr.tabLibrary') },
+    { id: 'zip', label: t('filemgr.tabZip') },
+    { id: 'servers', label: t('filemgr.tabServers') },
+  ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))', paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 0px))', paddingLeft: 'max(1rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1rem, env(safe-area-inset-right, 0px))' }}>
-      <div className="glass-panel-strong border-white/15 rounded-2xl w-full max-w-xl p-6 text-white font-rajdhani">
-        <div className="flex items-center justify-between border-b border-white/10 pb-4 mb-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-cyan-500/15 flex items-center justify-center text-cyan-300 border border-cyan-400/40">
-              <Upload size={18} />
-            </div>
-            <div>
-              <h2 className="text-xl font-bold font-orbitron tracking-wider text-white/90">
-                {t('filemanager.title')}
-              </h2>
-            </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-3">
+      <div className="glass-panel-strong w-[min(1100px,96vw)] h-[min(840px,94vh)] flex flex-col rounded-2xl overflow-hidden animate-fade-in">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
+          <div className="font-orbitron text-lg tracking-[0.15em] text-[#e5f6ff]">
+            {t('filemgr.heading')}
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-white/10 text-white/55 hover:text-white">
-            <X size={22} />
+          <button
+            className="glass-btn w-9 h-9 rounded-full flex items-center justify-center text-lg"
+            onClick={onClose}
+            aria-label={t('filemgr.close')}
+          >
+            ✕
           </button>
         </div>
 
-        {errorMessage && (
-          <div className="mb-4 p-3 bg-red-500/10 border border-red-400/40 rounded-xl flex items-center gap-3 text-red-300 text-xs">
-            <AlertCircle size={18} className="shrink-0" />
-            <span>{errorMessage}</span>
+        {/* Tabs */}
+        <div className="flex gap-2 px-5 py-2 border-b border-white/10">
+          {tabs.map((tb) => (
+            <button
+              key={tb.id}
+              className={`px-4 py-1.5 rounded-lg text-sm font-orbitron tracking-wide transition ${
+                tab === tb.id ? 'glass-btn-primary' : 'glass-btn'
+              }`}
+              onClick={() => setTab(tb.id)}
+            >
+              {tb.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 min-h-0">
+          {tab === 'library' && (
+            <LibraryManager onMessage={showMessage} onSelectCustomSong={handlePlay} />
+          )}
+          {tab === 'zip' && <ZipImport onMessage={showMessage} />}
+          {tab === 'servers' && <ServerManager onMessage={showMessage} />}
+        </div>
+
+        {/* Toast */}
+        {message && (
+          <div className="absolute bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full glass-panel text-sm text-[#e5f6ff] shadow-[0_0_20px_rgba(34,211,238,0.3)]">
+            {message}
           </div>
         )}
-
-        <div className="space-y-4 mb-6">
-          {/* Audio Upload */}
-          <div className="p-4 rounded-xl glass-sub border border-white/10">
-            <label className="block text-sm font-bold text-white mb-2 flex items-center gap-2">
-              <Music size={16} /> {t('filemanager.audioLabel')}
-            </label>
-            <input
-              type="file"
-              accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac"
-              onChange={handleAudioUpload}
-              className="w-full text-xs text-white/50 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-cyan-500/20 file:text-cyan-300 hover:file:bg-cyan-500/30 cursor-pointer"
-            />
-            {audioFile && (
-              <div className="mt-2 text-xs text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle size={14} /> {t('filemanager.ready', { name: audioFile.name, size: (audioFile.size / 1024 / 1024).toFixed(2) })}
-              </div>
-            )}
-          </div>
-
-          {/* Chart JSON Upload */}
-          <div className="p-4 rounded-xl glass-sub border border-white/10">
-            <label className="block text-sm font-bold text-white mb-2 flex items-center gap-2">
-              <FileCode size={16} /> {t('filemanager.chartLabel')}
-            </label>
-            <input
-              type="file"
-              accept=".json,application/json"
-              onChange={handleChartUpload}
-              className="w-full text-xs text-white/50 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-cyan-500/20 file:text-cyan-300 hover:file:bg-cyan-500/30 cursor-pointer"
-            />
-            {chartData && (
-              <div className="mt-2 text-xs text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle size={14} /> {t('filemanager.valid', { name: chartFileName, notes: chartData.notes.length, difficulty: chartData.metadata.difficulty })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="glass-btn px-5 py-2 rounded-xl text-white/80 font-semibold"
-          >
-            {t('filemanager.cancel')}
-          </button>
-          <button
-            onClick={handleConfirm}
-            className="px-6 py-2 rounded-xl glass-btn-primary font-bold transition cursor-pointer active:scale-95"
-          >
-            {t('filemanager.start')}
-          </button>
-        </div>
       </div>
     </div>
   );
-};
+}

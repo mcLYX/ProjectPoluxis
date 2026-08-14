@@ -1,3 +1,5 @@
+export type BeatmapSource = 'builtin' | 'online' | 'local';
+
 export interface DifficultyEntry {
   name: string;
   level: number;
@@ -16,6 +18,7 @@ export interface SongItem {
   audio: string;
   basePath: string;
   difficulties: DifficultyEntry[];
+  source?: BeatmapSource;
 }
 
 export interface AlbumItem {
@@ -26,10 +29,18 @@ export interface AlbumItem {
   cover: string;
   accentColor?: string;
   basePath: string;
-  songs: SongItem[];
+  // Recursive folder: an album may contain nested albums AND songs (mixed),
+  // and may be empty.
+  songs: BeatmapItem[];
+  source?: BeatmapSource;
 }
 
 export type BeatmapItem = AlbumItem | SongItem;
+
+/** 类型守卫：在混合树中筛选/收窄到歌曲节点。 */
+export function isSongItem(item: BeatmapItem): item is SongItem {
+  return item.type === 'song';
+}
 
 export interface BeatmapsManifest {
   version: number;
