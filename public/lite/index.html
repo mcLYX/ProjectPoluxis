@@ -1897,7 +1897,7 @@ if (!Object.assign) {
    * scaleTarget = per-judgment growth factor (1.2/1.1/1.05/1.0) from JUDGE_SCALE.
    * Animation: size = baseSize * (1 + (scaleTarget-1) * sin(p*π/2)), 300ms, linear fade.
    * Mirrors GameCanvas.tsx L1338-1343 exactly. */
-  function spawnBurst(wx, wy, jType, nt) {
+  function spawnBurst(wx, wy, jType, nt, angle) {
     var p = project(wx, wy, 0, -1000);
     if (!p) return;
     var kind = nt || 'tap';
@@ -1919,7 +1919,8 @@ if (!Object.assign) {
     game.bursts.push({
       x: p.x, y: p.y, start: now(), dur: 300,
       color: JUDGE_COLORS[jType], kind: kind, baseSize: baseSize,
-      scaleTarget: JUDGE_SCALE[jType] || 1.0
+      scaleTarget: JUDGE_SCALE[jType] || 1.0,
+      angle: (typeof angle === 'number') ? angle : 0
     });
   }
   /* Draw active bursts. Shape varies by note type:
@@ -1943,6 +1944,9 @@ if (!Object.assign) {
       ctx.strokeStyle = b.color;
       ctx.lineWidth = 3;
       ctx.translate(b.x, b.y);
+      /* Rotate the burst outline to match the note's direction (angle in degrees,
+       * +angle = clockwise, consistent with the note visuals and full version). */
+      if (b.angle) ctx.rotate(b.angle * Math.PI / 180);
       if (b.kind === 'touch') {
         ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
       } else if (b.kind === 'slide') {
@@ -1960,7 +1964,7 @@ if (!Object.assign) {
     game.bursts = kept;
   }
 
-  function commitJudge(id, j, dt, wx, wy, nt) {
+  function commitJudge(id, j, dt, wx, wy, nt, angle) {
     if (game.judged[id]) return;
     game.judged[id] = true; game.judgedCount++;
     var sc = calculateNoteScore(j, game.totalNotes);
@@ -1971,7 +1975,7 @@ if (!Object.assign) {
       comboBursts.push({ value: game.combo, start: now(), dur: 600 });
     }
     if (typeof wx === 'number' && typeof wy === 'number' && nt) {
-      spawnBurst(wx, wy, j, nt);
+      spawnBurst(wx, wy, j, nt, angle);
     }
     addTimingMarker(j, dt);
     return sc;
@@ -2124,17 +2128,22 @@ if (!Object.assign) {
     ctx.globalAlpha = po;
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
+    /* Rotate the projection guide to match the note's direction (angle in
+     * degrees, +angle = clockwise) so the player can read the orientation
+     * before the note falls. */
+    ctx.translate(p.x, p.y);
+    if (note.angle) ctx.rotate(note.angle * Math.PI / 180);
     if (note.type === 'tap') {
       var sz = TAP_SIZE * view.pxPerUnit * p.scale * vScale;
-      ctx.strokeRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
+      ctx.strokeRect(-sz / 2, -sz / 2, sz, sz);
     } else if (note.type === 'touch') {
       var r = (TOUCH_SIZE / 2) * view.pxPerUnit * p.scale * vScale;
-      ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.92, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.92, 0, Math.PI * 2); ctx.stroke();
     } else {
       var half = SLIDE_HALF * view.pxPerUnit * p.scale * vScale;
       ctx.beginPath();
-      ctx.moveTo(p.x, p.y - half); ctx.lineTo(p.x + half, p.y);
-      ctx.lineTo(p.x, p.y + half); ctx.lineTo(p.x - half, p.y); ctx.closePath();
+      ctx.moveTo(0, -half); ctx.lineTo(half, 0);
+      ctx.lineTo(0, half); ctx.lineTo(-half, 0); ctx.closePath();
       ctx.stroke();
     }
     ctx.restore();
@@ -2324,7 +2333,7 @@ if (!Object.assign) {
           var np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
           if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj, angle: allNodes[nj].angle });
           /* Projection guide for slide head only (children inherit head's path). */
-          if (nj === 0) drawProjection({ type: 'slide', timeSec: allNodes[nj].timeSec, x: allNodes[nj].x, y: allNodes[nj].y }, nc, vScale, curTime);
+          if (nj === 0) drawProjection({ type: 'slide', timeSec: allNodes[nj].timeSec, x: allNodes[nj].x, y: allNodes[nj].y, angle: allNodes[nj].angle }, nc, vScale, curTime);
         }
       } else {
         /* tap / touch */
@@ -2575,7 +2584,7 @@ if (!Object.assign) {
       var dtI = (curTime - allNodes[i].timeSec) * 1000;
       if (dtI > HIT_WINDOW_MS) {
         ns.judged = true; ns.redWarn = false;
-        commitJudge(note.id + '#' + i, 'Miss', dtI, allNodes[i].x, allNodes[i].y, 'slide');
+        commitJudge(note.id + '#' + i, 'Miss', dtI, allNodes[i].x, allNodes[i].y, 'slide', allNodes[i].angle);
       }
     }
 
@@ -2630,7 +2639,7 @@ if (!Object.assign) {
         cns.judged = true;
         commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
         audio.playHitSound('slide');
-        spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
+        spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
       }
       cns.redWarn = false;
       return;
@@ -2715,7 +2724,7 @@ if (!Object.assign) {
           cns.judged = true;
           for (var bi2 = 0; bi2 < onNodePids.length; bi2++) rt.boundPointerIds[onNodePids[bi2]] = true;
           commitJudge(note.id + '#' + nextIdx, j2, dt);
-          audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide');
+          audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide', cnd.angle);
         }
       }
     }
@@ -2744,7 +2753,7 @@ if (!Object.assign) {
     if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && inside) track.lastInsideTime = curTime;
     if (game.autoPlay && dt >= 0) {
       commitJudge(note.id, 'S-Perfect', dt);
-      audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch');
+      audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch', note.angle);
       return;
     }
     if (dt >= 0) {
@@ -2752,19 +2761,19 @@ if (!Object.assign) {
         track.arrivalChecked = true;
         if (inside) {
           commitJudge(note.id, 'S-Perfect', dt);
-          audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch'); return;
+          audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch', note.angle); return;
         }
         if (track.lastInsideTime !== null) {
           var earlyDt = (track.lastInsideTime - note.timeSec) * 1000;
           var j = evaluateJudgement(earlyDt);
-          if (j) { commitJudge(note.id, j, earlyDt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j, 'touch'); return; }
+          if (j) { commitJudge(note.id, j, earlyDt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j, 'touch', note.angle); return; }
         }
       }
       if (inside && dt <= HIT_WINDOW_MS) {
         var j2 = evaluateJudgement(dt);
-        if (j2) { commitJudge(note.id, j2, dt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j2, 'touch'); return; }
+        if (j2) { commitJudge(note.id, j2, dt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j2, 'touch', note.angle); return; }
       }
-      if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x, note.y, 'touch');
+      if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x, note.y, 'touch', note.angle);
     }
   }
 
@@ -2809,11 +2818,11 @@ if (!Object.assign) {
       } else {
         /* tap: only miss detection here; hits via findHitTapNote on pointerdown */
         if (!game.autoPlay && !game.judged[n.id] && curTime > n.timeSec + HIT_WINDOW_MS / 1000) {
-          commitJudge(n.id, 'Miss', 0, n.x, n.y, 'tap');
+          commitJudge(n.id, 'Miss', 0, n.x, n.y, 'tap', n.angle);
         } else if (game.autoPlay && !game.judged[n.id] && curTime >= n.timeSec) {
           var dt = (curTime - n.timeSec) * 1000;
           commitJudge(n.id, 'S-Perfect', dt);
-          audio.playHitSound('tap'); spawnBurst(n.x, n.y, 'S-Perfect', 'tap');
+          audio.playHitSound('tap'); spawnBurst(n.x, n.y, 'S-Perfect', 'tap', n.angle);
         }
       }
     }
@@ -2836,7 +2845,7 @@ if (!Object.assign) {
     var j = evaluateJudgement(dtMs);
     if (!j) return; /* outside judgement window → leave for per-frame miss detection (matches full version) */
     commitJudge(n.id, j, dtMs);
-    audio.playHitSound('tap'); spawnBurst(n.x, n.y, j, 'tap');
+    audio.playHitSound('tap'); spawnBurst(n.x, n.y, j, 'tap', n.angle);
   }
   function handleMoveInput(sx, sy, pid, type) {
     if (game.state !== STATE.PLAYING) return;

@@ -1282,10 +1282,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     return g;
   };
 
-  const spawnBurst = (x: number, y: number, j: JudgementType, nt: NoteType, noteColorHex?: string, z: number = JUDGE_Z + 0.05) => {
+  const spawnBurst = (x: number, y: number, j: JudgementType, nt: NoteType, noteColorHex?: string, z: number = JUDGE_Z + 0.05, angle: number = 0) => {
     if (!sceneRef.current) return;
     const scene = sceneRef.current;
     const cfg = JUDGEMENT_COLORS[j]; const g = new THREE.Group(); g.position.set(x, y, JUDGE_Z + 0.05);
+    // Rotate the burst outline to match the note's own angle (so directional
+    // notes leave a directionally-oriented hit effect). Same convention as the
+    // note visuals: negate because Three's +rotation.z is counterclockwise.
+    g.rotation.z = -(angle ?? 0);
     const col = new THREE.Color(cfg.hex);
     // Burst geometry is shared — bursts spawn on every hit, so reusing the
     // shared outline geo (instead of allocating + disposing per burst) removes
@@ -1401,7 +1405,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // particles just in front of the note mesh to avoid z-fighting.
     const hitSpeed = 36 * speedRef.current;
     const noteZ = JUDGE_Z + (dtMs / 1000) * hitSpeed + 0.05;
-    spawnBurst(note.x, note.y, j, note.type, noteColor, noteZ);
+    spawnBurst(note.x, note.y, j, note.type, noteColor, noteZ, note.angle ?? 0);
     onJudgementRef.current?.({ id: note.id, type: j, x: note.x, y: note.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: note.type });
   };
 
@@ -1417,7 +1421,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // Spawn at the slide node's actual z position (see commitJudgement).
     const hitSpeed = 36 * speedRef.current;
     const noteZ = JUDGE_Z + (dtMs / 1000) * hitSpeed + 0.05;
-    spawnBurst(nx, ny, j, 'slide', noteColor, noteZ);
+    const nodeAngle = idx === 0 ? (slide.angle ?? 0) : (slide.resolvedNodes?.[idx - 1]?.angle ?? 0);
+    spawnBurst(nx, ny, j, 'slide', noteColor, noteZ, nodeAngle);
     onJudgementRef.current?.({ id: key, type: j, x: nx, y: ny, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: 'slide' });
   };
 
