@@ -27,8 +27,10 @@ import {
   RefreshCw,
   AlertTriangle,
   CheckCircle,
+  Wand2,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { lintDsl } from '../utils/editorRules';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
 
@@ -88,6 +90,9 @@ interface VisualChartEditorProps {
   viewMode: '3d' | '2d';
   onSetViewMode: (mode: '3d' | '2d') => void;
   onApplyQuickCreateDelta?: (delta: QuickCreateDelta) => void;
+  /** 编辑器“高级功能”放置规则 DSL（仅本地配置，不写入谱面）。 */
+  editorDsl: string;
+  onEditorDslChange: (dsl: string) => void;
 }
 
 /** Numeric field that allows an EMPTY state (commits `null` on empty). The
@@ -103,7 +108,7 @@ function NumField({
   placeholder,
   className,
 }: {
-  value: number;
+  value: number | undefined | null;
   onCommit: (v: number | null) => void;
   step?: number | string;
   min?: number;
@@ -111,11 +116,11 @@ function NumField({
   placeholder?: string;
   className?: string;
 }) {
-  const [text, setText] = useState(value === 0 ? '' : String(value));
+  const [text, setText] = useState(value == null || value === 0 ? '' : String(value));
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (ref.current && document.activeElement !== ref.current) {
-      setText(value === 0 ? '' : String(value));
+      setText(value == null || value === 0 ? '' : String(value));
     }
   }, [value]);
   return (
@@ -252,6 +257,8 @@ function AngleEasingRow({
   );
 }
 
+
+
 export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   chart,
   currentBeat,
@@ -281,9 +288,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   viewMode,
   onSetViewMode,
   onApplyQuickCreateDelta: _onApplyQuickCreateDelta,
+  editorDsl,
+  onEditorDslChange,
 }) => {
   const { t, lang } = useI18n();
   const beatUnit = lang === 'en' ? 'beat' : '拍';
+  const ruleErrors = lintDsl(editorDsl);
   // onApplyQuickCreateDelta is wired up from the parent so GameCanvas can
   // push its batch-note payloads through the same prop surface even though
   // the overlay component itself never fires it. Silence "unused variable".
@@ -306,6 +316,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     tools: true,
     playtest: true,
     events: false,
+    rules: false,
     metadata: true,
     timing: false,
     batch: false,
@@ -768,25 +779,25 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     switch (tool) {
       case 'select':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.select')}>
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.select') + ' (R)'}>
             <Move size={16} />
           </button>
         );
       case 'place-tap':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeTap')}>
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeTap') + ' (Q)'}>
             <span className="w-3.5 h-3.5 border-2 border-cyan-300 block" />
           </button>
         );
       case 'place-touch':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeTouch')}>
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeTouch') + ' (W)'}>
             <span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" />
           </button>
         );
       case 'place-slide':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeSlide')}>
+          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.placeSlide') + ' (E)'}>
             <span className="w-3 h-3 border-2 border-cyan-300 block rotate-45" />
           </button>
         );
@@ -921,13 +932,13 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {sectionOpen.tools && (
                 <div className="p-3 space-y-1.5 border-t border-white/10">
                   <div className="grid grid-cols-2 gap-1.5">
-                    <button onClick={() => onSetActiveTool('select')} className={toolBtnCls('select')}><Move size={14} /><span>{t('editor.select')}</span></button>
+                    <button onClick={() => onSetActiveTool('select')} className={toolBtnCls('select')} title={t('editor.select') + ' (R)'}><Move size={14} /><span>{t('editor.select')}</span></button>
                     {viewMode !== '2d' && (
                       <button onClick={() => onSetActiveTool('quick-create')} className={toolBtnCls('quick-create')}><Zap size={14} /><span>{t('editor.quickCreate')}</span></button>
                     )}
-                    <button onClick={() => onSetActiveTool('place-tap')} className={toolBtnCls('place-tap')}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block" /><span>{t('editor.placeTap')}</span></button>
-                    <button onClick={() => onSetActiveTool('place-touch')} className={toolBtnCls('place-touch')}><span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" /><span>{t('editor.placeTouch')}</span></button>
-                    <button onClick={() => onSetActiveTool('place-slide')} className={toolBtnCls('place-slide')}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block rotate-45" /><span>{t('editor.placeSlide')}</span></button>
+                    <button onClick={() => onSetActiveTool('place-tap')} className={toolBtnCls('place-tap')} title={t('editor.placeTap') + ' (Q)'}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block" /><span>{t('editor.placeTap')}</span></button>
+                    <button onClick={() => onSetActiveTool('place-touch')} className={toolBtnCls('place-touch')} title={t('editor.placeTouch') + ' (W)'}><span className="w-3.5 h-3.5 rounded-full border-2 border-sky-300 block" /><span>{t('editor.placeTouch')}</span></button>
+                    <button onClick={() => onSetActiveTool('place-slide')} className={toolBtnCls('place-slide')} title={t('editor.placeSlide') + ' (E)'}><span className="w-3.5 h-3.5 border-2 border-cyan-300 block rotate-45" /><span>{t('editor.placeSlide')}</span></button>
                   </div>
                   {viewMode === '2d' ? (
                     <p className="text-[10px] text-white/50">
@@ -1030,6 +1041,38 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               )}
             </div>
 
+            {/* === 高级功能：放置规则 === */}
+            <div className={sectionClass}>
+              <button onClick={() => toggleSection('rules')} className={sectionHeaderClass}>
+                <span className="flex items-center gap-1.5"><Wand2 size={12} /> {t('editor.rules')}</span>
+                <span className="text-cyan-300/80">{sectionOpen.rules ? '−' : '+'}</span>
+              </button>
+              {sectionOpen.rules && (
+                <div className="p-3 space-y-2 border-t border-white/10">
+                  <p className="text-[10px] text-white/50">{t('editor.rulesHint')}</p>
+                  <textarea
+                    value={editorDsl}
+                    onChange={(e) => onEditorDslChange(e.target.value)}
+                    spellCheck={false}
+                    rows={8}
+                    wrap="off"
+                    className="w-full glass-input border border-white/12 rounded px-2 py-1.5 text-[11px] font-mono text-cyan-100 leading-relaxed resize-y whitespace-pre overflow-x-auto"
+                    placeholder={'beat % 0.5 == 0 : color = "#ff0000"'}
+                  />
+                  {ruleErrors.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[10px] text-red-300/90">{t('editor.rulesErrors')}</div>
+                      {ruleErrors.map((err) => (
+                        <div key={err.line} className="text-[10px] text-red-300/80 font-mono">
+                          {t('editor.rulesLineError', { n: err.line, msg: err.message })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className={sectionClass}>
               <button onClick={() => toggleSection('metadata')} className={sectionHeaderClass}>
                 <span>{t('editor.metadata')}</span>
@@ -1037,9 +1080,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               </button>
               {sectionOpen.metadata && (
                 <div className="p-3 space-y-2 border-t border-white/10">
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fTitle')}</label><input type="text" value={chart.metadata.title} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, title: e.target.value || 'Untitled' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fArtist')}</label><input type="text" value={chart.metadata.artist} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, artist: e.target.value || 'Unknown' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
-                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fDifficulty')}</label><input type="text" value={chart.metadata.difficulty} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, difficulty: e.target.value || 'Custom' } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fTitle')}</label><input type="text" value={chart.metadata.title} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, title: e.target.value } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fArtist')}</label><input type="text" value={chart.metadata.artist} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, artist: e.target.value } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
+                  <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fDifficulty')}</label><input type="text" value={chart.metadata.difficulty} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, difficulty: e.target.value } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
                   <div><label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fCover')}</label><input type="text" value={chart.metadata.jacket || ''} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, jacket: e.target.value || undefined } })} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200" /></div>
                   <div className="grid grid-cols-2 gap-2">
                     <label className="text-[10px] text-white/50">{t('editor.fNoteColor')}<input type="color" value={chart.metadata.noteColor || '#00f0ff'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, noteColor: e.target.value } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
@@ -1062,8 +1105,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {sectionOpen.timing && (
                 <div className="p-3 border-t border-white/10 space-y-3">
                   <div className="grid grid-cols-2 gap-2">
-                    <div><label className="text-[10px] text-white/50">{t('editor.bpmBase')}</label><input type="number" min="30" max="400" step="1" value={chart.metadata.bpm} onChange={(e) => handleUpdateMeta('bpm', parseFloat(e.target.value) || 120)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
-                    <div><label className="text-[10px] text-white/50">{t('editor.offsetSec')}</label><input type="number" step="0.01" value={chart.metadata.offset} onChange={(e) => handleUpdateMeta('offset', parseFloat(e.target.value) || 0)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
+                    <div><label className="text-[10px] text-white/50">{t('editor.bpmBase')}</label><NumField value={chart.metadata.bpm} placeholder="120" min={30} max={400} step={1} onCommit={(v) => handleUpdateMeta('bpm', v ?? 0)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
+                    <div><label className="text-[10px] text-white/50">{t('editor.offsetSec')}</label><NumField value={chart.metadata.offset} placeholder="0" step="0.01" onCommit={(v) => handleUpdateMeta('offset', v ?? 0)} className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 font-mono" /></div>
                   </div>
                   <div className="border-t border-white/10 pt-2">
                     <div className="flex items-center justify-between mb-2">
@@ -1082,17 +1125,19 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                       <div className="space-y-1.5 max-h-40 overflow-y-auto">
                         {getBpmList().map((p, idx) => (
                           <div key={idx} className="flex items-center gap-1.5 text-[11px]">
-                            <input
-                              type="number" step={snapSubdivision} min="0.01"
+                            <NumField
                               value={p.beat}
-                              onChange={(e) => handleUpdateBpmPoint(idx, { beat: parseFloat(e.target.value) || 0.01 })}
+                              placeholder="0.01"
+                              step={snapSubdivision} min={0.01}
+                              onCommit={(v) => handleUpdateBpmPoint(idx, { beat: v ?? 0 })}
                               className="w-16 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-200 font-mono"
                             />
                             <span className="text-white/40">拍 →</span>
-                            <input
-                              type="number" min="30" max="400" step="1"
+                            <NumField
                               value={p.bpm}
-                              onChange={(e) => handleUpdateBpmPoint(idx, { bpm: parseFloat(e.target.value) || 120 })}
+                              placeholder="120"
+                              min={30} max={400} step={1}
+                              onCommit={(v) => handleUpdateBpmPoint(idx, { bpm: v ?? 0 })}
                               className="w-16 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-200 font-mono"
                             />
                             <span className="text-white/40">BPM</span>
@@ -1560,7 +1605,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
           className={`text-[10px] font-mono ${color.text} flex-1 text-left truncate`}
           title={t('editor.jumpToBeat')}
         >
-          B{event.beat.toFixed(2)} · {typeLabel[event.eventType]}
+          B{(event.beat ?? 0).toFixed(2)} · {typeLabel[event.eventType]}
         </button>
         <button
           onClick={onDelete}
@@ -1574,24 +1619,24 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
         <div className="px-2 pb-2 space-y-1.5 border-t border-white/10">
           <div>
             <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldBeat')}</label>
-            <input
-              type="number"
-              step="0.25"
+            <NumField
               value={event.beat}
-              onChange={(e) => onUpdate({ beat: parseFloat(e.target.value) || 0 })}
+              placeholder="0"
+              step="0.25"
+              onCommit={(v) => onUpdate({ beat: v ?? 0 })}
               className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
             />
           </div>
           {event.eventType === 'speed_change' && (
             <div>
               <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldSpeed')}</label>
-              <input
-                type="number"
+              <NumField
+                value={event.speed}
+                placeholder="1"
                 step="any"
-                min="0.1"
-                max="5"
-                value={event.speed ?? 1}
-                onChange={(e) => onUpdate({ speed: parseFloat(e.target.value) || 1 })}
+                min={0.1}
+                max={5}
+                onCommit={(v) => onUpdate({ speed: v ?? undefined })}
                 className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
               />
             </div>
@@ -1609,33 +1654,33 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
               </div>
               <div>
                 <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldDuration')}</label>
-                <input
-                  type="number"
+                <NumField
+                  value={event.textDuration}
+                  placeholder="2"
                   step="0.5"
-                  min="0"
-                  value={event.textDuration ?? 2}
-                  onChange={(e) => onUpdate({ textDuration: parseFloat(e.target.value) || 0 })}
+                  min={0}
+                  onCommit={(v) => onUpdate({ textDuration: v ?? undefined })}
                   className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldX')}</label>
-                  <input
-                    type="number"
+                  <NumField
+                    value={event.x}
+                    placeholder="0"
                     step="any"
-                    value={event.x ?? 0}
-                    onChange={(e) => onUpdate({ x: parseFloat(e.target.value) || 0 })}
+                    onCommit={(v) => onUpdate({ x: v ?? undefined })}
                     className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
                   />
                 </div>
                 <div>
                   <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldY')}</label>
-                  <input
-                    type="number"
+                  <NumField
+                    value={event.y}
+                    placeholder="-0.33"
                     step="any"
-                    value={event.y ?? -0.33}
-                    onChange={(e) => onUpdate({ y: parseFloat(e.target.value) || 0 })}
+                    onCommit={(v) => onUpdate({ y: v ?? undefined })}
                     className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
                   />
                 </div>
@@ -1643,13 +1688,13 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldFontSize')}</label>
-                  <input
-                    type="number"
+                  <NumField
+                    value={event.fontSize}
+                    placeholder="36"
                     step="2"
-                    min="8"
-                    max="120"
-                    value={event.fontSize ?? 36}
-                    onChange={(e) => onUpdate({ fontSize: parseFloat(e.target.value) || 36 })}
+                    min={8}
+                    max={120}
+                    onCommit={(v) => onUpdate({ fontSize: v ?? undefined })}
                     className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
                   />
                 </div>

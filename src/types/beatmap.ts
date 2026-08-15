@@ -2,7 +2,8 @@ export type BeatmapSource = 'builtin' | 'online' | 'local';
 
 export interface DifficultyEntry {
   name: string;
-  level: number;
+  /** 可选：谱面未显式标注难度等级时不传，UI 不显示 Lv.x。 */
+  level?: number;
   chartFile: string;
   noteCount?: number;
 }

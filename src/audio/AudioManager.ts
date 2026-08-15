@@ -57,6 +57,8 @@ export class AudioManager {
   private hasUploadedAudio: boolean = false;
   /** True = explicitly told to use synth (demo tracks) */
   private forceSynth: boolean = false;
+  /** 单调递增的加载令牌，用于丢弃过期的音频加载结果（避免切到合成器后旧缓冲仍被应用） */
+  private loadToken: number = 0;
 
   /** Hit sound buffers keyed by note type — tap/touch/slide.ogg are loaded
    *  from /sounds/ (build-packaged) in loadBuiltinSounds() during init().
@@ -355,10 +357,13 @@ export class AudioManager {
   }
 
   /** Load an uploaded audio file. Clears forceSynth flag so play() uses the buffer. */
-  public async loadAudioFile(file: File): Promise<AudioBuffer> {
+  public async loadAudioFile(file: File): Promise<void> {
     this.init();
     if (!this.ctx) throw new Error('AudioContext failed to initialize');
+    const token = ++this.loadToken;
     const arrayBuffer = await file.arrayBuffer();
+    // 若期间已切换到其它音频或合成器曲目，丢弃本次结果，避免旧缓冲覆盖新曲目
+    if (token !== this.loadToken) return;
     let audioBuffer: AudioBuffer;
     try {
       audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
@@ -369,22 +374,25 @@ export class AudioManager {
       const hint = isOgg
         ? ' (Safari 不支持 OGG 格式，请改用 MP3 / M4A)'
         : ' (格式可能不被当前浏览器支持)';
-      throw new Error(`无法解码音频文件「${file.name}」${hint}`);
+      throw new Error('无法解码音频文件「' + file.name + '」' + hint);
     }
+    if (token !== this.loadToken) return;
     this.bgmBuffer = audioBuffer;
     this.hasUploadedAudio = true;
     this.forceSynth = false;
-    return audioBuffer;
   }
 
-  /** Load audio from a URL (e.g. /beatmaps/...mp3). Returns the decoded buffer.
-   *  Sets it as the active BGM buffer if `setActive` is true. */
-  public async loadAudioURL(url: string, setActive = true): Promise<AudioBuffer> {
+  /** Load audio from a URL (e.g. /beatmaps/...mp3). Sets it as the active BGM
+   *  buffer if `setActive` is true. */
+  public async loadAudioURL(url: string, setActive = true): Promise<void> {
     this.init();
     if (!this.ctx) throw new Error('AudioContext failed to initialize');
+    const token = ++this.loadToken;
     const res = await fetch(url);
+    if (token !== this.loadToken) return;
     if (!res.ok) throw new Error(`HTTP ${res.status} loading ${url}`);
     const arrayBuffer = await res.arrayBuffer();
+    if (token !== this.loadToken) return;
     let audioBuffer: AudioBuffer;
     try {
       audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
@@ -395,17 +403,22 @@ export class AudioManager {
         : ' (格式可能不被当前浏览器支持)';
       throw new Error(`无法解码音频: ${url}${hint}`);
     }
+    if (token !== this.loadToken) return;
     if (setActive) {
       this.bgmBuffer = audioBuffer;
       this.hasUploadedAudio = true;
       this.forceSynth = false;
     }
-    return audioBuffer;
   }
 
   /** Mark this session as using the procedural synth (demo tracks). */
   public setSynthesizedTrack(bpm: number) {
     this.init();
+    // 取消任何进行中的音频加载，并清掉可能过期的旧缓冲，
+    // 避免切到合成器曲目后仍播放上一首曲目的音频。
+    this.loadToken++;
+    this.hasUploadedAudio = false;
+    this.bgmBuffer = null;
     this.forceSynth = true;
     this.synthBpm = bpm;
   }

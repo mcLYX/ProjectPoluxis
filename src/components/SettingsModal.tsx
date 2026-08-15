@@ -166,7 +166,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <input
               type="range"
-              min="0.5"
+              min="0.25"
               max="2"
               step="0.05"
               value={customRenderScale}

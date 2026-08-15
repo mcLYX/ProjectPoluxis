@@ -66,7 +66,7 @@ export function EditorPanel({ selection, library, onChanged, onSelect, onPlay, o
     } else if (selection?.kind === 'diff' && diff) {
       setDraft({
         name: diff.name,
-        level: String(diff.level),
+        level: diff.level != null ? String(diff.level) : '',
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -97,7 +97,7 @@ export function EditorPanel({ selection, library, onChanged, onSelect, onPlay, o
     } else if (selection.kind === 'diff' && diff) {
       await updateDifficulty(album.id, song!.id, selection.index, {
         name: draft.name.trim() || 'NORMAL',
-        level: Number(draft.level) || 1,
+        level: draft.level.trim() ? Number(draft.level) : undefined,
       });
     }
     onMessage(t('filemgr.saved'));
@@ -115,7 +115,7 @@ export function EditorPanel({ selection, library, onChanged, onSelect, onPlay, o
       await updateDifficulty(album.id, song!.id, selection.index, {
         chartFile: ref,
         name: meta?.difficulty ?? draft.name,
-        level: meta?.level ?? (Number(draft.level) || 1),
+        level: meta?.level ?? (draft.level.trim() ? Number(draft.level) : undefined),
         noteCount: meta?.noteCount,
       });
       onMessage(t('filemgr.chartUpdated'));
@@ -298,7 +298,7 @@ export function EditorPanel({ selection, library, onChanged, onSelect, onPlay, o
                 >
                   <div className="text-sm text-[#e5f6ff]">{d.name}</div>
                   <div className="text-[11px] text-[#6b7f93]">
-                    Lv.{d.level} · {d.noteCount ?? 0} notes
+                    {d.level != null && <>Lv.{d.level} · </>}{d.noteCount ?? 0} notes
                   </div>
                 </button>
                 <button

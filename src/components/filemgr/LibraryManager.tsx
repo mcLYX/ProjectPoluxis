@@ -188,7 +188,7 @@ export function LibraryManager({ onMessage, onSelectCustomSong }: Props) {
                           }
                         >
                           <span className="text-[12px] text-[#cfe6f5] truncate">
-                            {d.name} <span className="text-[#6b7f93]">Lv.{d.level}</span>
+                            {d.name} {d.level != null && <span className="text-[#6b7f93]">Lv.{d.level}</span>}
                           </span>
                         </div>
                       ))}

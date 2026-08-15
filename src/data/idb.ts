@@ -107,8 +107,13 @@ export async function storeFile(file: Blob): Promise<string> {
 // ---- Content-hash dedup index ----
 // Maps a SHA-256 of file bytes to an existing idb:// reference so identical
 // files (e.g. the same audio reused across songs, or re-imports) are stored once.
-async function sha256Hex(data: ArrayBuffer): Promise<string> {
-  const buf = await crypto.subtle.digest('SHA-256', data);
+async function sha256Hex(data: ArrayBuffer): Promise<string | null> {
+  // Web Crypto 的 crypto.subtle 仅在安全上下文（HTTPS / localhost）可用；
+  // 在 HTTP 下（如 iOS Safari 通过 IP 访问）crypto.subtle 为 undefined，
+  // 此时返回 null，由调用方退化为“不去重”的普通存储，避免崩溃。
+  const c = globalThis.crypto as Crypto | undefined;
+  if (!c || !c.subtle) return null;
+  const buf = await c.subtle.digest('SHA-256', data);
   return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
@@ -136,13 +141,20 @@ async function putHashRef(hash: string, ref: string): Promise<void> {
 
 /** Store a blob, reusing an existing idb:// ref if identical content was stored before. */
 export async function storeFileDedup(file: Blob): Promise<string> {
-  const buf = await file.arrayBuffer();
-  const hash = await sha256Hex(buf);
-  const existing = await getHashRef(hash);
-  if (existing) return existing;
-  const ref = await storeFile(new Blob([buf], { type: file.type || 'application/octet-stream' }));
-  await putHashRef(hash, ref);
-  return ref;
+  try {
+    const buf = await file.arrayBuffer();
+    const hash = await sha256Hex(buf);
+    if (hash) {
+      const existing = await getHashRef(hash);
+      if (existing) return existing;
+      const ref = await storeFile(new Blob([buf], { type: file.type || 'application/octet-stream' }));
+      await putHashRef(hash, ref);
+      return ref;
+    }
+  } catch {
+    // 哈希去重失败（如非安全上下文下 crypto.subtle 不可用）时忽略，退化为普通存储
+  }
+  return storeFile(file);
 }
 
 // ---- Library (local album list) ----

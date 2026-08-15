@@ -18,18 +18,21 @@ import {
   onLibraryChanged,
   createAlbum,
   addSong,
+  addSongToRoot,
   updateAlbum,
   updateSong,
+  updateSongById,
   deleteAlbum,
   deleteSong,
-  addDifficulty,
+  deleteSongById,
+  addDifficultyToSong,
   moveSong,
   moveAlbum,
   downloadSongToLibrary,
   getSongParentAlbumId,
 } from '../data/libraryStore';
 import { storeFile, generateId } from '../data/idb';
-import { importZip, importLooseFiles, parseChartMeta } from '../data/zipImport';
+import { importZip, importLooseFiles, parseChartMeta, resolveDifficulty } from '../data/zipImport';
 import { onServersChanged } from '../data/onlineServers';
 import { globalAudio } from '../audio/AudioManager';
 import { useI18n } from '../i18n';
@@ -84,7 +87,7 @@ interface SongSelectProps {
   /** 由卡片发起“编辑谱面/新建谱面”，携带上下文信息。 */
   onLaunchChartEditor: (info: EditorLaunchInfo) => void;
   onSwitchLite: () => void;
-  onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, diffName: string) => void;
+  onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, scoreKey: string, diffName: string) => void;
   onStateChange?: (state: SongSelectNavState) => void;
 }
 
@@ -455,7 +458,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       }
       // scoreKey 按来源加命名空间，避免同一在线曲目下载前后的成绩互通。
       const scoreKey = getScoreKey(song.id, song.source);
-      onStartGame(chart, hasAudio, scoreKey, diff.name);
+      onStartGame(chart, hasAudio, song.id, scoreKey, diff.name);
     } catch (e) {
       console.error('Failed to start game:', e);
       setLoadingSongId(null);
@@ -533,14 +536,14 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         const it = expandedItem;
         const file = files[0];
         if (kind === 'audio' && it.type === 'song') {
+          // 按 id 整树定位（含库根独立曲目，其无父专辑 id）。
           const ref = await storeFile(file);
-          const albumId = await getSongParentAlbumId(it.id);
-          if (albumId) await updateSong(albumId, it.id, { audio: ref });
+          await updateSongById(it.id, { audio: ref });
         } else if (kind === 'cover') {
           const ref = await storeFile(file);
           if (it.type === 'song') {
-            const albumId = await getSongParentAlbumId(it.id);
-            if (albumId) await updateSong(albumId, it.id, { cover: ref });
+            // 按 id 整树定位（含库根独立曲目）。
+            await updateSongById(it.id, { cover: ref });
           } else {
             await updateAlbum(it.id, { cover: ref });
           }
@@ -548,10 +551,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           const text = await file.text();
           const meta = parseChartMeta(text);
           const ref = await storeFile(file);
-          const name = meta && meta.difficulty != null ? String(meta.difficulty) : 'NORMAL';
-          const level = meta && typeof meta.difficulty === 'number' ? meta.difficulty : 1;
-          const albumId = await getSongParentAlbumId(it.id);
-          if (albumId) await addDifficulty(albumId, it.id, { name, level, chartFile: ref, noteCount: meta?.noteCount });
+          const d = resolveDifficulty(meta?.difficulty);
+          // 按 id 整树定位（含库根独立曲目），不再依赖父专辑 id。
+          await addDifficultyToSong(it.id, { name: d.name, level: d.level, chartFile: ref, noteCount: meta?.noteCount });
         }
         showToast(t('fab.saved'));
       }
@@ -581,9 +583,8 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       if (currentAlbumId) {
         await addSong(currentAlbumId, song);
       } else {
-        await createAlbum({
-          title: name, artist: '', cover: '', accentColor: DEFAULT_ACCENT, basePath: '', songs: [song],
-        });
+        // 根目录直接创建为独立曲目，而不是用同名专辑包裹曲目
+        await addSongToRoot(song);
       }
       showToast(t('fab.created'));
     } catch (err) { console.error(err); }
@@ -683,6 +684,14 @@ export const SongSelect: React.FC<SongSelectProps> = ({
             accentColor: editDraft.accentColor || undefined,
             difficulties: editDraft.difficulties,
           });
+        else
+          await updateSongById(it.id, {
+            title: editDraft.title,
+            artist: editDraft.artist,
+            bpm: Number(editDraft.bpm) || 120,
+            accentColor: editDraft.accentColor || undefined,
+            difficulties: editDraft.difficulties,
+          });
       }
       showToast(t('fab.saved'));
     } catch (err) { console.error(err); }
@@ -710,6 +719,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         // 同理：优先以当前视图专辑定位父专辑，避免删除/改错同名副本。
         const albumId = currentAlbumId ?? (await getSongParentAlbumId(it.id));
         if (albumId) await deleteSong(albumId, it.id);
+        else await deleteSongById(it.id); // 库根独立曲目（无父专辑）按 id 删除
       }
       setClipboard((c) => (c && c.id === it.id ? null : c));
       showToast(t('fab.deleted'));
@@ -838,7 +848,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
                 title={t('songselect.backToParent')}
                 className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shrink-0"
               >
-                <ArrowLeft size={14} /> {t('songcard.back')}
+                <ArrowLeft size={14} />
               </button>
               <button
                 onClick={handleHome}
@@ -930,15 +940,16 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           // don't have a matching item in the manifest, so we synthesize a
           // single-item list for them (the carousel stays stable because it
           // always renders a flex-list — just a different length list).
+          const customDiff = result && !result.songId ? resolveDifficulty(result.meta.difficulty) : null;
           const customResultOnly =
-            result && !result.songId
+            customDiff
               ? [{
                   type: 'song' as const,
                   id: '__custom_result__',
-                  title: result.meta.title,
-                  artist: result.meta.artist,
-                  bpm: result.meta.bpm,
-                  difficulties: [{ name: result.meta.difficulty || 'Custom', level: 0, chartFile: '' }],
+                  title: result!.meta.title,
+                  artist: result!.meta.artist,
+                  bpm: result!.meta.bpm,
+                  difficulties: [{ name: customDiff.name || 'Custom', level: customDiff.level, chartFile: '' }],
                 } as SongItem]
               : null;
 

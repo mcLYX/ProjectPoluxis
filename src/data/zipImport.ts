@@ -1,5 +1,5 @@
 import { unzip } from 'fflate';
-import type { AlbumItem, SongItem, DifficultyEntry } from '../types/beatmap';
+import type { AlbumItem, BeatmapItem, SongItem, DifficultyEntry } from '../types/beatmap';
 import { storeFileDedup, generateId } from './idb';
 
 const AUDIO_EXT = ['mp3', 'ogg', 'wav', 'm4a', 'flac', 'webm', 'aac'];
@@ -45,6 +45,27 @@ interface ChartMeta {
   difficulty?: string;
   accentColor?: string;
   noteCount?: number;
+}
+
+/**
+ * 将 metadata.difficulty 解析为纯难度名 + 等级数字：
+ *  - 字符串形如 "Hard Lv.6" → { name: 'Hard', level: 6 }
+ *  - 纯字符串 "Hard"（未显式使用 Lv.x 格式）→ { name: 'Hard' }（不解析等级，不显示 Lv.）
+ *  - 数字只作为整体难度名，不再单独解析为等级
+ *  - 空 / 未定义 → { name: 'NORMAL' }
+ * 这是修复“把整段难度数据当难度名并补上 Lv.1”的核心逻辑。
+ */
+export function resolveDifficulty(raw: unknown): { name: string; level?: number } {
+  if (typeof raw === 'number') {
+    return { name: String(raw) };
+  }
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s) return { name: 'NORMAL' };
+  const m = s.match(/\s*[Ll]v\.?\s*(\d+(?:\.\d+)?)\s*$/);
+  if (m) {
+    return { name: s.slice(0, m.index).trim() || 'NORMAL', level: Number(m[1]) };
+  }
+  return { name: s };
 }
 
 export function parseChartMeta(text: string): ChartMeta | null {
@@ -108,10 +129,10 @@ async function buildSong(group: GroupedSong, fallbackTitle: string): Promise<Son
     if (!firstMeta) firstMeta = meta;
     const file = new File([ce.data as unknown as BlobPart], 'chart.json', { type: 'application/json' });
     const ref = await storeFileDedup(file);
-    const level = typeof meta.difficulty === 'number' ? meta.difficulty : parseInt(String(meta.difficulty), 10) || 1;
+    const d = resolveDifficulty(meta.difficulty);
     difficulties.push({
-      name: meta.difficulty || extOf(ce.name) || 'NORMAL',
-      level,
+      name: d.name || extOf(ce.name) || 'NORMAL',
+      level: d.level,
       chartFile: ref,
       noteCount: meta.noteCount,
     });
@@ -160,12 +181,119 @@ export async function readChartMeta(file: File): Promise<ChartMetaLite | null> {
     const obj = JSON.parse(text);
     const meta = obj.metadata || {};
     const notes = Array.isArray(obj.notes) ? obj.notes.length : obj.noteCount ?? 0;
-    const difficulty = meta.difficulty;
-    const level = typeof difficulty === 'number' ? difficulty : parseInt(String(difficulty), 10) || 1;
-    return { difficulty: difficulty ?? 'NORMAL', level, noteCount: notes };
+    const d = resolveDifficulty(meta.difficulty);
+    return { difficulty: d.name, level: d.level, noteCount: notes };
   } catch {
     return null;
   }
+}
+
+/** 将 beatmaps.json 中的相对文件路径解析为 zip 内对应文件的 idb:// 引用。 */
+async function resolveZipFileRef(
+  raw: unknown,
+  entryMap: Map<string, ZipEntry>,
+): Promise<string> {
+  if (typeof raw !== 'string' || !raw) return '';
+  if (/^https?:\/\//.test(raw) || raw.startsWith('blob:') || raw.startsWith('idb://')) return raw;
+  const clean = raw.replace(/^\.?\//, '');
+  const entry = entryMap.get(clean) ?? entryMap.get(clean.replace(/^\/+/, ''));
+  if (!entry) return '';
+  const ext = extOf(entry.name);
+  const file = new File([entry.data as unknown as BlobPart], entry.name, { type: mimeFromExt(ext) });
+  return storeFileDedup(file);
+}
+
+/** 将 beatmaps.json 的任意结构规整为本地 BeatmapItem 树，文件引用落到 idb。 */
+async function normalizeZipManifest(raw: unknown, entryMap: Map<string, ZipEntry>): Promise<BeatmapItem[]> {
+  const asStr = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+  const normDifficulty = async (d: unknown): Promise<DifficultyEntry> => {
+    const o = (d ?? {}) as Record<string, unknown>;
+    const chartFile = await resolveZipFileRef(o.chartFile, entryMap);
+    return {
+      name: asStr(o.name) || 'Normal',
+      // level 为可选键：未提供则不显示难度等级
+      level: typeof o.level === 'number' ? (o.level as number) : undefined,
+      chartFile,
+      noteCount: typeof o.noteCount === 'number' ? (o.noteCount as number) : undefined,
+    };
+  };
+
+  const normSong = async (o: Record<string, unknown>): Promise<SongItem | null> => {
+    const id = asStr(o.id);
+    if (!id) return null;
+    const [cover, audio, difficulties] = await Promise.all([
+      resolveZipFileRef(o.cover, entryMap),
+      resolveZipFileRef(o.audio, entryMap),
+      Promise.all(
+        (Array.isArray(o.difficulties) ? (o.difficulties as unknown[]) : []).map(normDifficulty),
+      ),
+    ]);
+    return {
+      type: 'song',
+      id,
+      title: asStr(o.title) || '未命名',
+      artist: asStr(o.artist),
+      bpm: typeof o.bpm === 'number' ? (o.bpm as number) : 0,
+      cover,
+      accentColor: asStr(o.accentColor) || undefined,
+      audio,
+      basePath: '',
+      difficulties,
+    };
+  };
+
+  const normNode = async (rawNode: unknown): Promise<BeatmapItem | null> => {
+    if (!rawNode || typeof rawNode !== 'object') return null;
+    const o = rawNode as Record<string, unknown>;
+    const explicit = asStr(o.type);
+    const childrenArr = Array.isArray(o.songs) ? (o.songs as unknown[]) : [];
+    const looksLikeSong =
+      Array.isArray(o.difficulties) || typeof o.audio === 'string' || typeof o.bpm === 'number';
+    const isAlbum = explicit === 'album' || (childrenArr.length > 0 && !looksLikeSong);
+    if (explicit === 'song' || (!isAlbum && looksLikeSong)) {
+      return normSong(o);
+    }
+    const id = asStr(o.id) || asStr(o.title) || `album-${generateId('a')}`;
+    const children = (await Promise.all(childrenArr.map(normNode))).filter(
+      (n): n is BeatmapItem => n !== null,
+    );
+    const cover = await resolveZipFileRef(o.cover, entryMap);
+    return {
+      type: 'album',
+      id,
+      title: asStr(o.title) || '未命名专辑',
+      artist: asStr(o.artist),
+      cover,
+      accentColor: asStr(o.accentColor) || undefined,
+      basePath: '',
+      songs: children,
+    };
+  };
+
+  const items: BeatmapItem[] = [];
+  if (raw && typeof raw === 'object') {
+    const o = raw as Record<string, unknown>;
+    const arr = Array.isArray(o.items)
+      ? (o.items as unknown[])
+      : Array.isArray(raw)
+        ? (raw as unknown[])
+        : [];
+    const norm = await Promise.all(arr.map(normNode));
+    items.push(...(norm.filter((n): n is BeatmapItem => n !== null)));
+  }
+  return items;
+}
+
+/** 收集树中所有叶节点（歌曲），用于“导入到指定专辑”时扁平加入。 */
+function collectLeafSongs(nodes: BeatmapItem[]): SongItem[] {
+  const out: SongItem[] = [];
+  const walk = (n: BeatmapItem) => {
+    if (n.type === 'album') n.songs.forEach(walk);
+    else out.push(n);
+  };
+  nodes.forEach(walk);
+  return out;
 }
 
 export async function importZip(
@@ -184,8 +312,46 @@ export async function importZip(
   const files = await unzipAsync(buffer);
   const entries: ZipEntry[] = Object.entries(files).map(([name, data]) => ({ name, data }));
 
-  const groups = groupBySong(entries);
   const warnings: string[] = [];
+
+  // 顶层 beatmaps.json：按其中描述的树结构导入（相对路径解析为 zip 内文件的 idb:// 引用）。
+  const manifestEntry = entries.find((e) => e.name.replace(/^\/+/, '').toLowerCase() === 'beatmaps.json');
+  if (manifestEntry) {
+    try {
+      const raw = JSON.parse(new TextDecoder().decode(manifestEntry.data));
+      const entryMap = new Map(entries.map((e) => [e.name, e]));
+      const items = await normalizeZipManifest(raw, entryMap);
+      if (items.length) {
+        const leafSongs = collectLeafSongs(items);
+        const wrapperAlbum: AlbumItem = {
+          type: 'album',
+          id: generateId('album'),
+          title: file.name.replace(/\.zip$/i, '') || 'Imported Pack',
+          artist: '',
+          cover: leafSongs.find((s) => s.cover)?.cover || '',
+          accentColor: leafSongs[0]?.accentColor || '#22d3ee',
+          basePath: '',
+          songs: items,
+        };
+        return {
+          album: wrapperAlbum,
+          songs: opts?.targetAlbumId ? leafSongs : undefined,
+          songCount: leafSongs.length,
+          difficultyCount: leafSongs.reduce((n, s) => n + s.difficulties.length, 0),
+          warnings: [],
+        };
+      }
+      warnings.push(
+        `「${file.name}」beatmaps.json 为空或结构无法识别，已按文件夹结构导入`,
+      );
+    } catch {
+      warnings.push(
+        `「${file.name}」beatmaps.json 解析失败，已按文件夹结构导入`,
+      );
+    }
+  }
+
+  const groups = groupBySong(entries);
   const songs: SongItem[] = [];
 
   for (const g of groups) {
@@ -265,8 +431,6 @@ export async function importLooseFiles(
   let bpm = 120;
   let accentColor = '#22d3ee';
   let noteCount: number | undefined;
-  let difficultyName = 'NORMAL';
-  let level = 1;
 
   const meta = parseChartMeta(await chart.text());
   if (meta) {
@@ -275,17 +439,14 @@ export async function importLooseFiles(
     bpm = meta.bpm || 120;
     accentColor = meta.accentColor || accentColor;
     noteCount = meta.noteCount;
-    if (meta.difficulty != null) {
-      difficultyName = String(meta.difficulty);
-      level = typeof meta.difficulty === 'number' ? meta.difficulty : parseInt(String(meta.difficulty), 10) || 1;
-    }
   }
 
   const audioRef = audio ? await storeFileDedup(audio) : '';
   const coverRef = cover ? await storeFileDedup(cover) : '';
   const difficulties: DifficultyEntry[] = [];
   const chartRef = await storeFileDedup(chart);
-  difficulties.push({ name: difficultyName, level, chartFile: chartRef, noteCount });
+  const d = resolveDifficulty(meta?.difficulty);
+  difficulties.push({ name: d.name, level: d.level, chartFile: chartRef, noteCount });
 
   const song: SongItem = {
     type: 'song',

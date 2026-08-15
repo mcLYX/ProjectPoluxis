@@ -3320,11 +3320,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           top: '33%',
           transform: 'translate(-50%, -50%)',
           zIndex: 100,
-          padding: '8px 16px',
-          borderRadius: '8px',
-          background: 'rgba(0, 0, 0, 0.45)',
-          backdropFilter: 'blur(4px)',
-          border: '1px solid rgba(0, 240, 255, 0.2)',
           transition: 'opacity 0.3s ease',
         }}
       />

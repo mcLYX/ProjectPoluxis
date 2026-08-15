@@ -7,8 +7,8 @@ import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSel
 import { TimingBar, TimingMarker } from './components/TimingBar';
 import { SettingsModal } from './components/SettingsModal';
 import { DEMO_CHARTS } from './data/demoCharts';
-import { storeFile, getFile, generateId, getLibrary } from './data/idb';
-import { getAlbumById, createAlbum, addSong, addDifficulty, updateDifficulty } from './data/libraryStore';
+import { storeFile, getFile, generateId } from './data/idb';
+import { getAlbumById, createAlbum, addSong, findSongById, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
 import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet } from './types/game';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
@@ -20,6 +20,7 @@ import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
 import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats } from './utils/scoreStore';
 import { globalAudio } from './audio/AudioManager';
 import { useI18n } from './i18n';
+import { applyDslToNote, loadEditorDsl, saveEditorDsl } from './utils/editorRules';
 import {
   Play,
   Pause,
@@ -183,9 +184,22 @@ export function App() {
   const [isPlayTestMode, setIsPlayTestMode] = useState(false);
   const playTestStartBeatRef = useRef(0);
 
+  // 编辑器“高级功能”：放置新音符时套用的规则（仅编辑器本地配置，存 localStorage）。
+  const [editorDsl, setEditorDsl] = useState<string>(() => loadEditorDsl());
+  const editorDslRef = useRef<string>(editorDsl);
+  editorDslRef.current = editorDsl;
+
+  // 编辑器加载/上传的音频引用：上传时写入 idb 得到 idb:// 引用；保存至 Editor 专辑时一并写入。
+  // customAudioFileRef 持有上传的二进制（用于保存），currentAudioRefRef 持有最终要保存的引用
+  // （可为上传得到的 idb://，或来自内置/在线的 URL，或重编辑时已存在的 idb://）。
+  const customAudioFileRef = useRef<File | null>(null);
+  const currentAudioRefRef = useRef<string | null>(null);
+
   // Current song info for high score tracking. scoreKey 已含来源命名空间
   // （local:/online:/ 或不加前缀的 builtin），避免同一在线曲目下载前后的成绩互通。
-  const [currentSongInfo, setCurrentSongInfo] = useState<{ songKey: string; diffName: string } | null>(null);
+  const [currentSongInfo, setCurrentSongInfo] = useState<
+    { songId: string; scoreKey: string; diffName: string } | null
+  >(null);
   // Post-play result shown on the song-select "result card" (null = normal menu)
   const [resultInfo, setResultInfo] = useState<ResultInfo | null>(null);
   const [clearBanner, setClearBanner] = useState<'FC' | 'AP' | 'AP+' | null>(null);
@@ -377,7 +391,7 @@ export function App() {
   const currentBeatRef = useRef(currentBeat);
   currentBeatRef.current = currentBeat;
 
-  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songKey?: string, diffName?: string) => {
+  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string) => {
     // Reset the end-of-song lock BEFORE the fade-out timer starts, so the
     // player can pause during the lead-in of the *next* song if they want.
     songEndedRef.current = false;
@@ -414,8 +428,8 @@ export function App() {
       setTimingMarkers([]);
       setComboBurst(null);
       setResultInfo(null);
-      if (songKey && diffName) {
-        setCurrentSongInfo({ songKey, diffName });
+      if (songId && scoreKey && diffName) {
+        setCurrentSongInfo({ songId, scoreKey, diffName });
       } else {
         setCurrentSongInfo(null);
       }
@@ -556,6 +570,8 @@ export function App() {
     setSelectedNoteId(null);
     setEditorPreviewPlaying(false);
     setEditorTarget(null);
+    customAudioFileRef.current = null;
+    currentAudioRefRef.current = null;
     setGameState('editor');
   }, []);
 
@@ -625,6 +641,13 @@ export function App() {
     // 加载对应音乐，使编辑器可预览/播放（内置/在线走 URL，本地走 idb://）。
     await loadEditorAudio(info.audio);
 
+    // 记录当前音频引用（URL 或 idb://），保存至 Editor 专辑时若用户未重新上传则沿用。
+    currentAudioRefRef.current = info.audio ?? null;
+    customAudioFileRef.current = null;
+    // 切换谱面时重置“自定义音频”标记，避免上一首曲目的音频（hasCustomAudio 仍为真）
+    // 遗留到当前合成器曲目，导致误播旧音频。
+    setHasCustomAudio(false);
+
     setEditorTarget(info);
     setCurrentChart(chart);
     setGameState('editor');
@@ -670,22 +693,34 @@ export function App() {
     const name = dmeta.name || 'Custom';
     const level = dmeta.level;
     const target = editorTarget;
+    // 仅当目标是“本地曲目（含库根独立曲目，其 albumId 可能为 null）”时回写原位，
+    // 否则（内置/在线/自由编辑器）存入本地 Editor 专辑。
+    const isLocalSong = !!(target && target.source === 'local' && target.songId);
+    const savedAudioRef = isLocalSong ? (currentAudioRefRef.current || '') : '';
 
     try {
-      if (target && target.source === 'local' && target.albumId && target.songId) {
+      if (isLocalSong && target) {
+        const sid = target.songId!; // 已确认存在（isLocalSong 已校验）
         if (target.mode === 'edit' && target.diffName) {
-          // 覆盖原难度（按名称定位），难度名有改动一并更新。
-          const albums = await getLibrary();
-          const album = albums.find((a) => a.id === target.albumId);
-          const song = album?.songs.find((s) => s.type === 'song' && s.id === target.songId) as SongItem | undefined;
+          // 覆盖原难度：在整树（含库根）按 id 找到歌曲后按难度名定位；
+          // 找不到该难度名则退化为新增（兼容难度名被改动的情况）。
+          const song = await findSongById(sid);
           const di = song ? song.difficulties.findIndex((d) => d.name === target.diffName) : -1;
           if (song && di >= 0) {
-            await updateDifficulty(target.albumId, target.songId, di, { chartFile: ref, name, level, noteCount });
+            await updateDifficultyOfSong(sid, target.diffName, { chartFile: ref, name, level, noteCount });
+          } else {
+            await addDifficultyToSong(sid, { name, level, chartFile: ref, noteCount });
           }
         } else {
           // 向本地歌曲新增一个难度（新建谱面 / 无难度时现场新建）。
-          await addDifficulty(target.albumId, target.songId, { name, level, chartFile: ref, noteCount });
+          await addDifficultyToSong(sid, { name, level, chartFile: ref, noteCount });
         }
+        // 回写封面与音频引用（库根/专辑内本地曲目通用）：
+        // currentAudioRefRef 在打开编辑器时已初始化为原音频引用，用户上传后会更新；
+        // 若未改动则等于原值，写回是幂等的。封面取自谱面 jacket（若有）。
+        const songPatch: Partial<SongItem> = { audio: currentAudioRefRef.current || '' };
+        if (currentChart.metadata.jacket) songPatch.cover = currentChart.metadata.jacket;
+        await updateSongById(sid, songPatch);
       } else {
         // 非本地（内置/在线/自由编辑器）→ 创建并保存至本地 Editor 专辑。
         const EDITOR_ALBUM_ID = 'editor';
@@ -703,7 +738,7 @@ export function App() {
           id: generateId('song'),
           title: currentChart.metadata.title || 'Untitled',
           artist: currentChart.metadata.artist || 'Unknown',
-          audio: '',
+          audio: savedAudioRef,
           cover: '',
           bpm: currentChart.metadata.bpm || 120,
           accentColor: target?.accentColor || currentChart.metadata.noteColor || '#a855f7',
@@ -747,7 +782,7 @@ export function App() {
         let isNewScore = false;
         let isNewB = false;
         if (currentSongInfo && !autoPlay) {
-          const result = submitScore(currentSongInfo.songKey, currentSongInfo.diffName, stats);
+          const result = submitScore(currentSongInfo.scoreKey, currentSongInfo.diffName, stats);
           isNewScore = result?.isNewScore ?? false;
           isNewB = result?.isNewBadge ?? false;
         }
@@ -757,7 +792,7 @@ export function App() {
           badge,
           isNewHighScore: isNewScore,
           isNewBadge: isNewB,
-          songId: currentSongInfo?.songKey ?? null,
+          songId: currentSongInfo?.songId ?? null,
           diffName: currentSongInfo?.diffName ?? null,
           meta: {
             title: currentChart.metadata.title,
@@ -931,6 +966,27 @@ export function App() {
     handleSeekBeat(curBeat + deltaBeats);
   }, [gameState, gameTime, currentChart, snapSubdivision, handleSeekBeat]);
 
+  // 编辑器放置工具快捷键：q=tap, w=touch, e=slide, r=select(移动)
+  useEffect(() => {
+    if (gameState !== 'editor') return;
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      let next: EditorTool | null = null;
+      switch (e.key.toLowerCase()) {
+        case 'q': next = 'place-tap'; break;
+        case 'w': next = 'place-touch'; break;
+        case 'e': next = 'place-slide'; break;
+        case 'r': next = 'select'; break;
+        default: return;
+      }
+      e.preventDefault();
+      setEditorTool(next);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [gameState]);
+
   useEffect(() => {
     if (gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)) {
       // Throttle HUD state updates to ~20fps (frame % 3). The 3D canvas
@@ -1030,7 +1086,10 @@ export function App() {
 
     // Short, collision-resistant id: a 7-char base36 random (~78e9 combos).
     const newNoteId = `ed-${Math.random().toString(36).slice(2, 9)}`;
-    const newNote: NoteData = { id: newNoteId, beat: exactBeat, x, y, type: noteType, nodes: [] };
+    const newNote: NoteData = applyDslToNote(
+      { id: newNoteId, beat: exactBeat, x, y, type: noteType, nodes: [] },
+      editorDslRef.current
+    );
     setSelectedNoteId(newNoteId);
     setCurrentChart((prev) => ({ ...prev, notes: [...prev.notes, newNote].sort((a, b) => a.beat - b.beat) }));
   }, [editorTool, selectedNoteId, snapSubdivision]);
@@ -1063,20 +1122,30 @@ export function App() {
   /** Batch-note insertion used by the "quick-create" gesture system. */
   type QcSlideEntry = NonNullable<QuickCreateDelta['slides']>[number];
   const handleApplyQuickCreateDelta = useCallback((delta: QuickCreateDelta) => {
-    const newTaps: NoteData[] = (delta.taps ?? []).map((t) => ({
-      id: `qc-${Math.random().toString(36).slice(2, 9)}`,
-      beat: t.beat,
-      x: t.x,
-      y: t.y,
-      type: 'tap',
-    }));
-    const newTouches: NoteData[] = (delta.touches ?? []).map((t) => ({
-      id: `qc-${Math.random().toString(36).slice(2, 9)}`,
-      beat: t.beat,
-      x: t.x,
-      y: t.y,
-      type: 'touch',
-    }));
+    const newTaps: NoteData[] = (delta.taps ?? []).map((t) =>
+      applyDslToNote(
+        {
+          id: `qc-${Math.random().toString(36).slice(2, 9)}`,
+          beat: t.beat,
+          x: t.x,
+          y: t.y,
+          type: 'tap',
+        },
+        editorDslRef.current
+      )
+    );
+    const newTouches: NoteData[] = (delta.touches ?? []).map((t) =>
+      applyDslToNote(
+        {
+          id: `qc-${Math.random().toString(36).slice(2, 9)}`,
+          beat: t.beat,
+          x: t.x,
+          y: t.y,
+          type: 'touch',
+        },
+        editorDslRef.current
+      )
+    );
 
     // Slide handling is dedup-aware: for an incoming slide {headBeat, headX,
     // headY, nodes[]}, we try to find an EXISTING slide note in the chart
@@ -1117,14 +1186,19 @@ export function App() {
       // Create any slides that did NOT match an existing head.
       const newSlides: NoteData[] = slidePatches
         .filter((p) => p.matchId === null)
-        .map((p) => ({
-          id: `qc-${Math.random().toString(36).slice(2, 9)}`,
-          beat: p.head.headBeat,
-          x: p.head.headX,
-          y: p.head.headY,
-          type: 'slide',
-          nodes: [...p.head.nodes],
-        }));
+        .map((p) =>
+          applyDslToNote(
+            {
+              id: `qc-${Math.random().toString(36).slice(2, 9)}`,
+              beat: p.head.headBeat,
+              x: p.head.headX,
+              y: p.head.headY,
+              type: 'slide',
+              nodes: [...p.head.nodes],
+            },
+            editorDslRef.current
+          )
+        );
 
       const updatedNotes = [...slidesUpdate, ...newTaps, ...newTouches, ...newSlides]
         .sort((a, b) => a.beat - b.beat);
@@ -1353,11 +1427,19 @@ export function App() {
           onUploadAudioFile={async (file) => {
             await globalAudio.loadAudioFile(file);
             setHasCustomAudio(true);
+            customAudioFileRef.current = file;
+            try {
+              currentAudioRefRef.current = await storeFile(file);
+            } catch (err) {
+              console.error('保存音频失败', err);
+            }
           }}
           onExitEditor={handleReturnToMenu}
           onSaveToLocal={handleSaveChartToLocal}
           onStartPlayTest={handleStartPlayTest}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
+          editorDsl={editorDsl}
+          onEditorDslChange={(dsl: string) => { setEditorDsl(dsl); saveEditorDsl(dsl); }}
         />
       )}
 
@@ -1509,7 +1591,7 @@ export function App() {
 
                   {/* Restart/Retry button (subtle accent-tinted glass) */}
                   <button
-                    onClick={() => isPlayTestMode ? handleStartPlayTest(false) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songKey, currentSongInfo?.diffName)}
+                    onClick={() => isPlayTestMode ? handleStartPlayTest(false) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.scoreKey, currentSongInfo?.diffName)}
                     className="w-14 h-14 rounded-full border flex items-center justify-center transition cursor-pointer group"
                     title={t('hud.retry')}
                     style={{
@@ -1607,7 +1689,7 @@ export function App() {
             onOpenEditor={handleOpenVisualEditor}
             onLaunchChartEditor={handleLaunchChartEditor}
             onSwitchLite={() => { window.location.href = 'lite/index.html'; }}
-            onStartGame={(chart, hasAudio, songId, diffName) => handleStartGame(chart, hasAudio, songId, diffName)}
+            onStartGame={(chart, hasAudio, songId, scoreKey, diffName) => handleStartGame(chart, hasAudio, songId, scoreKey, diffName)}
             onStateChange={handleSongSelectStateChange}
           />
         </div>

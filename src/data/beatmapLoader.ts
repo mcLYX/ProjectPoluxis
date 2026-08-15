@@ -47,6 +47,13 @@ export async function loadChartForDifficulty(
   if (!diff) throw new Error('难度索引无效');
   const raw = diff.chartFile;
   if (!raw) return getFallbackChart();
+  // 内置谱面：直接返回打包进 JS 的 DEMO_CHARTS，不联网
+  if (raw.startsWith('embedded://')) {
+    const id = raw.slice('embedded://'.length);
+    const chart = DEMO_CHARTS[id];
+    if (chart) return JSON.parse(JSON.stringify(chart));
+    return getFallbackChart();
+  }
   try {
     const url = raw.startsWith('idb://') ? await resolveIdbUrl(raw) : resolveBeatmapUrl(raw);
     const res = await fetch(url);
@@ -99,12 +106,13 @@ export function buildBuiltinAlbum(): AlbumItem {
   bySong.forEach((charts, sid) => {
     const isFb = sid === 'fallback';
     const base = isFb ? '' : `${BASE_URL}beatmaps/${sid}/`;
-    const difficulties = charts.map(({ chart }) => {
+    const difficulties = charts.map(({ id, chart }) => {
       const dmeta = parseDifficultyMeta(chart.metadata.difficulty);
       return {
         name: dmeta.name,
         level: dmeta.level,
-        chartFile: isFb ? '' : `${base}chart.json`,
+        // 内置谱面直接引用打包进 JS 的 DEMO_CHARTS，避免联网 404 后再回退
+        chartFile: isFb ? '' : `embedded://${id}`,
         noteCount: Array.isArray(chart.notes) ? chart.notes.length : 0,
       };
     });
@@ -125,7 +133,7 @@ export function buildBuiltinAlbum(): AlbumItem {
   return {
     type: 'album',
     id: 'builtin-album',
-    title: '内置专辑',
+    title: 'Built-in',
     artist: '',
     cover: '',
     accentColor: '#22d3ee',
@@ -164,7 +172,8 @@ function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
     const o = (d ?? {}) as Record<string, unknown>;
     return {
       name: asStr(o.name) || 'Normal',
-      level: typeof o.level === 'number' ? o.level : 1,
+      // level 为可选键：beatmaps.json 未提供时不应默认 Lv.1，而是不显示难度
+      level: typeof o.level === 'number' ? o.level : undefined,
       chartFile: abs(o.chartFile),
       noteCount: typeof o.noteCount === 'number' ? o.noteCount : undefined,
     };

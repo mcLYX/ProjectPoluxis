@@ -603,7 +603,7 @@ export const SongCard: React.FC<SongCardProps> = ({
                 className="px-3 py-1.5 rounded-lg text-xs font-bold font-orbitron tracking-wider border bg-black/30 border-white/20 text-white/80 cursor-default select-none"
               >
                 {currentDiff.name}
-                {currentDiff.level > 0 && (
+                {currentDiff.level != null && currentDiff.level > 0 && (
                   <span className="ml-1 text-white/60">Lv.{currentDiff.level}</span>
                 )}
               </div>
@@ -619,7 +619,7 @@ export const SongCard: React.FC<SongCardProps> = ({
                   }`}
                 >
                   {currentDiff.name}
-                  {currentDiff.level > 0 && (
+                  {currentDiff.level != null && currentDiff.level > 0 && (
                     <span className="ml-1 text-white/60">Lv.{currentDiff.level}</span>
                   )}
                   {workDiffs.length > 1 && (
@@ -663,7 +663,7 @@ export const SongCard: React.FC<SongCardProps> = ({
                   }`}
                 >
                   <span className="font-orbitron">{d.name}</span>
-                  {d.level > 0 && (
+                  {d.level != null && d.level > 0 && (
                     <span className="float-right text-white/50 font-mono">Lv.{d.level}</span>
                   )}
                 </button>

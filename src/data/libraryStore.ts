@@ -82,6 +82,78 @@ export async function addSong(albumId: string, song: SongItem): Promise<void> {
   );
 }
 
+/** 在库根目录直接创建一个独立曲目（不包装成专辑），与 moveSong 的根目录行为一致。 */
+export async function addSongToRoot(song: SongItem): Promise<void> {
+  await mutateLibrary((al) => [...al, song] as unknown as AlbumItem[]);
+}
+
+// ---- 以下为“按歌曲 id 在整树（含库根独立曲目）中定位并操作”的通用函数 ----
+// 根目录独立曲目没有父专辑 id，所有依赖 albumId 的旧函数对它无效，故新增 id 维度版本。
+
+/** 在整树（含库根）中按 id 找到歌曲节点。 */
+export async function findSongById(songId: string): Promise<SongItem | null> {
+  const albums = await getLibrary();
+  const stack: BeatmapItem[] = [...albums];
+  while (stack.length) {
+    const it = stack.pop()!;
+    if (it.type === 'song') {
+      if (it.id === songId) return it;
+    } else {
+      stack.push(...it.songs);
+    }
+  }
+  return null;
+}
+
+/** 递归把 id 匹配的歌曲应用 transform（兼容库根独立曲目与任意层级专辑内歌曲）。 */
+function updateSongInTree(nodes: BeatmapItem[], songId: string, transform: (s: SongItem) => SongItem): BeatmapItem[] {
+  return nodes.map((n) => {
+    if (n.type === 'song') return n.id === songId ? transform(n) : n;
+    return { ...n, songs: updateSongInTree(n.songs, songId, transform) };
+  });
+}
+
+/** 按 id 更新歌曲（兼容库根独立曲目）。 */
+export async function updateSongById(songId: string, patch: Partial<SongItem>): Promise<void> {
+  await mutateLibrary(
+    (al) => updateSongInTree(al as unknown as BeatmapItem[], songId, (s) => ({ ...s, ...patch })) as unknown as AlbumItem[],
+  );
+}
+
+/** 按 id 删除歌曲（兼容库根独立曲目）。 */
+export async function deleteSongById(songId: string): Promise<void> {
+  await mutateLibrary((al) => deleteSongInTree(al as unknown as BeatmapItem[], songId) as unknown as AlbumItem[]);
+}
+
+function deleteSongInTree(nodes: BeatmapItem[], songId: string): BeatmapItem[] {
+  return nodes
+    .filter((n) => !(n.type === 'song' && n.id === songId))
+    .map((n) => (n.type === 'album' ? { ...n, songs: deleteSongInTree(n.songs, songId) } : n));
+}
+
+/** 按 id 给歌曲新增一个难度（兼容库根独立曲目）。 */
+export async function addDifficultyToSong(songId: string, diff: DifficultyEntry): Promise<void> {
+  await mutateLibrary(
+    (al) =>
+      updateSongInTree(al as unknown as BeatmapItem[], songId, (s) => ({ ...s, difficulties: [...s.difficulties, diff] })) as unknown as AlbumItem[],
+  );
+}
+
+/** 按 id + 难度名更新难度（兼容库根独立曲目）。 */
+export async function updateDifficultyOfSong(
+  songId: string,
+  diffName: string,
+  patch: Partial<DifficultyEntry>,
+): Promise<void> {
+  await mutateLibrary(
+    (al) =>
+      updateSongInTree(al as unknown as BeatmapItem[], songId, (s) => ({
+        ...s,
+        difficulties: s.difficulties.map((d) => (d.name === diffName ? { ...d, ...patch } : d)),
+      })) as unknown as AlbumItem[],
+  );
+}
+
 export async function updateSong(albumId: string, songId: string, patch: Partial<SongItem>): Promise<void> {
   await mutateLibrary((al) =>
     mapAlbumTree(al, albumId, (a) => ({
@@ -189,10 +261,13 @@ export async function getSongParentAlbumId(songId: string): Promise<string | nul
   const stack: AlbumItem[] = [...albums];
   while (stack.length) {
     const a = stack.pop()!;
-    if (a.songs.some((s) => s.type === 'song' && s.id === songId)) return a.id;
-    a.songs.forEach((s) => {
-      if (s.type === 'album') stack.push(s);
-    });
+    // 库根可能存在独立曲目（SongItem），跳过以免访问不存在的 songs
+    if (a.type === 'album' && a.songs.some((s) => s.type === 'song' && s.id === songId)) return a.id;
+    if (a.type === 'album') {
+      a.songs.forEach((s) => {
+        if (s.type === 'album') stack.push(s);
+      });
+    }
   }
   return null;
 }
@@ -203,9 +278,11 @@ export async function getAlbumById(id: string): Promise<AlbumItem | null> {
   while (stack.length) {
     const a = stack.pop()!;
     if (a.id === id) return a;
-    a.songs.forEach((s) => {
-      if (s.type === 'album') stack.push(s);
-    });
+    if (a.type === 'album') {
+      a.songs.forEach((s) => {
+        if (s.type === 'album') stack.push(s);
+      });
+    }
   }
   return null;
 }
