@@ -1,7 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { BeatmapItem, SongItem, AlbumItem } from '../types/beatmap';
+import { BeatmapItem, SongItem, AlbumItem, DifficultyEntry } from '../types/beatmap';
+
+// 编辑态输入框：压暗背景并模糊底层专辑图，提升在彩色封面上的可读性。
+const EDIT_INPUT_STYLE: React.CSSProperties = {
+  background: 'rgba(0,0,0,0.45)',
+  backdropFilter: 'blur(6px)',
+  WebkitBackdropFilter: 'blur(6px)',
+};
 import { resolveBeatmapUrl, isFallbackSong, countLeafSongs, albumHasPlayableSong } from '../data/beatmapLoader';
-import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft } from 'lucide-react';
+import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft, Save, Trash2 } from 'lucide-react';
 import { getHighScore, HighScoreEntry, ClearBadge } from '../utils/scoreStore';
 import { GameStats } from '../types/game';
 import { useI18n } from '../i18n';
@@ -34,6 +41,22 @@ interface SongCardProps {
   /** When true and this card is expanded, scroll it into view (used right
       after leaving result mode so the played card stays centered). */
   centerWhenExpanded?: boolean;
+  /** Edit mode: card fields become inline-editable and the action button becomes Save. */
+  editMode?: boolean;
+  /** Current draft values for the inline edit fields. */
+  editValues?: {
+    title: string;
+    artist: string;
+    bpm: number;
+    accentColor: string;
+    difficulties: DifficultyEntry[];
+  };
+  /** Called when an inline edit field changes (title/artist/bpm/accentColor). */
+  onEditFieldChange?: (field: 'title' | 'artist' | 'bpm' | 'accentColor', value: string | number) => void;
+  /** Called to delete a single difficulty chart by index (song cards only). */
+  onDeleteDifficulty?: (index: number) => void;
+  /** Called to save the current edit. */
+  onSave?: () => void;
 }
 
 function rankColor(rank: GameStats['rank']): string {
@@ -107,10 +130,16 @@ export const SongCard: React.FC<SongCardProps> = ({
   onExitResult,
   className = '',
   centerWhenExpanded = false,
+  editMode,
+  editValues,
+  onEditFieldChange,
+  onDeleteDifficulty,
+  onSave,
 }) => {
   const { t } = useI18n();
   const [coverError, setCoverError] = useState(false);
   const [showDiffMenu, setShowDiffMenu] = useState(false);
+  const [editDiffIdx, setEditDiffIdx] = useState(0);
   const cardRef = useRef<HTMLDivElement>(null);
 
   const accent = getAccent(item);
@@ -143,7 +172,22 @@ export const SongCard: React.FC<SongCardProps> = ({
     }
   }, [inResult, centerWhenExpanded, isExpanded]);
 
-  const currentDiff = item.type === 'song' ? item.difficulties[currentDifficultyIdx] : null;
+  // 进入编辑态时，难度显示/选中改为以草稿(draft)为准，使删除等操作即时反映。
+  useEffect(() => {
+    if (editMode && item.type === 'song' && editValues) {
+      setEditDiffIdx(Math.min(currentDifficultyIdx, Math.max(0, editValues.difficulties.length - 1)));
+    }
+    // 仅在进入/退出编辑态时重置选中难度
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode]);
+
+  // 编辑模式下，难度显示/选中以草稿(draft)为准，删除后界面即时更新。
+  const draftActive = editMode && item.type === 'song' && !!editValues;
+  const workDiffs = draftActive ? editValues!.difficulties : item.type === 'song' ? item.difficulties : [];
+  const workIdx = draftActive
+    ? Math.min(editDiffIdx, Math.max(0, workDiffs.length - 1))
+    : currentDifficultyIdx;
+  const currentDiff = item.type === 'song' ? workDiffs[workIdx] ?? null : null;
 
   // 获取当前难度的最高分（每次渲染读取最新值，确保游戏结束后立即刷新）
   const highScore: HighScoreEntry | null =
@@ -155,6 +199,7 @@ export const SongCard: React.FC<SongCardProps> = ({
     const target = e.target as HTMLElement;
     if (target.closest('[data-action]')) return;
     if (inResult) return; // result card: interact via 返回 / Start buttons only
+    if (editMode && isExpanded) return; // editing: don't collapse on body click
     if (isExpanded) {
       onCollapse();
     } else {
@@ -164,7 +209,7 @@ export const SongCard: React.FC<SongCardProps> = ({
 
   const handleEnterAlbum = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (item.type === 'album' && onEnterAlbum && available) {
+    if (item.type === 'album' && onEnterAlbum) {
       onEnterAlbum(item);
     }
   };
@@ -178,16 +223,8 @@ export const SongCard: React.FC<SongCardProps> = ({
 
   const handleDiffClick = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (item.type === 'song' && item.difficulties.length > 1) {
+    if (item.type === 'song' && workDiffs.length > 1) {
       setShowDiffMenu((v) => !v);
-    }
-  };
-
-  const handleSelectDiff = (e: React.MouseEvent, idx: number) => {
-    e.stopPropagation();
-    setShowDiffMenu(false);
-    if (item.type === 'song' && onChangeDifficulty) {
-      onChangeDifficulty(item, idx);
     }
   };
 
@@ -266,26 +303,101 @@ export const SongCard: React.FC<SongCardProps> = ({
         </div>
       </div>
 
-      {/* Expanded state: horizontal title (top left) */}
-      <div
-        className={`
-          absolute top-5 left-5 right-5
-          transition-all duration-400
-          ${isExpanded ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}
-        `}
-      >
-        <div className="text-white font-bold font-orbitron text-2xl tracking-wide drop-shadow-lg">
-          {item.title}
-        </div>
-        <div className="text-white/70 text-sm mt-1 font-rajdhani drop-shadow">
-          {item.type === 'album' ? (item.artist || 'Various Artists') : item.artist}
-        </div>
-        {item.type === 'song' && (
-          <div className="text-white/50 text-xs mt-1 font-mono">
-            BPM {item.bpm}
+      {/* Expanded state: horizontal title (top left) — inline-editable in edit mode */}
+      {editMode && isExpanded ? (
+        <div className="absolute top-5 left-5 right-5 flex flex-col gap-2 transition-all duration-400 max-h-[60%] overflow-y-auto pr-1">
+          <input
+            data-action="edit-field"
+            value={editValues?.title ?? item.title}
+            onChange={(e) => onEditFieldChange?.('title', e.target.value)}
+            placeholder={t('fab.nameSong')}
+            className="glass-input rounded-lg px-2 py-1 font-bold font-orbitron text-xl text-white outline-none w-full"
+            style={EDIT_INPUT_STYLE}
+          />
+          <input
+            data-action="edit-field"
+            value={editValues?.artist ?? item.artist ?? ''}
+            onChange={(e) => onEditFieldChange?.('artist', e.target.value)}
+            placeholder={t('songcard.artist')}
+            className="glass-input rounded-lg px-2 py-1 text-sm font-rajdhani text-white/80 outline-none w-full"
+            style={EDIT_INPUT_STYLE}
+          />
+          {item.type === 'song' && (
+            <input
+              data-action="edit-field"
+              type="number"
+              value={editValues?.bpm ?? item.bpm}
+              onChange={(e) => onEditFieldChange?.('bpm', Number(e.target.value))}
+              placeholder="BPM"
+              className="glass-input rounded-lg px-2 py-1 text-xs font-mono text-white/70 outline-none w-24"
+              style={EDIT_INPUT_STYLE}
+            />
+          )}
+
+          {/* 强调色编辑 */}
+          <div className="flex items-center gap-2 mt-1">
+            <span
+              className="text-[10px] font-bold font-orbitron tracking-wider text-white/60"
+              style={{ textShadow: '0 1px 6px rgba(0,0,0,0.95)' }}
+            >
+              {t('songcard.accent')}
+            </span>
+            <input
+              data-action="edit-field"
+              type="color"
+              value={editValues?.accentColor || '#0ea5e9'}
+              onChange={(e) => onEditFieldChange?.('accentColor', e.target.value)}
+              className="h-7 w-9 rounded cursor-pointer bg-transparent border border-white/30"
+            />
+            <div className="flex items-center gap-1">
+              {['#0ea5e9', '#22d3ee', '#34d399', '#f59e0b', '#f43f5e', '#a855f7', '#e879f9', '#64748b'].map(
+                (c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    data-action="edit-field"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEditFieldChange?.('accentColor', c);
+                    }}
+                    className="h-5 w-5 rounded-full border border-white/40 transition hover:scale-110"
+                    style={{
+                      background: c,
+                      outline: editValues?.accentColor?.toLowerCase() === c.toLowerCase() ? '2px solid #fff' : 'none',
+                    }}
+                  />
+                ),
+              )}
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div
+          className={`
+            absolute top-5 left-5 right-5
+            transition-all duration-400
+            ${isExpanded ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}
+          `}
+        >
+          <div
+            className="text-white font-bold font-orbitron text-2xl tracking-wide"
+            style={{ textShadow: '0 2px 14px rgba(0,0,0,0.95)' }}
+          >
+            {item.title}
+          </div>
+          <div
+            className="text-white/80 text-sm mt-1 font-rajdhani"
+            style={{ textShadow: '0 1px 8px rgba(0,0,0,0.95)' }}
+          >
+            {item.type === 'album' ? (item.artist || 'Various Artists') : item.artist}
+          </div>
+          {item.type === 'song' && (
+            <div className="text-white/60 text-xs mt-1 font-mono" style={{ textShadow: '0 1px 6px rgba(0,0,0,0.95)' }}>
+              BPM {item.bpm}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Source badge (top-right, expanded only) */}
       {isExpanded && item.source && item.source !== 'builtin' && (
@@ -393,10 +505,19 @@ export const SongCard: React.FC<SongCardProps> = ({
             <Loader2 size={16} className="animate-spin" />
             <span className="text-sm font-bold">{t('songcard.loading')}</span>
           </div>
-        ) : !available ? (
-          <div className="px-5 py-2.5 rounded-xl bg-white/[0.05] backdrop-blur-md border border-white/10 text-white/40 text-sm font-bold cursor-not-allowed">
-            {t('songcard.toBeContinued')}
-          </div>
+        ) : editMode ? (
+          <button
+            data-action="save"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSave?.();
+            }}
+            className="px-5 py-2.5 rounded-xl glass-btn-primary font-bold text-sm hover:scale-105 active:scale-95 transition flex items-center gap-1.5"
+            style={{ ['--hud-accent' as any]: '#22d3ee' }}
+          >
+            <Save size={14} />
+            {t('fab.save')}
+          </button>
         ) : item.type === 'album' ? (
           <button
             data-action="enter"
@@ -407,6 +528,10 @@ export const SongCard: React.FC<SongCardProps> = ({
             {t('songcard.enter')}
             <ChevronRight size={16} />
           </button>
+        ) : !available ? (
+          <div className="px-5 py-2.5 rounded-xl bg-white/[0.05] backdrop-blur-md border border-white/10 text-white/40 text-sm font-bold cursor-not-allowed">
+            {t('songcard.toBeContinued')}
+          </div>
         ) : (
           <div className="flex items-center gap-2">
             {inResult && (
@@ -478,42 +603,69 @@ export const SongCard: React.FC<SongCardProps> = ({
                 className="px-3 py-1.5 rounded-lg text-xs font-bold font-orbitron tracking-wider border bg-black/30 border-white/20 text-white/80 cursor-default select-none"
               >
                 {currentDiff.name}
-                <span className="ml-1 text-white/60">Lv.{currentDiff.level}</span>
+                {currentDiff.level > 0 && (
+                  <span className="ml-1 text-white/60">Lv.{currentDiff.level}</span>
+                )}
               </div>
             ) : (
-              <button
-                data-action="diff"
-                onClick={handleDiffClick}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold font-orbitron tracking-wider border transition ${
-                  item.difficulties.length > 1
-                    ? 'bg-white/10 backdrop-blur-sm border-white/30 text-white hover:bg-white/20 cursor-pointer'
-                    : 'bg-black/30 border-white/20 text-white/80 cursor-default'
-                }`}
-              >
-                {currentDiff.name}
-                <span className="ml-1 text-white/60">Lv.{currentDiff.level}</span>
-                {item.difficulties.length > 1 && (
-                  <span className="ml-1 text-white/40">▾</span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  data-action="diff"
+                  onClick={handleDiffClick}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold font-orbitron tracking-wider border transition ${
+                    workDiffs.length > 1
+                      ? 'bg-white/10 backdrop-blur-sm border-white/30 text-white hover:bg-white/20 cursor-pointer'
+                      : 'bg-black/30 border-white/20 text-white/80 cursor-default'
+                  }`}
+                >
+                  {currentDiff.name}
+                  {currentDiff.level > 0 && (
+                    <span className="ml-1 text-white/60">Lv.{currentDiff.level}</span>
+                  )}
+                  {workDiffs.length > 1 && (
+                    <span className="ml-1 text-white/40">▾</span>
+                  )}
+                </button>
+                {editMode && (
+                  <button
+                    type="button"
+                    data-action="edit-field"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteDifficulty?.(workIdx);
+                    }}
+                    className="h-7 w-7 rounded-md bg-rose-500/20 border border-rose-400/50 text-rose-200 hover:bg-rose-500/40 hover:scale-105 active:scale-95 transition flex items-center justify-center"
+                    title={t('songcard.deleteDifficulty')}
+                  >
+                    <Trash2 size={13} />
+                  </button>
                 )}
-              </button>
+              </div>
             )
           )}
 
           {/* Difficulty dropdown (hidden in result mode) */}
-          {!inResult && showDiffMenu && currentDiff && item.difficulties.length > 1 && (
+          {!inResult && showDiffMenu && currentDiff && workDiffs.length > 1 && (
             <div className="absolute bottom-full left-0 mb-2 bg-black/90 backdrop-blur-md border border-white/20 rounded-xl overflow-hidden min-w-[140px] shadow-2xl z-50">
-              {item.difficulties.map((d, i) => (
+              {workDiffs.map((d, i) => (
                 <button
-                  key={d.name}
-                  onClick={(e) => handleSelectDiff(e, i)}
+                  key={`${d.name}-${i}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowDiffMenu(false);
+                    if (draftActive) setEditDiffIdx(i);
+                    else if (onChangeDifficulty) onChangeDifficulty(item, i);
+                  }}
                   className={`w-full px-4 py-2 text-left text-xs font-bold transition ${
-                    i === currentDifficultyIdx
+                    i === workIdx
                       ? 'bg-cyan-500/30 text-cyan-200'
                       : 'text-white/70 hover:bg-white/10 hover:text-white'
                   }`}
                 >
                   <span className="font-orbitron">{d.name}</span>
-                  <span className="float-right text-white/50 font-mono">Lv.{d.level}</span>
+                  {d.level > 0 && (
+                    <span className="float-right text-white/50 font-mono">Lv.{d.level}</span>
+                  )}
                 </button>
               ))}
             </div>

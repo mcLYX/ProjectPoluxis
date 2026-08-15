@@ -81,6 +81,8 @@ interface VisualChartEditorProps {
   onSetPxPerBeat: (n: number) => void;
   onUploadAudioFile: (file: File) => Promise<void>;
   onExitEditor: () => void;
+  /** 保存到本地：将当前谱面写入本地库（覆盖原谱面或存入 Editor 专辑）。 */
+  onSaveToLocal?: () => void;
   onStartPlayTest: (fromCurrentBeat: boolean) => void;
   /** '3d' = default perspective view; '2d' = top-down falling-editor view. */
   viewMode: '3d' | '2d';
@@ -274,6 +276,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onSetPxPerBeat,
   onUploadAudioFile,
   onExitEditor,
+  onSaveToLocal,
   onStartPlayTest,
   viewMode,
   onSetViewMode,
@@ -1173,6 +1176,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 </button>
               </div>
             )}
+            <button
+              onClick={onSaveToLocal}
+              className="glass-btn w-full py-2.5 rounded-xl text-cyan-200 font-bold"
+            >
+              {t('editor.saveToLocal')}
+            </button>
             <button onClick={onExitEditor} className="glass-btn w-full py-2.5 rounded-xl text-white/80 font-bold">
               {t('editor.exitEditor')}
             </button>

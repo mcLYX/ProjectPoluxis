@@ -42,8 +42,23 @@ function saveToStorage(data: HighScoreMap) {
   }
 }
 
-function makeKey(songId: string, difficultyName: string): string {
-  return `${songId}__${difficultyName}`;
+function makeKey(scoreKey: string, difficultyName: string): string {
+  return `${scoreKey}__${difficultyName}`;
+}
+
+/**
+ * 生成成绩存储的命名空间键。
+ * 同一在线曲目下载到本地后会得到一个 source 为 'local' 的副本，
+ * 它与 source 为 'online' 的原曲共享 songId，若只用 songId 作键会导致
+ * 在线 / 下载两份成绩互通。这里按 source 加前缀命名空间：
+ *  - builtin  → 不加前缀（兼容历史成绩）
+ *  - local    → 'local:<id>'（下载的谱面、本地自建谱面、编辑器保存的谱面）
+ *  - online   → 'online:<id>'（在线原曲）
+ * 这样编辑「在线下载的谱面」只需清掉 'local:<id>' 的成绩，在线原曲成绩不受影响。
+ */
+export function getScoreKey(songId: string, source?: string): string {
+  if (!source || source === 'builtin') return songId;
+  return `${source}:${songId}`;
 }
 
 /** 根据成绩计算当前达成的最高徽章 */
@@ -69,9 +84,9 @@ function higherBadge(a?: ClearBadge, b?: ClearBadge): ClearBadge | undefined {
 }
 
 /** 获取某首歌某个难度的最高分记录。没有记录返回 null。 */
-export function getHighScore(songId: string, difficultyName: string): HighScoreEntry | null {
+export function getHighScore(scoreKey: string, difficultyName: string): HighScoreEntry | null {
   const all = loadFromStorage();
-  const key = makeKey(songId, difficultyName);
+  const key = makeKey(scoreKey, difficultyName);
   return all[key] || null;
 }
 
@@ -88,12 +103,12 @@ export interface SubmitResult {
  * - 两者都没变化 → 返回 null
  */
 export function submitScore(
-  songId: string,
+  scoreKey: string,
   difficultyName: string,
   stats: GameStats,
 ): SubmitResult | null {
   const all = loadFromStorage();
-  const key = makeKey(songId, difficultyName);
+  const key = makeKey(scoreKey, difficultyName);
   const prev = all[key];
 
   const newBadge = calcBadgeFromStats(stats);
@@ -133,4 +148,30 @@ export function getAllHighScores(): HighScoreMap {
 /** 清除所有最高分记录（慎用）。 */
 export function clearAllHighScores() {
   localStorage.removeItem(STORAGE_KEY);
+}
+
+/**
+ * 清除某谱面的成绩。
+ *  - 不传 difficultyName：清除该谱面全部难度的成绩（如整首谱面被删除）。
+ *  - 传 difficultyName：只清除被修改保存的那一个难度的成绩，其余难度成绩保留。
+ */
+export function clearHighScore(scoreKey: string, difficultyName?: string) {
+  const all = loadFromStorage();
+  let changed = false;
+  if (difficultyName !== undefined) {
+    const key = `${scoreKey}__${difficultyName}`;
+    if (key in all) {
+      delete all[key];
+      changed = true;
+    }
+  } else {
+    const prefix = `${scoreKey}__`;
+    for (const k of Object.keys(all)) {
+      if (k.startsWith(prefix)) {
+        delete all[k];
+        changed = true;
+      }
+    }
+  }
+  if (changed) saveToStorage(all);
 }

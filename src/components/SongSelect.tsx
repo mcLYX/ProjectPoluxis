@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { BeatmapsManifest, BeatmapItem, AlbumItem, SongItem } from '../types/beatmap';
+import { BeatmapsManifest, BeatmapItem, AlbumItem, SongItem, DifficultyEntry, EditorLaunchInfo } from '../types/beatmap';
 import { SongCard } from './SongCard';
+import FloatingActionBar, { ClipboardItem } from './FloatingActionBar';
 import { ChartData, GameStats } from '../types/game';
 import type { ClearBadge } from '../utils/scoreStore';
+import { getScoreKey } from '../utils/scoreStore';
 import {
   assembleManifest,
   invalidateManifestCache,
@@ -12,11 +14,26 @@ import {
   resolveBeatmapUrl,
   findAlbumById
 } from '../data/beatmapLoader';
-import { onLibraryChanged } from '../data/libraryStore';
+import {
+  onLibraryChanged,
+  createAlbum,
+  addSong,
+  updateAlbum,
+  updateSong,
+  deleteAlbum,
+  deleteSong,
+  addDifficulty,
+  moveSong,
+  moveAlbum,
+  downloadSongToLibrary,
+  getSongParentAlbumId,
+} from '../data/libraryStore';
+import { storeFile, generateId } from '../data/idb';
+import { importZip, importLooseFiles, parseChartMeta } from '../data/zipImport';
 import { onServersChanged } from '../data/onlineServers';
 import { globalAudio } from '../audio/AudioManager';
 import { useI18n } from '../i18n';
-import { ArrowLeft, Loader2, BookOpen, Sliders, FileCode, Upload, Smartphone, Tv } from 'lucide-react';
+import { ArrowLeft, Home, ClipboardPaste, Loader2, Sliders, FileCode, Smartphone, Tv } from 'lucide-react';
 
 /** Default accent color used when a beatmap item defines none. */
 const DEFAULT_ACCENT = '#0ea5e9';
@@ -62,10 +79,10 @@ interface SongSelectProps {
   /** Retry for custom (non-manifest) charts. */
   onRetryCustom?: () => void;
   onToggleAutoPlay: () => void;
-  onOpenDocs: () => void;
   onOpenSettings: () => void;
   onOpenEditor: () => void;
-  onOpenFileManager: () => void;
+  /** 由卡片发起“编辑谱面/新建谱面”，携带上下文信息。 */
+  onLaunchChartEditor: (info: EditorLaunchInfo) => void;
   onSwitchLite: () => void;
   onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, diffName: string) => void;
   onStateChange?: (state: SongSelectNavState) => void;
@@ -76,6 +93,8 @@ type ViewDepth = 'root' | 'album';
 export interface SongSelectNavState {
   viewDepth: ViewDepth;
   currentAlbumId: string | null;
+  /** 专辑导航栈（从根到当前），用于支持嵌套专辑与“上一级 / 回根目录”。 */
+  albumStack?: string[];
   expandedId: string | null;
   selectedDifficulties: Record<string, number>;
 }
@@ -87,10 +106,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   onClearResult,
   onRetryCustom,
   onToggleAutoPlay,
-  onOpenDocs,
   onOpenSettings,
   onOpenEditor,
-  onOpenFileManager,
+  onLaunchChartEditor,
   onSwitchLite,
   onStartGame,
   onStateChange,
@@ -103,9 +121,35 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   const [expandedId, setExpandedId] = useState<string | null>(
     result ? result.songId : (initialState?.expandedId ?? null)
   );
-  const [viewDepth, setViewDepth] = useState<ViewDepth>(initialState?.viewDepth ?? 'root');
-  const [currentAlbumId, setCurrentAlbumId] = useState<string | null>(initialState?.currentAlbumId ?? null);
+  const [albumStack, setAlbumStack] = useState<string[]>(
+    initialState?.albumStack && initialState.albumStack.length > 0
+      ? initialState.albumStack
+      : initialState?.currentAlbumId
+        ? [initialState.currentAlbumId]
+        : [],
+  );
+  const currentAlbumId = albumStack.length ? albumStack[albumStack.length - 1] : null;
+  const viewDepth: ViewDepth = albumStack.length ? 'album' : 'root';
   const [selectedDifficulties, setSelectedDifficulties] = useState<Record<string, number>>(initialState?.selectedDifficulties ?? {});
+  // Inline edit state (card-as-file-manager): the card currently being edited.
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<{
+    title: string;
+    artist: string;
+    bpm: number;
+    accentColor: string;
+    difficulties: DifficultyEntry[];
+  } | null>(null);
+  // In-memory clipboard for the "move" action (one item at a time).
+  const [clipboard, setClipboard] = useState<ClipboardItem | null>(null);
+  // Lightweight transient toast.
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToastMsg(msg);
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToastMsg(null), 2600);
+  }, []);
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
   const isStartingGameRef = useRef(false);
   // In-flight preview preload (audio + chart) per expanded song. The Start
@@ -133,10 +177,11 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     onStateChange?.({
       viewDepth,
       currentAlbumId,
+      albumStack,
       expandedId,
       selectedDifficulties,
     });
-  }, [viewDepth, currentAlbumId, expandedId, selectedDifficulties, onStateChange]);
+  }, [viewDepth, currentAlbumId, albumStack, expandedId, selectedDifficulties, onStateChange]);
 
   useEffect(() => {
     notifyStateChange();
@@ -200,10 +245,14 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   }, [onClearResult]);
 
   const handleExpand = useCallback((id: string) => {
-    // Expanding any card exits result mode.
+    // Expanding any card exits result mode and cancels any inline edit.
     if (result) exitResultMode();
+    if (editId) {
+      setEditId(null);
+      setEditDraft(null);
+    }
     setExpandedId(id);
-  }, [result, exitResultMode]);
+  }, [result, exitResultMode, editId]);
 
   const handleCollapse = useCallback(() => {
     if (result) {
@@ -214,54 +263,51 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     setExpandedId(null);
   }, [result, exitResultMode]);
 
-  const handleEnterAlbum = useCallback((album: AlbumItem) => {
-    if (albumAnimPhase !== 'idle') return;
-    setAlbumAnimDir('in');
-    setAlbumAnimPhase('exit');
-    setExpandedId(null);
-    // After exit animation, switch data, instantly position new list off-screen, then slide in
-    window.setTimeout(() => {
-      setViewDepth('album');
-      setCurrentAlbumId(album.id);
-      setAlbumAnimPhase('enter-start'); // instant jump to start position
-      // Reset scroll to start for new list — do this before the next frame
-      requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollLeft = 0;
-        }
-        // Next frame: trigger slide-in animation
+  // 带切换动画的导航：dir='in' 进入更深层级，dir='out' 返回上一级/根目录。
+  const runAlbumTransition = useCallback(
+    (dir: 'in' | 'out', applyStack: () => string[]) => {
+      if (albumAnimPhase !== 'idle') return;
+      setAlbumAnimDir(dir);
+      setAlbumAnimPhase('exit');
+      setExpandedId(null);
+      // After exit animation, switch data, instantly position new list off-screen, then slide in
+      window.setTimeout(() => {
+        setAlbumStack(applyStack());
+        setAlbumAnimPhase('enter-start'); // instant jump to start position
+        // Reset scroll to start for new list — do this before the next frame
         requestAnimationFrame(() => {
-          setAlbumAnimPhase('enter');
-          window.setTimeout(() => {
-            setAlbumAnimPhase('idle');
-          }, 350);
+          if (scrollRef.current) {
+            scrollRef.current.scrollLeft = 0;
+          }
+          // Next frame: trigger slide-in animation
+          requestAnimationFrame(() => {
+            setAlbumAnimPhase('enter');
+            window.setTimeout(() => {
+              setAlbumAnimPhase('idle');
+            }, 350);
+          });
         });
-      });
-    }, 250);
-  }, [albumAnimPhase]);
+      }, 250);
+    },
+    [albumAnimPhase],
+  );
 
-  const handleBackToRoot = useCallback(() => {
-    if (albumAnimPhase !== 'idle') return;
-    setAlbumAnimDir('out');
-    setAlbumAnimPhase('exit');
-    setExpandedId(null);
-    window.setTimeout(() => {
-      setViewDepth('root');
-      setCurrentAlbumId(null);
-      setAlbumAnimPhase('enter-start');
-      requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollLeft = 0;
-        }
-        requestAnimationFrame(() => {
-          setAlbumAnimPhase('enter');
-          window.setTimeout(() => {
-            setAlbumAnimPhase('idle');
-          }, 350);
-        });
-      });
-    }, 250);
-  }, [albumAnimPhase]);
+  const handleEnterAlbum = useCallback(
+    (album: AlbumItem) => {
+      runAlbumTransition('in', () => [...albumStack, album.id]);
+    },
+    [albumStack, runAlbumTransition],
+  );
+
+  // 返回上一级（再上一级是父专辑，最上层则回到根目录）。
+  const handleBack = useCallback(() => {
+    runAlbumTransition('out', () => albumStack.slice(0, -1));
+  }, [albumStack, runAlbumTransition]);
+
+  // 直接回到根目录。
+  const handleHome = useCallback(() => {
+    runAlbumTransition('out', () => []);
+  }, [runAlbumTransition]);
 
   const handleChangeDifficulty = useCallback((song: SongItem, idx: number) => {
     setSelectedDifficulties((prev) => ({ ...prev, [song.id]: idx }));
@@ -407,7 +453,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true);
         }
       }
-      onStartGame(chart, hasAudio, song.id, diff.name);
+      // scoreKey 按来源加命名空间，避免同一在线曲目下载前后的成绩互通。
+      const scoreKey = getScoreKey(song.id, song.source);
+      onStartGame(chart, hasAudio, scoreKey, diff.name);
     } catch (e) {
       console.error('Failed to start game:', e);
       setLoadingSongId(null);
@@ -420,11 +468,15 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     if (e.target === e.currentTarget || (e.target as HTMLElement).dataset.scrollContainer) {
       if (result) {
         exitResultMode();
+      } else if (editId) {
+        // Clicking empty space while editing cancels the inline edit (keeps the card expanded).
+        setEditId(null);
+        setEditDraft(null);
       } else if (expandedId) {
         handleCollapse();
       }
     }
-  }, [expandedId, handleCollapse, result, exitResultMode]);
+  }, [expandedId, editId, handleCollapse, result, exitResultMode]);
 
   if (loading) {
     return (
@@ -441,6 +493,300 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   const currentAlbum = viewDepth === 'album' && currentAlbumId
     ? (findAlbumById(manifest?.items ?? [], currentAlbumId) ?? undefined)
     : null;
+
+  // ---- Card-as-file-manager helpers ----
+  const findItemById = (id: string | null): BeatmapItem | null => {
+    if (!id) return null;
+    // 优先匹配当前视图的直接子节点：展开项一定对应当前页面里被点击的那张卡片，
+    // 可避免不同来源（在线/本地）或同名 id 在深层遍历时抢先命中导致的错配。
+    const direct = items.find((it) => it.id === id);
+    if (direct) return direct;
+    // 兜底：整树递归查找（应对极少数非当前视图层级的 id）。
+    const stack: BeatmapItem[] = [...items];
+    while (stack.length) {
+      const it = stack.pop()!;
+      if (it.id === id) return it;
+      if (it.type === 'album') stack.push(...it.songs);
+    }
+    return null;
+  };
+  const expandedItem: BeatmapItem | null = findItemById(expandedId);
+
+  const handlePickFiles = async (files: File[], kind: 'import' | 'chart' | 'audio' | 'cover') => {
+    try {
+      if (kind === 'import') {
+        const hasZip = files.some((f) => f.name.toLowerCase().endsWith('.zip'));
+        const res = hasZip
+          ? await importZip(files.find((f) => f.name.toLowerCase().endsWith('.zip'))!, {
+              targetAlbumId: currentAlbumId,
+              t,
+            })
+          : await importLooseFiles(files, { targetAlbumId: currentAlbumId, t });
+        if (currentAlbumId) {
+          for (const s of res.songs ?? []) await addSong(currentAlbumId, s);
+        } else {
+          await createAlbum(res.album);
+        }
+        const warns = res.warnings?.length ? ' ' + t('fab.importWarnings', { detail: res.warnings.join('；') }) : '';
+        showToast(t('fab.imported', { count: String(res.songCount) }) + warns);
+      } else if (expandedItem) {
+        const it = expandedItem;
+        const file = files[0];
+        if (kind === 'audio' && it.type === 'song') {
+          const ref = await storeFile(file);
+          const albumId = await getSongParentAlbumId(it.id);
+          if (albumId) await updateSong(albumId, it.id, { audio: ref });
+        } else if (kind === 'cover') {
+          const ref = await storeFile(file);
+          if (it.type === 'song') {
+            const albumId = await getSongParentAlbumId(it.id);
+            if (albumId) await updateSong(albumId, it.id, { cover: ref });
+          } else {
+            await updateAlbum(it.id, { cover: ref });
+          }
+        } else if (kind === 'chart' && it.type === 'song') {
+          const text = await file.text();
+          const meta = parseChartMeta(text);
+          const ref = await storeFile(file);
+          const name = meta && meta.difficulty != null ? String(meta.difficulty) : 'NORMAL';
+          const level = meta && typeof meta.difficulty === 'number' ? meta.difficulty : 1;
+          const albumId = await getSongParentAlbumId(it.id);
+          if (albumId) await addDifficulty(albumId, it.id, { name, level, chartFile: ref, noteCount: meta?.noteCount });
+        }
+        showToast(t('fab.saved'));
+      }
+    } catch (err) {
+      console.error(err);
+      const msg = err instanceof Error ? err.message : t('fab.importError');
+      showToast(`${t('fab.importError')}：${msg}`);
+    }
+  };
+
+  const handleNewAlbum = async (name: string) => {
+    try {
+      const created = await createAlbum({
+        title: name, artist: '', cover: '', accentColor: DEFAULT_ACCENT, basePath: '', songs: [],
+      });
+      if (currentAlbumId) await moveAlbum(null, currentAlbumId, created.id);
+      showToast(t('fab.created'));
+    } catch (err) { console.error(err); }
+  };
+
+  const handleNewSong = async (name: string) => {
+    try {
+      const song: SongItem = {
+        type: 'song', id: generateId('song'), title: name, artist: '', bpm: 120,
+        cover: '', accentColor: DEFAULT_ACCENT, audio: '', basePath: '', difficulties: [],
+      };
+      if (currentAlbumId) {
+        await addSong(currentAlbumId, song);
+      } else {
+        await createAlbum({
+          title: name, artist: '', cover: '', accentColor: DEFAULT_ACCENT, basePath: '', songs: [song],
+        });
+      }
+      showToast(t('fab.created'));
+    } catch (err) { console.error(err); }
+  };
+
+  const handleEdit = () => {
+    if (!expandedItem) return;
+    const it = expandedItem;
+    setEditDraft({
+      title: it.title,
+      artist: it.artist ?? '',
+      bpm: it.type === 'song' ? it.bpm : 120,
+      accentColor: it.accentColor ?? '',
+      difficulties: it.type === 'song' ? it.difficulties.map((d) => ({ ...d })) : [],
+    });
+    setEditId(it.id);
+  };
+
+  const handleEditFieldChange = (
+    field: 'title' | 'artist' | 'bpm' | 'accentColor',
+    value: string | number,
+  ) => {
+    setEditDraft((prev) => (prev ? { ...prev, [field]: value } : prev));
+  };
+
+  const handleDeleteDifficulty = (index: number) => {
+    setEditDraft((prev) => {
+      if (!prev) return prev;
+      // 允许删光所有难度（在当前选中难度被删后，卡片会自动收敛到剩余难度）。
+      return { ...prev, difficulties: prev.difficulties.filter((_, i) => i !== index) };
+    });
+  };
+
+  // 编辑谱面：加载当前选中难度进入编辑器；若歌曲无难度则现场新建一个再进入。
+  const handleEditChart = () => {
+    const it = expandedItem;
+    if (!it || it.type !== 'song') return;
+    const idx =
+      it.difficulties.length > 0
+        ? Math.min(getDiffIdx(it.id, it.difficulties.length), it.difficulties.length - 1)
+        : -1;
+    onLaunchChartEditor({
+      mode: 'edit',
+      albumId: currentAlbumId,
+      songId: it.id,
+      songTitle: it.title,
+      songArtist: it.artist ?? '',
+      bpm: it.bpm,
+      accentColor: it.accentColor,
+      source: it.source ?? 'local',
+      audio: it.audio,
+      chartFile: idx >= 0 ? it.difficulties[idx].chartFile : undefined,
+      diffName: idx >= 0 ? it.difficulties[idx].name : undefined,
+      selectedDiffIndex: idx,
+      difficultiesCount: it.difficulties.length,
+    });
+  };
+
+  // 新建谱面：重用卡片信息，并以内置 Neon Cyberspace 的 note 序列作为模板。
+  const handleNewChart = () => {
+    const it = expandedItem;
+    if (!it || it.type !== 'song') return;
+    onLaunchChartEditor({
+      mode: 'new',
+      albumId: currentAlbumId,
+      songId: it.id,
+      songTitle: it.title,
+      songArtist: it.artist ?? '',
+      bpm: it.bpm,
+      accentColor: it.accentColor,
+      source: it.source ?? 'local',
+      audio: it.audio,
+      selectedDiffIndex: -1,
+      difficultiesCount: it.difficulties.length,
+    });
+  };
+
+  const handleSave = async () => {
+    if (!expandedItem || !editDraft) return;
+    const it = expandedItem;
+    try {
+      if (it.type === 'album') {
+        await updateAlbum(it.id, {
+          title: editDraft.title,
+          artist: editDraft.artist,
+          accentColor: editDraft.accentColor || undefined,
+        });
+      } else {
+        // 同一首歌可能同时存在于多个专辑（共用 id）。当前展开的歌曲一定位于
+        // 当前视图专辑内，优先以 currentAlbumId 定位父专辑，避免改错副本。
+        const albumId = currentAlbumId ?? (await getSongParentAlbumId(it.id));
+        if (albumId)
+          await updateSong(albumId, it.id, {
+            title: editDraft.title,
+            artist: editDraft.artist,
+            bpm: Number(editDraft.bpm) || 120,
+            accentColor: editDraft.accentColor || undefined,
+            difficulties: editDraft.difficulties,
+          });
+      }
+      showToast(t('fab.saved'));
+    } catch (err) { console.error(err); }
+    setEditId(null);
+    setEditDraft(null);
+  };
+
+  const handleCancelEdit = () => { setEditId(null); setEditDraft(null); };
+
+  const handleMove = () => {
+    if (!expandedItem) return;
+    setClipboard({ id: expandedItem.id, kind: expandedItem.type, fromAlbumId: currentAlbumId });
+    setEditId(null);
+    setEditDraft(null);
+    // 收起卡片，使底栏出现“粘贴”（粘贴仅在卡片收起时可进行）。
+    setExpandedId(null);
+  };
+
+  const handleDelete = async () => {
+    if (!expandedItem) return;
+    const it = expandedItem;
+    try {
+      if (it.type === 'album') await deleteAlbum(it.id);
+      else {
+        // 同理：优先以当前视图专辑定位父专辑，避免删除/改错同名副本。
+        const albumId = currentAlbumId ?? (await getSongParentAlbumId(it.id));
+        if (albumId) await deleteSong(albumId, it.id);
+      }
+      setClipboard((c) => (c && c.id === it.id ? null : c));
+      showToast(t('fab.deleted'));
+    } catch (err) { console.error(err); }
+    setEditId(null);
+    setEditDraft(null);
+    setExpandedId(null);
+  };
+
+  const handlePaste = async () => {
+    if (!clipboard) return;
+    // Pasting back into the same album cancels the move.
+    if (clipboard.fromAlbumId === currentAlbumId) {
+      setClipboard(null);
+      return;
+    }
+    try {
+      if (clipboard.kind === 'album') await moveAlbum(clipboard.fromAlbumId, currentAlbumId, clipboard.id);
+      else await moveSong(clipboard.fromAlbumId, currentAlbumId, clipboard.id);
+      showToast(t('fab.pasted'));
+    } catch (err) { console.error(err); }
+    setClipboard(null);
+  };
+
+  const handleDownload = async (item?: BeatmapItem) => {
+    const it = item ?? expandedItem;
+    if (!it) return;
+    try {
+      if (it.type === 'album') {
+        for (const s of it.songs) if (s.type === 'song') await downloadSongToLibrary(s);
+      } else {
+        await downloadSongToLibrary(it);
+      }
+      showToast(t('fab.downloaded'));
+    } catch (err) { console.error(err); }
+  };
+
+  // 仅本地上下文（根目录或本地专辑）才允许新增/编辑；内置与在线内容受限。
+  const currentAllowsEdit = !currentAlbum || currentAlbum.source === 'local';
+  let fabMode: 'add' | 'edit' | 'download' | 'none' = 'none';
+  if (expandedItem) {
+    // 在根目录展开“内置/在线”专辑时，仍可新建内容（创建到根目录），
+    // 而不是被折叠成"无操作"。
+    const isRootAlbum = expandedItem.type === 'album' && viewDepth === 'root';
+    if (isRootAlbum && expandedItem.source !== 'local') {
+      fabMode = currentAllowsEdit ? 'add' : 'none';
+    } else if (expandedItem.source === 'online' && expandedItem.type === 'album') {
+      // 在线专辑不可直接下载（仅允许单曲下载）。
+      fabMode = 'none';
+    } else if (expandedItem.source === 'online') {
+      fabMode = 'download';
+    } else if (expandedItem.source === 'local') {
+      fabMode = 'edit';
+    } else {
+      // 内置专辑/曲目不可编辑。
+      fabMode = 'none';
+    }
+  } else if (currentAllowsEdit) {
+    fabMode = 'add';
+  }
+  const fabVisible = fabMode !== 'none' && !result;
+
+  // 剪贴板内容标题，用于在左侧“粘贴”按钮上显示是什么（跨整个 manifest 查找，不受当前视图限制）。
+  const clipboardItem: BeatmapItem | null = (() => {
+    if (!clipboard || !manifest?.items) return null;
+    const stack: BeatmapItem[] = [...manifest.items];
+    while (stack.length) {
+      const it = stack.pop()!;
+      if (it.id === clipboard.id) return it;
+      if (it.type === 'album') stack.push(...it.songs);
+    }
+    return null;
+  })();
+  const clipboardLabel = clipboardItem
+    ? `${clipboard!.kind === 'album' ? t('songcard.album') : t('songcard.track')}：${clipboardItem.title}`
+    : '';
+  const pasteVisible = !!clipboard && fabVisible && fabMode !== 'download';
 
   return (
     <div
@@ -486,12 +832,22 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between py-4 min-h-[60px] pointer-events-none" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))', paddingLeft: 'max(1.5rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1.5rem, env(safe-area-inset-right, 0px))' }}>
         <div className="flex items-center gap-3 min-w-0 pointer-events-auto">
           {viewDepth === 'album' && (
-            <button
-              onClick={handleBackToRoot}
-              className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shrink-0"
-            >
-              <ArrowLeft size={14} /> 返回
-            </button>
+            <>
+              <button
+                onClick={handleBack}
+                title={t('songselect.backToParent')}
+                className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shrink-0"
+              >
+                <ArrowLeft size={14} /> {t('songcard.back')}
+              </button>
+              <button
+                onClick={handleHome}
+                title={t('songselect.home')}
+                className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shrink-0"
+              >
+                <Home size={14} />
+              </button>
+            </>
           )}
           {currentAlbum && (
             <div className="text-white font-orbitron font-bold tracking-wider truncate">
@@ -511,18 +867,6 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap pointer-events-auto">
-          <button
-            onClick={onOpenDocs}
-            className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-          >
-            <BookOpen size={15} /> {t('songselect.doc')}
-          </button>
-          <button
-            onClick={onOpenFileManager}
-            className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-          >
-            <Upload size={15} /> {t('songselect.upload')}
-          </button>
           <button
             onClick={onOpenEditor}
             className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
@@ -601,6 +945,15 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           const renderList: BeatmapItem[] = customResultOnly ?? items;
 
           if (renderList.length === 0 && !result) {
+            // Entering an empty album: show the "敬请期待" placeholder instead of the generic empty message.
+            if (viewDepth === 'album' && currentAlbum && currentAlbum.songs.length === 0) {
+              return (
+                <div className="w-full flex flex-col items-center justify-center gap-3 text-white/40">
+                  <div className="text-3xl font-orbitron tracking-[0.3em]">{t('songselect.soon')}</div>
+                  <div className="text-sm">{t('songselect.albumEmpty')}</div>
+                </div>
+              );
+            }
             return (
               <div className="w-full flex justify-center text-white/55 text-sm">
                 {loadError ? t('songselect.loadError', { err: loadError }) : t('songselect.empty')}
@@ -650,7 +1003,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
             const card = (
               <SongCard
-                key={item.id}
+                key={`${item.id}-${i}`}
                 item={item}
                 isExpanded={isExpanded}
                 isLoading={isLoading}
@@ -660,16 +1013,21 @@ export const SongSelect: React.FC<SongSelectProps> = ({
                 onEnterAlbum={item.type === 'album' ? handleEnterAlbum : undefined}
                 onStartGame={item.type === 'song' && isCustomResultCard ? () => onRetryCustom?.() : (item.type === 'song' ? handleStartGame : undefined)}
                 onChangeDifficulty={item.type === 'song' ? handleChangeDifficulty : undefined}
-                highScoreKey={isCustomResultCard ? undefined : item.id}
+                highScoreKey={isCustomResultCard ? undefined : getScoreKey(item.id, item.source)}
                 resultData={hasResultPayload ? result : null}
                 onExitResult={hasResultPayload ? exitResultMode : undefined}
                 className={siblingSlideIn ? 'slide-in-card' : ''}
                 centerWhenExpanded={shouldCenterOnExpanded}
+                editMode={editId === item.id}
+                editValues={editId === item.id && editDraft ? editDraft : undefined}
+                onEditFieldChange={handleEditFieldChange}
+                onDeleteDifficulty={handleDeleteDifficulty}
+                onSave={handleSave}
               />
             );
             if (showDivider) {
               return (
-                <React.Fragment key={`frag-${item.id}`}>
+                <React.Fragment key={`frag-${item.id}-${i}`}>
                   <SegmentDivider />
                   {card}
                 </React.Fragment>
@@ -703,12 +1061,44 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           </button>
         </div>
 
-        {expandedId && (
-          <div className="text-white/45 text-xs font-bold font-orbitron tracking-wider">
-            {t('songselect.collapseHint')}
-          </div>
-        )}
+        <div className="pointer-events-auto flex items-end gap-3">
+          {pasteVisible && (
+            <button
+              onClick={handlePaste}
+              className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-cyan-200"
+            >
+              <ClipboardPaste size={14} />
+              <span>{clipboardLabel}</span>
+            </button>
+          )}
+          <FloatingActionBar
+            visible={fabVisible}
+            mode={fabMode}
+            expandedItem={expandedItem}
+            inEditMode={editId !== null}
+            onPickFiles={handlePickFiles}
+            onNewAlbum={handleNewAlbum}
+            onNewSong={handleNewSong}
+            onEdit={handleEdit}
+            onEditChart={handleEditChart}
+            onNewChart={handleNewChart}
+            onMove={handleMove}
+            onDelete={handleDelete}
+            onSave={handleSave}
+            onCancelEdit={handleCancelEdit}
+            onDownload={() => handleDownload()}
+          />
+        </div>
       </div>
+      )}
+
+      {toastMsg && (
+        <div
+          className="fixed left-1/2 top-6 z-[60] -translate-x-1/2 glass-panel-strong rounded-xl px-4 py-2 text-sm font-semibold text-white/90 animate-fade-in"
+          style={{ pointerEvents: 'none' }}
+        >
+          {toastMsg}
+        </div>
       )}
       </div>{/* /UI 框 */}
     </div>

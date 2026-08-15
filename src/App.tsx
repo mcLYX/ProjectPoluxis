@@ -3,17 +3,21 @@ import { GameCanvas } from './components/GameCanvas';
 import { Editor2DCanvas } from './components/Editor2DCanvas';
 import { VisualChartEditor, EditorTool, BatchSelection, QuickCreateDelta } from './components/VisualChartEditor';
 import { UnitTestModal } from './components/UnitTestModal';
-import { FileManagerModal } from './components/FileManagerModal';
-import { DocModal } from './components/DocModal';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
 import { TimingBar, TimingMarker } from './components/TimingBar';
 import { SettingsModal } from './components/SettingsModal';
 import { DEMO_CHARTS } from './data/demoCharts';
-import type { QualityMode } from './types/game';
+import { storeFile, getFile, generateId, getLibrary } from './data/idb';
+import { getAlbumById, createAlbum, addSong, addDifficulty, updateDifficulty } from './data/libraryStore';
+import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
+import type { QualityMode, SkinTextureSet } from './types/game';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
+import { getSkin, loadSkinTextures } from './data/skinStore';
+import type { EditorLaunchInfo, SongItem } from './types/beatmap';
 import { calculateNoteScore, calculateRank } from './utils/scoring';
 import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
-import { submitScore, calcBadgeFromStats } from './utils/scoreStore';
+import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
+import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats } from './utils/scoreStore';
 import { globalAudio } from './audio/AudioManager';
 import { useI18n } from './i18n';
 import {
@@ -55,8 +59,24 @@ const DEFAULT_SETTINGS = {
   noteRenderDistance: 70,
   noteSizeScale: 1.0,
   qualityMode: 'standard' as QualityMode,
+  // 自定义档位下的各项画面特效开关与渲染倍率。
+  customAntialias: true,
+  customBloom: true,
+  customParticles: true,
+  customDynamicLighting: true,
+  customHitEffects: true,
+  customRenderScale: 1.0,
   musicVolume: 0.8,
   effectVolume: 0.9,
+  // 当前选中的皮肤 id；null 表示使用默认纯色外观。
+  selectedSkinId: null as string | null,
+  // 默认皮肤（未选皮肤包时）的自定义项。
+  // 默认皮肤音符边框 = 内框(跟随音符色) + 外框(可自定义)。判定框颜色恒等于音符色。
+  defaultSkinInnerWidth: 0.05, // 内框粗细，默认 5%（跟随音符颜色）
+  defaultSkinOuterWidth: 0,    // 外框粗细，默认 0（禁用）
+  defaultSkinOuterColor: '#22d3ee',
+  defaultSkinOuterAlpha: 1,
+  defaultSkinJudgeWidth: 0.01, // 判定框（投影引导）粗细，颜色恒等于音符色
 };
 
 function loadSettings(): typeof DEFAULT_SETTINGS {
@@ -71,8 +91,18 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
       delete (parsed as any).lowQualityMode;
     }
     for (const k of Object.keys(result) as Array<keyof typeof DEFAULT_SETTINGS>) {
-      if (typeof parsed[k] === typeof result[k]) {
-        (result as any)[k] = parsed[k];
+      const val = parsed[k];
+      if (typeof val === 'undefined') continue;
+      const def = (result as any)[k];
+      // A setting whose default is `null` (e.g. selectedSkinId) has type
+      // 'object', while the saved value is a string — the naive
+      // `typeof val === typeof def` check would reject it and silently reset
+      // the selection to default on every refresh. Accept any loaded value
+      // for null-typed settings instead.
+      if (def === null) {
+        (result as any)[k] = val;
+      } else if (typeof val === typeof def) {
+        (result as any)[k] = val;
       }
     }
     return result;
@@ -92,6 +122,13 @@ export function App() {
   const initialSettings = loadSettings();
 
   const [currentChart, setCurrentChart] = useState<ChartData>(DEMO_CHARTS['neon-cyberspace']);
+  /** 由卡片发起谱面编辑/新建时的上下文；为 null 表示自由编辑器（保存至 Editor 专辑）。 */
+  const [editorTarget, setEditorTarget] = useState<EditorLaunchInfo | null>(null);
+  const [appToast, setAppToast] = useState<string | null>(null);
+  const showAppToast = useCallback((msg: string) => {
+    setAppToast(msg);
+    window.setTimeout(() => setAppToast(null), 2600);
+  }, []);
   const [gameState, setGameState] = useState<'menu' | 'playing' | 'paused' | 'editor'>('menu');
   const [gameTime, setGameTime] = useState(0);
   const [speedMultiplier, setSpeedMultiplier] = useState(initialSettings.speedMultiplier);
@@ -101,8 +138,23 @@ export function App() {
   const [noteRenderDistance, setNoteRenderDistance] = useState(initialSettings.noteRenderDistance);
   const [noteSizeScale, setNoteSizeScale] = useState(initialSettings.noteSizeScale);
   const [qualityMode, setQualityMode] = useState<QualityMode>(initialSettings.qualityMode);
+  const [customAntialias, setCustomAntialias] = useState(initialSettings.customAntialias);
+  const [customBloom, setCustomBloom] = useState(initialSettings.customBloom);
+  const [customParticles, setCustomParticles] = useState(initialSettings.customParticles);
+  const [customDynamicLighting, setCustomDynamicLighting] = useState(initialSettings.customDynamicLighting);
+  const [customHitEffects, setCustomHitEffects] = useState(initialSettings.customHitEffects);
+  const [customRenderScale, setCustomRenderScale] = useState(initialSettings.customRenderScale);
   const [musicVolume, setMusicVolume] = useState(initialSettings.musicVolume);
   const [effectVolume, setEffectVolume] = useState(initialSettings.effectVolume);
+  // 皮肤：选中 id → 预加载后的贴图集合（传给 GameCanvas）。
+  const [selectedSkinId, setSelectedSkinId] = useState<string | null>(initialSettings.selectedSkinId);
+  const [skinTextures, setSkinTextures] = useState<SkinTextureSet | null>(null);
+  // 默认皮肤（未选皮肤包时）自定义项。
+  const [defaultSkinInnerWidth, setDefaultSkinInnerWidth] = useState(initialSettings.defaultSkinInnerWidth);
+  const [defaultSkinOuterWidth, setDefaultSkinOuterWidth] = useState(initialSettings.defaultSkinOuterWidth);
+  const [defaultSkinOuterColor, setDefaultSkinOuterColor] = useState(initialSettings.defaultSkinOuterColor);
+  const [defaultSkinOuterAlpha, setDefaultSkinOuterAlpha] = useState(initialSettings.defaultSkinOuterAlpha);
+  const [defaultSkinJudgeWidth, setDefaultSkinJudgeWidth] = useState(initialSettings.defaultSkinJudgeWidth);
   const [playSession, setPlaySession] = useState(0);
   const [hasCustomAudio, setHasCustomAudio] = useState(false);
   const [songSelectState, setSongSelectState] = useState<SongSelectNavState | null>(null);
@@ -131,21 +183,20 @@ export function App() {
   const [isPlayTestMode, setIsPlayTestMode] = useState(false);
   const playTestStartBeatRef = useRef(0);
 
-  // Current song info for high score tracking
-  const [currentSongInfo, setCurrentSongInfo] = useState<{ songId: string; diffName: string } | null>(null);
+  // Current song info for high score tracking. scoreKey 已含来源命名空间
+  // （local:/online:/ 或不加前缀的 builtin），避免同一在线曲目下载前后的成绩互通。
+  const [currentSongInfo, setCurrentSongInfo] = useState<{ songKey: string; diffName: string } | null>(null);
   // Post-play result shown on the song-select "result card" (null = normal menu)
   const [resultInfo, setResultInfo] = useState<ResultInfo | null>(null);
   const [clearBanner, setClearBanner] = useState<'FC' | 'AP' | 'AP+' | null>(null);
 
   // Modals
   const [showUnitTest, setShowUnitTest] = useState(false);
-  const [showFileManager, setShowFileManager] = useState(false);
-  const [showDocs, setShowDocs] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   const [stats, setStats] = useState<GameStats>({
     score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
-    goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: 'EX+',
+    goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: calculateRank(0),
   });
 
   const [timingMarkers, setTimingMarkers] = useState<TimingMarker[]>([]);
@@ -287,9 +338,28 @@ export function App() {
     }
     saveSettings({
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
-      noteSizeScale, qualityMode, musicVolume, effectVolume
+      noteSizeScale, qualityMode, customAntialias, customBloom,
+      customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume,
+      selectedSkinId, defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
-  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, musicVolume, effectVolume]);
+  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, customAntialias, customBloom, customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
+
+  // 选中皮肤变化时，预加载贴图（灰度图→THREE.Texture）。失败/无皮肤则回退纯色。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!selectedSkinId) {
+        setSkinTextures(null);
+        return;
+      }
+      const meta = await getSkin(selectedSkinId);
+      const tex = await loadSkinTextures(meta);
+      if (!cancelled) setSkinTextures(tex);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSkinId]);
 
   // Calculate current beat from gameTime. Uses the shared inverse so charts
   // with a bpmlist stay accurate (a plain bpm*t/60 would drift after the first
@@ -307,7 +377,7 @@ export function App() {
   const currentBeatRef = useRef(currentBeat);
   currentBeatRef.current = currentBeat;
 
-  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, diffName?: string) => {
+  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songKey?: string, diffName?: string) => {
     // Reset the end-of-song lock BEFORE the fade-out timer starts, so the
     // player can pause during the lead-in of the *next* song if they want.
     songEndedRef.current = false;
@@ -339,13 +409,13 @@ export function App() {
       setHasCustomAudio(useCustomAudio);
       setStats({
         score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
-        goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(chartData), accuracy: 100, rank: 'EX+',
+        goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(chartData), accuracy: 100, rank: calculateRank(0),
       });
       setTimingMarkers([]);
       setComboBurst(null);
       setResultInfo(null);
-      if (songId && diffName) {
-        setCurrentSongInfo({ songId, diffName });
+      if (songKey && diffName) {
+        setCurrentSongInfo({ songKey, diffName });
       } else {
         setCurrentSongInfo(null);
       }
@@ -396,7 +466,7 @@ export function App() {
 
       setStats({
         score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
-        goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: 'EX+',
+        goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: calculateRank(0),
       });
       setTimingMarkers([]);
       setComboBurst(null);
@@ -485,8 +555,175 @@ export function App() {
     setPlaySession((s) => s + 1);
     setSelectedNoteId(null);
     setEditorPreviewPlaying(false);
+    setEditorTarget(null);
     setGameState('editor');
   }, []);
+
+  // 依据谱面引用（idb:// 或 URL 路径）加载 ChartData；失败返回 null。
+  const loadChartFromRef = async (chartFile: string): Promise<ChartData | null> => {
+    let text: string | null = null;
+    if (chartFile.startsWith('idb://')) {
+      const blob = await getFile(chartFile.slice('idb://'.length));
+      if (blob) text = await blob.text();
+    } else {
+      const url = resolveBeatmapUrl(chartFile);
+      if (url) {
+        const res = await fetch(url);
+        if (res.ok) text = await res.text();
+      }
+    }
+    if (!text) return null;
+    const r = parseAndValidateChart(text);
+    return r.valid && r.chart ? r.chart : null;
+  };
+
+  // 加载编辑器对应的音乐：本地（idb://）读取 blob 生成临时 URL，其余按 URL 加载。
+  const loadEditorAudio = async (audio?: string) => {
+    if (!audio) return;
+    try {
+      if (audio.startsWith('idb://')) {
+        const blob = await getFile(audio.slice('idb://'.length));
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          await globalAudio.loadAudioURL(url);
+          return;
+        }
+      }
+      const url = resolveBeatmapUrl(audio);
+      if (url) await globalAudio.loadAudioURL(url);
+    } catch (e) {
+      console.error('加载编辑器音频失败', e);
+    }
+  };
+
+  // 由卡片发起谱面编辑/新建：加载或生成谱面并进入编辑器。
+  const handleLaunchChartEditor = useCallback(async (info: EditorLaunchInfo) => {
+    globalAudio.stop();
+    if (countdownTimerRef.current) {
+      window.clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    setCountdownVal(null);
+    setGameTime(0);
+    setPlaySession((s) => s + 1);
+    setSelectedNoteId(null);
+    setEditorPreviewPlaying(false);
+
+    let chart: ChartData | null = null;
+    if (info.mode === 'edit' && info.chartFile) {
+      try {
+        chart = await loadChartFromRef(info.chartFile);
+      } catch {
+        chart = null;
+      }
+      if (!chart) chart = buildLaunchChart(info, false);
+    } else {
+      // 新建谱面：空白谱面（不再使用模板）。
+      chart = buildLaunchChart(info, false);
+    }
+
+    // 加载对应音乐，使编辑器可预览/播放（内置/在线走 URL，本地走 idb://）。
+    await loadEditorAudio(info.audio);
+
+    setEditorTarget(info);
+    setCurrentChart(chart);
+    setGameState('editor');
+  }, []);
+
+  // 依据上下文构建谱面（无可用谱面文件时作为兜底，生成空白谱面）。
+  const buildLaunchChart = (info: EditorLaunchInfo, copyTemplate: boolean): ChartData => {
+    if (copyTemplate) {
+      const tpl = structuredClone(DEMO_CHARTS['neon-cyberspace']);
+      tpl.metadata = {
+        ...tpl.metadata,
+        title: info.songTitle,
+        artist: info.songArtist,
+        difficulty: 'New',
+        bpm: info.bpm,
+      };
+      return tpl;
+    }
+    return {
+      metadata: {
+        title: info.songTitle,
+        artist: info.songArtist,
+        difficulty: '',
+        bpm: info.bpm,
+        offset: 0,
+        bgScheme: { gradientStart: '#050c1e', gradientEnd: '#1a0d2e', accentColor: info.accentColor || '#00f0ff' },
+        noteColor: info.accentColor || '#00f0ff',
+        effectToggles: { bloom: true, particles: true, projection: true, gridLines: true },
+      },
+      notes: [],
+    };
+  };
+
+  // 编辑器“保存到本地”：本地谱面回写原位；否则存入 Editor 专辑。
+  const handleSaveChartToLocal = useCallback(async () => {
+    if (!currentChart) return;
+    const json = exportChartJson(currentChart);
+    const file = new File([json], `${currentChart.metadata.difficulty || 'chart'}.json`, { type: 'application/json' });
+    const ref = await storeFile(file);
+    const noteCount = countPlayableNotes(currentChart);
+    // 难度名若为 “xxx Lv.xx” 形式，自动拆出名称与等级。
+    const dmeta = parseDifficultyMeta(currentChart.metadata.difficulty || 'Custom');
+    const name = dmeta.name || 'Custom';
+    const level = dmeta.level;
+    const target = editorTarget;
+
+    try {
+      if (target && target.source === 'local' && target.albumId && target.songId) {
+        if (target.mode === 'edit' && target.diffName) {
+          // 覆盖原难度（按名称定位），难度名有改动一并更新。
+          const albums = await getLibrary();
+          const album = albums.find((a) => a.id === target.albumId);
+          const song = album?.songs.find((s) => s.type === 'song' && s.id === target.songId) as SongItem | undefined;
+          const di = song ? song.difficulties.findIndex((d) => d.name === target.diffName) : -1;
+          if (song && di >= 0) {
+            await updateDifficulty(target.albumId, target.songId, di, { chartFile: ref, name, level, noteCount });
+          }
+        } else {
+          // 向本地歌曲新增一个难度（新建谱面 / 无难度时现场新建）。
+          await addDifficulty(target.albumId, target.songId, { name, level, chartFile: ref, noteCount });
+        }
+      } else {
+        // 非本地（内置/在线/自由编辑器）→ 创建并保存至本地 Editor 专辑。
+        const EDITOR_ALBUM_ID = 'editor';
+        const existing = await getAlbumById(EDITOR_ALBUM_ID);
+        if (!existing) {
+          await createAlbum({
+            id: EDITOR_ALBUM_ID,
+            title: 'Editor',
+            accentColor: '#a855f7',
+            songs: [],
+          });
+        }
+        const song: SongItem = {
+          type: 'song',
+          id: generateId('song'),
+          title: currentChart.metadata.title || 'Untitled',
+          artist: currentChart.metadata.artist || 'Unknown',
+          audio: '',
+          cover: '',
+          bpm: currentChart.metadata.bpm || 120,
+          accentColor: target?.accentColor || currentChart.metadata.noteColor || '#a855f7',
+          basePath: '',
+          difficulties: [{ name, level, chartFile: ref, noteCount }],
+          source: 'local',
+        };
+        await addSong(EDITOR_ALBUM_ID, song);
+      }
+      // 谱面已修改并保存：清掉该谱面（本地命名空间）的历史成绩，避免旧成绩误导。
+      // 下载自在线的谱面 source 为 'local'，只会清掉本地副本成绩，不影响在线原曲。
+      if (target && target.source === 'local' && target.songId) {
+        clearHighScore(getScoreKey(target.songId, 'local'), target.diffName);
+      }
+      showAppToast(t('fab.saved'));
+    } catch (err) {
+      console.error(err);
+      showAppToast(t('editor.saveFailed'));
+    }
+  }, [currentChart, editorTarget, t, showAppToast]);
 
   const handleSongEnd = useCallback(() => {
     if (gameState !== 'editor') {
@@ -510,7 +747,7 @@ export function App() {
         let isNewScore = false;
         let isNewB = false;
         if (currentSongInfo && !autoPlay) {
-          const result = submitScore(currentSongInfo.songId, currentSongInfo.diffName, stats);
+          const result = submitScore(currentSongInfo.songKey, currentSongInfo.diffName, stats);
           isNewScore = result?.isNewScore ?? false;
           isNewB = result?.isNewBadge ?? false;
         }
@@ -520,7 +757,7 @@ export function App() {
           badge,
           isNewHighScore: isNewScore,
           isNewBadge: isNewB,
-          songId: currentSongInfo?.songId ?? null,
+          songId: currentSongInfo?.songKey ?? null,
           diffName: currentSongInfo?.diffName ?? null,
           meta: {
             title: currentChart.metadata.title,
@@ -762,26 +999,6 @@ export function App() {
       if (gameTimerRef.current) cancelAnimationFrame(gameTimerRef.current);
     };
   }, [gameState, editorPreviewPlaying, qualityMode]);
-
-  const handleSelectCustomSong = async (chart: ChartData, audioFile?: File) => {
-    setCurrentChart(chart);
-    if (audioFile) {
-      try {
-        await globalAudio.loadAudioFile(audioFile);
-        setHasCustomAudio(true);
-        handleStartGame(chart, true);
-      } catch (err) {
-        // Decode failed (e.g. Safari can't play OGG) — fall back to the
-        // procedural synth so the game still starts, and explain in console.
-        console.error('[audio] custom audio decode failed, using synth:', err);
-        setHasCustomAudio(false);
-        handleStartGame(chart, false);
-      }
-    } else {
-      setHasCustomAudio(false);
-      handleStartGame(chart, false);
-    }
-  };
 
   // Visual Editor Callbacks
   const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number) => {
@@ -1030,6 +1247,12 @@ export function App() {
           noteRenderDistance={noteRenderDistance}
           noteSizeScale={noteSizeScale}
           qualityMode={qualityMode}
+          antialias={qualityMode === 'custom' ? customAntialias : qualityMode !== 'low'}
+          allowBloom={qualityMode === 'custom' ? customBloom : (qualityMode === 'high' || qualityMode === 'ultra')}
+          allowParticles={qualityMode === 'custom' ? customParticles : (qualityMode === 'high' || qualityMode === 'ultra')}
+          allowDynamicLighting={qualityMode === 'custom' ? customDynamicLighting : qualityMode === 'ultra'}
+          allowHitEffects={qualityMode === 'custom' ? customHitEffects : qualityMode === 'ultra'}
+          renderScale={qualityMode === 'custom' ? customRenderScale : (qualityMode === 'low' ? 0.75 : 1.0)}
           autoPlay={autoPlay}
           playSession={playSession}
           isEditorMode={gameState === 'editor'}
@@ -1042,6 +1265,12 @@ export function App() {
           onMoveEditorNote={handleMoveEditorNote}
           onPlaceEditorNote={handlePlaceEditorNote}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
+          skinTextures={skinTextures}
+          defaultSkinInnerWidth={defaultSkinInnerWidth}
+          defaultSkinOuterWidth={defaultSkinOuterWidth}
+          defaultSkinOuterColor={defaultSkinOuterColor}
+          defaultSkinOuterAlpha={defaultSkinOuterAlpha}
+          defaultSkinJudgeWidth={defaultSkinJudgeWidth}
         />
       </div>
 
@@ -1126,6 +1355,7 @@ export function App() {
             setHasCustomAudio(true);
           }}
           onExitEditor={handleReturnToMenu}
+          onSaveToLocal={handleSaveChartToLocal}
           onStartPlayTest={handleStartPlayTest}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
         />
@@ -1279,7 +1509,7 @@ export function App() {
 
                   {/* Restart/Retry button (subtle accent-tinted glass) */}
                   <button
-                    onClick={() => isPlayTestMode ? handleStartPlayTest(false) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.diffName)}
+                    onClick={() => isPlayTestMode ? handleStartPlayTest(false) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songKey, currentSongInfo?.diffName)}
                     className="w-14 h-14 rounded-full border flex items-center justify-center transition cursor-pointer group"
                     title={t('hud.retry')}
                     style={{
@@ -1373,10 +1603,9 @@ export function App() {
             onClearResult={() => setResultInfo(null)}
             onRetryCustom={() => handleStartGame(currentChart, hasCustomAudio)}
             onToggleAutoPlay={() => setAutoPlay((v) => !v)}
-            onOpenDocs={() => setShowDocs(true)}
             onOpenSettings={() => setShowSettings(true)}
             onOpenEditor={handleOpenVisualEditor}
-            onOpenFileManager={() => setShowFileManager(true)}
+            onLaunchChartEditor={handleLaunchChartEditor}
             onSwitchLite={() => { window.location.href = 'lite/index.html'; }}
             onStartGame={(chart, hasAudio, songId, diffName) => handleStartGame(chart, hasAudio, songId, diffName)}
             onStateChange={handleSongSelectStateChange}
@@ -1385,12 +1614,6 @@ export function App() {
       )}
 
       <UnitTestModal isOpen={showUnitTest} onClose={() => setShowUnitTest(false)} />
-      <FileManagerModal
-        isOpen={showFileManager}
-        onClose={() => setShowFileManager(false)}
-        onSelectCustomSong={handleSelectCustomSong}
-      />
-      <DocModal isOpen={showDocs} onClose={() => setShowDocs(false)} />
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
@@ -1406,10 +1629,34 @@ export function App() {
         setNoteSizeScale={setNoteSizeScale}
         qualityMode={qualityMode}
         setQualityMode={setQualityMode}
+        customAntialias={customAntialias}
+        setCustomAntialias={setCustomAntialias}
+        customBloom={customBloom}
+        setCustomBloom={setCustomBloom}
+        customParticles={customParticles}
+        setCustomParticles={setCustomParticles}
+        customDynamicLighting={customDynamicLighting}
+        setCustomDynamicLighting={setCustomDynamicLighting}
+        customHitEffects={customHitEffects}
+        setCustomHitEffects={setCustomHitEffects}
+        customRenderScale={customRenderScale}
+        setCustomRenderScale={setCustomRenderScale}
         musicVolume={musicVolume}
         setMusicVolume={setMusicVolume}
         effectVolume={effectVolume}
         setEffectVolume={setEffectVolume}
+        selectedSkinId={selectedSkinId}
+        setSelectedSkinId={setSelectedSkinId}
+        defaultSkinInnerWidth={defaultSkinInnerWidth}
+        setDefaultSkinInnerWidth={setDefaultSkinInnerWidth}
+        defaultSkinOuterWidth={defaultSkinOuterWidth}
+        setDefaultSkinOuterWidth={setDefaultSkinOuterWidth}
+        defaultSkinOuterColor={defaultSkinOuterColor}
+        setDefaultSkinOuterColor={setDefaultSkinOuterColor}
+        defaultSkinOuterAlpha={defaultSkinOuterAlpha}
+        setDefaultSkinOuterAlpha={setDefaultSkinOuterAlpha}
+        defaultSkinJudgeWidth={defaultSkinJudgeWidth}
+        setDefaultSkinJudgeWidth={setDefaultSkinJudgeWidth}
       />
       {/* Clear Banner (FC / AP / AP+) */}
       {clearBanner && (
@@ -1428,6 +1675,13 @@ export function App() {
           >
             {clearBanner === 'FC' ? 'FULL COMBO' : clearBanner === 'AP' ? 'ALL PERFECT' : 'ALL PERFECT+'}
           </div>
+        </div>
+      )}
+
+      {/* 轻量 Toast（谱面保存反馈等） */}
+      {appToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[120] px-4 py-2 rounded-xl glass-panel-strong text-sm font-bold text-white/90 shadow-2xl border border-white/15">
+          {appToast}
         </div>
       )}
 

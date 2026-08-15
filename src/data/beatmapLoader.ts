@@ -54,11 +54,26 @@ export async function loadChartForDifficulty(
     const json = await res.json();
     const result = parseAndValidateChart(json);
     if (!result.valid || !result.chart) throw new Error(result.error || '谱面校验失败');
+    if (result.warnings?.length) {
+      console.warn(`谱面「${item.title}」已修补加载:`, result.warnings);
+    }
     return result.chart;
   } catch (e) {
     console.error('加载谱面出错', e);
     return getFallbackChart();
   }
+}
+
+/**
+ * 将难度名（可能形如 "Hard Lv.6" / "Easy Lv.3" / "Test Lv.0"）解析为
+ * 纯净名称与等级数字。无 Lv 后缀时等级记为 0（即不强制显示等级）。
+ */
+export function parseDifficultyMeta(raw: string): { name: string; level: number } {
+  const m = raw.match(/\s*[Ll]v\.?\s*(\d+(?:\.\d+)?)\s*$/);
+  if (m) {
+    return { name: raw.slice(0, m.index).trim(), level: Number(m[1]) };
+  }
+  return { name: raw, level: 0 };
 }
 
 export function resolveBeatmapUrl(url?: string): string {
@@ -84,12 +99,15 @@ export function buildBuiltinAlbum(): AlbumItem {
   bySong.forEach((charts, sid) => {
     const isFb = sid === 'fallback';
     const base = isFb ? '' : `${BASE_URL}beatmaps/${sid}/`;
-    const difficulties = charts.map(({ chart }) => ({
-      name: chart.metadata.difficulty,
-      level: typeof chart.metadata.difficulty === 'number' ? chart.metadata.difficulty : 1,
-      chartFile: isFb ? '' : `${base}chart.json`,
-      noteCount: Array.isArray(chart.notes) ? chart.notes.length : 0,
-    }));
+    const difficulties = charts.map(({ chart }) => {
+      const dmeta = parseDifficultyMeta(chart.metadata.difficulty);
+      return {
+        name: dmeta.name,
+        level: dmeta.level,
+        chartFile: isFb ? '' : `${base}chart.json`,
+        noteCount: Array.isArray(chart.notes) ? chart.notes.length : 0,
+      };
+    });
     songs.push({
       type: 'song',
       id: isFb ? FALLBACK_SONG_ID : sid,
@@ -299,6 +317,17 @@ export function findAlbumById(nodes: BeatmapItem[], id: string): AlbumItem | nul
       const found = findAlbumById(n.songs, id);
       if (found) return found;
     }
+  }
+  return null;
+}
+
+/** 在整棵树中按 id 递归查找任意节点（专辑或曲目），用于剪贴板标题展示。 */
+export function findItemById(nodes: BeatmapItem[], id: string): BeatmapItem | null {
+  const stack: BeatmapItem[] = [...nodes];
+  while (stack.length) {
+    const n = stack.pop()!;
+    if (n.id === id) return n;
+    if (n.type === 'album') stack.push(...n.songs);
   }
   return null;
 }

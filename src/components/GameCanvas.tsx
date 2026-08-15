@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType, SkinTextureSet } from '../types/game';
 import { evaluateJudgement, calculateNoteScore, JUDGEMENT_COLORS } from '../utils/scoring';
 import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
@@ -29,6 +29,18 @@ interface GameCanvasProps {
   noteRenderDistance?: number;
   noteSizeScale?: number;
   qualityMode?: QualityMode;
+  /** 抗锯齿开关（自定义档位下由用户控制；其余档位按预设推导后传入）。 */
+  antialias?: boolean;
+  /** 是否允许 Bloom 辉光（仍会受谱面 effectToggles.bloom 进一步约束）。 */
+  allowBloom?: boolean;
+  /** 是否允许背景粒子（仍会受谱面 effectToggles.particles 进一步约束）。 */
+  allowParticles?: boolean;
+  /** 是否允许极高档的动态光照（音符点亮隧道墙体与光源池）。 */
+  allowDynamicLighting?: boolean;
+  /** 是否允许极高档的打击光粒碎裂特效。 */
+  allowHitEffects?: boolean;
+  /** 渲染倍率（分辨率缩放）：1.0 = 设备像素比上限，<1 降低分辨率，>1 超采样。 */
+  renderScale?: number;
   autoPlay: boolean;
   playSession: number;
   isEditorMode?: boolean;
@@ -41,6 +53,14 @@ interface GameCanvasProps {
   onMoveEditorNote?: (id: string, x: number, y: number) => void;
   onPlaceEditorNote?: (x: number, y: number) => void;
   onApplyQuickCreateDelta?: (delta: QuickCreateDelta) => void;
+  /** 预加载后的皮肤贴图集合；为 null 时走默认纯色外观。 */
+  skinTextures?: SkinTextureSet | null;
+  /** 默认皮肤（未选皮肤包时）自定义项：内框/外框/判定框。 */
+  defaultSkinInnerWidth?: number;
+  defaultSkinOuterWidth?: number;
+  defaultSkinOuterColor?: string;
+  defaultSkinOuterAlpha?: number;
+  defaultSkinJudgeWidth?: number;
 }
 
 const TAP_SIZE = 1.6;
@@ -69,14 +89,6 @@ function fitCameraDistance(aspect: number): number {
   const dHorizontal = FIT_HALF / (tanHalf * Math.max(aspect, 0.2));
   return Math.max(dVertical, dHorizontal, 4.4);
 }
-
-const diamondPts = (h: number) => [
-  new THREE.Vector3(0, h, 0),
-  new THREE.Vector3(h, 0, 0),
-  new THREE.Vector3(0, -h, 0),
-  new THREE.Vector3(-h, 0, 0),
-  new THREE.Vector3(0, h, 0),
-];
 
 /**
  * Module-level scratch vectors — reused every frame inside the slide pipe
@@ -250,32 +262,158 @@ function isSharedGeo(geo: THREE.BufferGeometry | undefined | null): boolean {
   return !!geo?.userData?.shared;
 }
 
-// Tap: square outline + filled plane.
-const _tapOutlineGeo = markShared(new THREE.BufferGeometry().setFromPoints([
-  new THREE.Vector3(-TAP_SIZE / 2, -TAP_SIZE / 2, 0),
-  new THREE.Vector3(TAP_SIZE / 2, -TAP_SIZE / 2, 0),
-  new THREE.Vector3(TAP_SIZE / 2, TAP_SIZE / 2, 0),
-  new THREE.Vector3(-TAP_SIZE / 2, TAP_SIZE / 2, 0),
-  new THREE.Vector3(-TAP_SIZE / 2, -TAP_SIZE / 2, 0),
-]));
-const _tapFillGeo = markShared(new THREE.PlaneGeometry(TAP_SIZE * 0.94, TAP_SIZE * 0.94));
+// Slide: filled plane for the *skin* texture path (rotated 45° at mesh level).
+// 默认皮肤的填充已改用软边纹理（见 makeSoftFillTexture），不再用硬边几何体。
+const _slideFillGeo = markShared(new THREE.PlaneGeometry(SLIDE_SIZE * 0.94, SLIDE_SIZE * 0.94));
 
-// Touch: circular outline + filled disc (32 segments).
-const _touchOutlinePts: THREE.Vector3[] = (() => {
+// Generic 1×1 plane: default-skin rings / fills attach a soft-edged CanvasTexture
+// and scale the MESH to the texture's world size (keeps a single shared geometry).
+const _unitGeo = markShared(new THREE.PlaneGeometry(1, 1));
+
+// Full-size planes used when a skin texture *fully* replaces a note (no colored
+// border). The texture's own alpha defines the note shape; we tint via
+// material.color × map, so a plain opaque quad sized to the note bbox is enough.
+const _tapSkinGeo = markShared(new THREE.PlaneGeometry(TAP_SIZE, TAP_SIZE));
+const _touchSkinGeo = markShared(new THREE.PlaneGeometry(TOUCH_SIZE, TOUCH_SIZE));
+
+// --- 默认皮肤（未选皮肤包时）：用「软边 Canvas 纹理」绘制可调粗细的描边/填充 ---
+// 之前的 ShapeGeometry 硬边环形在音符移动时会产生典型的"低分辨率 / 无抗锯齿"
+// 式闪烁（时间域锯齿）；皮肤贴图不闪是因为纹理自带平滑的 alpha 边缘。这里同样
+// 用 canvas 绘制抗锯齿的环形/填充形，作为纹理贴到 _unitGeo 平面上，使默认皮肤
+// 与皮肤包一样平滑。环的径向厚度由 defaultSkinInnerWidth / defaultSkinOuterWidth
+// （世界单位）控制。
+type RingPt = [number, number];
+interface SoftShapeTex { texture: THREE.CanvasTexture; size: number; }
+const softShapeTexCache = new Map<string, SoftShapeTex>();
+
+function softShapeBBox(pts: RingPt[]) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < minX) minX = x; if (y < minY) minY = y;
+    if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/** 软边环形纹理：以线宽 thickness（世界单位）沿多边形描边，环带落在 [maxR-thickness, maxR]。 */
+function makeSoftRingTexture(outer: RingPt[], thickness: number): SoftShapeTex {
+  const key = `r|${JSON.stringify(outer)}|${thickness.toFixed(4)}`;
+  const hit = softShapeTexCache.get(key);
+  if (hit) return hit;
+  const { minX, minY, maxX, maxY } = softShapeBBox(outer);
+  const pad = Math.max(thickness * 2.5, 0.02);
+  const size = Math.max(maxX - minX, maxY - minY) + pad * 2;
+  let maxR = 0;
+  for (const [x, y] of outer) { const r = Math.hypot(x, y); if (r > maxR) maxR = r; }
+  // 中线半径 = maxR - thickness/2，使 thickness 宽描边恰好落在 [maxR-thickness, maxR]。
+  const k = maxR > 0 ? Math.max(0, maxR - thickness / 2) / maxR : 0;
+  const RES = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = RES;
+  const ctx = canvas.getContext('2d')!;
+  const s = RES / size;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(1, thickness * s);
+  ctx.lineJoin = 'miter';
+  ctx.miterLimit = 4;
+  ctx.beginPath();
+  ctx.moveTo((outer[0][0] * k + size / 2) * s, (size / 2 - outer[0][1] * k) * s);
+  for (let i = 1; i < outer.length; i++) {
+    ctx.lineTo((outer[i][0] * k + size / 2) * s, (size / 2 - outer[i][1] * k) * s);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  const record: SoftShapeTex = { texture, size };
+  softShapeTexCache.set(key, record);
+  return record;
+}
+
+/** 软边填充纹理：多边形实心填充（canvas 自带抗锯齿，边缘平滑）。 */
+function makeSoftFillTexture(pts: RingPt[]): SoftShapeTex {
+  const key = `f|${JSON.stringify(pts)}`;
+  const hit = softShapeTexCache.get(key);
+  if (hit) return hit;
+  const { minX, minY, maxX, maxY } = softShapeBBox(pts);
+  const pad = 0.02;
+  const size = Math.max(maxX - minX, maxY - minY) + pad * 2;
+  const RES = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = RES;
+  const ctx = canvas.getContext('2d')!;
+  const s = RES / size;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo((pts[0][0] + size / 2) * s, (size / 2 - pts[0][1]) * s);
+  for (let i = 1; i < pts.length; i++) {
+    ctx.lineTo((pts[i][0] + size / 2) * s, (size / 2 - pts[i][1]) * s);
+  }
+  ctx.closePath();
+  ctx.fill();
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  const record: SoftShapeTex = { texture, size };
+  softShapeTexCache.set(key, record);
+  return record;
+}
+
+/** 默认皮肤描边环网格（软边纹理），已开启 bloom 层。 */
+function makeRingMesh(outer: RingPt[], thickness: number, color: string | THREE.Color, opacity: number, isBorder?: string): THREE.Mesh {
+  const rec = makeSoftRingTexture(outer, thickness);
+  const mesh = new THREE.Mesh(
+    _unitGeo,
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity, map: rec.texture, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  mesh.scale.set(rec.size, rec.size, 1);
+  if (isBorder) mesh.userData.isBorder = isBorder;
+  mesh.layers.enable(BLOOM_LAYER);
+  return mesh;
+}
+
+/** 默认皮肤填充面（软边纹理），略微后移让描边稳定压在其上。 */
+function makeSoftFillMesh(pts: RingPt[], color: string | THREE.Color, opacity: number): THREE.Mesh {
+  const rec = makeSoftFillTexture(pts);
+  const mesh = new THREE.Mesh(
+    _unitGeo,
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity, map: rec.texture, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  mesh.scale.set(rec.size, rec.size, 1);
+  mesh.position.z = FILL_Z;
+  mesh.userData.defaultFill = true;
+  mesh.layers.enable(BLOOM_LAYER);
+  return mesh;
+}
+const TAP_RING_OUTER: RingPt[] = [
+  [-TAP_SIZE / 2, -TAP_SIZE / 2],
+  [TAP_SIZE / 2, -TAP_SIZE / 2],
+  [TAP_SIZE / 2, TAP_SIZE / 2],
+  [-TAP_SIZE / 2, TAP_SIZE / 2],
+];
+const TOUCH_RING_OUTER: RingPt[] = (() => {
   const rad = TOUCH_SIZE / 2;
-  const pts: THREE.Vector3[] = [];
-  for (let i = 0; i <= 32; i++) {
-    const a = (i / 32) * Math.PI * 2;
-    pts.push(new THREE.Vector3(Math.cos(a) * rad, Math.sin(a) * rad, 0));
+  const pts: RingPt[] = [];
+  for (let i = 0; i < 40; i++) {
+    const a = (i / 40) * Math.PI * 2;
+    pts.push([Math.cos(a) * rad, Math.sin(a) * rad]);
   }
   return pts;
 })();
-const _touchOutlineGeo = markShared(new THREE.BufferGeometry().setFromPoints(_touchOutlinePts));
-const _touchFillGeo = markShared(new THREE.CircleGeometry((TOUCH_SIZE / 2) * 0.92, 32));
+const SLIDE_RING_OUTER: RingPt[] = [
+  [0, -SLIDE_HALF],
+  [SLIDE_HALF, 0],
+  [0, SLIDE_HALF],
+  [-SLIDE_HALF, 0],
+];
 
-// Slide: diamond outline + filled plane (rotated 45° at mesh level).
-const _slideOutlineGeo = markShared(new THREE.BufferGeometry().setFromPoints(diamondPts(SLIDE_HALF)));
-const _slideFillGeo = markShared(new THREE.PlaneGeometry(SLIDE_SIZE * 0.94, SLIDE_SIZE * 0.94));
+// 描边闪烁的根因：默认皮肤的填充/描边是「硬边透明几何体」，音符移动时产生
+// 时间域锯齿（看起来像低分辨率+无抗锯齿）。皮肤贴图不闪是因为纹理自带平滑
+// alpha 边缘。现已把默认皮肤的填充/描边改为软边 Canvas 纹理（makeSoftRingTexture /
+// makeSoftFillTexture）。FILL_Z 让半透明填充面略微后移，保证描边环稳定压在填充之上；
+// 所有透明材质均 depthWrite:false，避免写入深度而错误遮挡更远音符的描边。
+const FILL_Z = -0.012;
 
 // Slide pipes no longer share a geometry: each builds its own curved,
 // angle-rotated tube (see buildSlideTubeGeometry) so easing/angle vary per segment.
@@ -311,8 +449,9 @@ interface SlideRt {
 interface SlideMeshSet {
   nodes: Array<{
     group: THREE.Group;
-    /** Only the slide head keeps a diamond outline. */
-    wire?: THREE.LineBasicMaterial;
+    /** Only the slide head keeps a border: inner (note color) + outer (custom). */
+    innerWire?: THREE.MeshBasicMaterial;
+    outerWire?: THREE.MeshBasicMaterial;
     fill: THREE.MeshBasicMaterial;
     /** Only the slide head has a 2D judgement projection guide. */
     proj?: THREE.Group;
@@ -346,6 +485,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   noteRenderDistance = 70,
   noteSizeScale = 1.0,
   qualityMode = 'standard',
+  antialias = true,
+  allowBloom = false,
+  allowParticles = false,
+  allowDynamicLighting = false,
+  allowHitEffects = false,
+  renderScale = 1.0,
   autoPlay,
   playSession,
   isEditorMode = false,
@@ -358,6 +503,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   onMoveEditorNote,
   onPlaceEditorNote,
   onApplyQuickCreateDelta,
+  skinTextures,
+  defaultSkinInnerWidth = 0.05,
+  defaultSkinOuterWidth = 0,
+  defaultSkinOuterColor = '#22d3ee',
+  defaultSkinOuterAlpha = 1,
+  defaultSkinJudgeWidth = 0.05,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const pointersRef = useRef<Map<number, { x: number; y: number; down: boolean; active: boolean; type: string }>>(new Map());
@@ -510,8 +661,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const projectionLeadRef = useRef(projectionLeadMs);
   const renderDistRef = useRef(noteRenderDistance);
   const sizeScaleRef = useRef(noteSizeScale);
+  const skinTexturesRef = useRef<SkinTextureSet | null>(skinTextures ?? null);
+  const defaultSkinInnerWidthRef = useRef(defaultSkinInnerWidth);
+  const defaultSkinOuterWidthRef = useRef(defaultSkinOuterWidth);
+  const defaultSkinOuterColorRef = useRef(defaultSkinOuterColor);
+  const defaultSkinOuterAlphaRef = useRef(defaultSkinOuterAlpha);
+  const defaultSkinJudgeWidthRef = useRef(defaultSkinJudgeWidth);
   const lowQualityModeRef = useRef(qualityMode === 'low');
-  const qualityModeRef = useRef(qualityMode);
+  const antialiasRef = useRef(antialias);
+  const renderScaleRef = useRef(renderScale);
+  const allowBloomRef = useRef(allowBloom);
+  const allowParticlesRef = useRef(allowParticles);
+  const allowDynamicLightingRef = useRef(allowDynamicLighting);
+  const allowHitEffectsRef = useRef(allowHitEffects);
   /** Chart effect toggles mirror — when false, projection/gridLines are
    *  forcibly disabled regardless of `projectionLeadMs` / tunnel.visible.
    *  Default to all-true if the chart omits effectToggles (see chartParser). */
@@ -589,9 +751,66 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   useEffect(() => { renderDistRef.current = noteRenderDistance; }, [noteRenderDistance]);
   useEffect(() => { sizeScaleRef.current = noteSizeScale; }, [noteSizeScale]);
   useEffect(() => {
+    const prev = skinTexturesRef.current;
+    skinTexturesRef.current = skinTextures ?? null;
+    // 释放上一套皮肤贴图，避免 GPU 资源泄漏。
+    if (prev) {
+      (Object.values(prev) as (THREE.Texture | undefined)[]).forEach((t) => t?.dispose?.());
+    }
+    // 贴图变更时移除并销毁已构建的 note / slide 网格，使其在下帧用新贴图重建。
+    noteMeshesRef.current.forEach((entry) => {
+      entry.group?.traverse((o) => {
+        const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+        mat?.dispose?.();
+      });
+      entry.group?.removeFromParent();
+    });
+    noteMeshesRef.current.clear();
+    slideMeshesRef.current.forEach((sm) => {
+      sm.nodes.forEach((nd) => {
+        nd.group.removeFromParent();
+        if (nd.proj) nd.proj.removeFromParent();
+      });
+      sm.pipes.forEach((p) => p.mesh.removeFromParent());
+    });
+    slideMeshesRef.current.clear();
+  }, [skinTextures]);
+  // 默认皮肤自定义项：变更时同步到 ref（新建 note 时读取），并重建已存在的
+  // 默认外观网格，使线框粗细/颜色即时生效。
+  useEffect(() => {
+    defaultSkinInnerWidthRef.current = defaultSkinInnerWidth;
+    defaultSkinOuterWidthRef.current = defaultSkinOuterWidth;
+    defaultSkinOuterColorRef.current = defaultSkinOuterColor;
+    defaultSkinOuterAlphaRef.current = defaultSkinOuterAlpha;
+    defaultSkinJudgeWidthRef.current = defaultSkinJudgeWidth;
+    if (!skinTexturesRef.current) {
+      noteMeshesRef.current.forEach((entry) => {
+        entry.group?.traverse((o) => {
+          const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+          mat?.dispose?.();
+        });
+        entry.group?.removeFromParent();
+      });
+      noteMeshesRef.current.clear();
+      slideMeshesRef.current.forEach((sm) => {
+        sm.nodes.forEach((nd) => {
+          nd.group.removeFromParent();
+          if (nd.proj) nd.proj.removeFromParent();
+        });
+        sm.pipes.forEach((p) => p.mesh.removeFromParent());
+      });
+      slideMeshesRef.current.clear();
+    }
+  }, [defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth, skinTextures]);
+  useEffect(() => {
     lowQualityModeRef.current = qualityMode === 'low';
-    qualityModeRef.current = qualityMode;
   }, [qualityMode]);
+  useEffect(() => { antialiasRef.current = antialias; }, [antialias]);
+  useEffect(() => { renderScaleRef.current = renderScale; }, [renderScale]);
+  useEffect(() => { allowBloomRef.current = allowBloom; }, [allowBloom]);
+  useEffect(() => { allowParticlesRef.current = allowParticles; }, [allowParticles]);
+  useEffect(() => { allowDynamicLightingRef.current = allowDynamicLighting; }, [allowDynamicLighting]);
+  useEffect(() => { allowHitEffectsRef.current = allowHitEffects; }, [allowHitEffects]);
   useEffect(() => { autoPlayRef.current = autoPlay; }, [autoPlay]);
   useEffect(() => { isEditorModeRef.current = isEditorMode; }, [isEditorMode]);
   useEffect(() => { activeToolRef.current = activeEditorTool; }, [activeEditorTool]);
@@ -755,6 +974,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
   useEffect(() => { resetPlayState(); }, [playSession, chart]);
 
+  // 返回菜单 / 结算（非 暂停、非编辑器）时清空所有 note / projection / slide / burst
+  // 网格，避免中途退出后 projection 等残留在屏幕上不消失。
+  useEffect(() => {
+    if (!isPlaying && !isPaused && !isEditorMode) {
+      resetPlayState();
+    }
+  }, [isPlaying, isPaused, isEditorMode]);
+
   // `vpKey` is bumped when the 3D viewport becomes visible again (see the
   // ResizeObserver below) so the heavy setup effect re-runs with correct
   // dimensions and the metadata edited while hidden.
@@ -794,10 +1021,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const camera = new THREE.PerspectiveCamera(CAMERA_VFOV, w / h, 0.1, 1000);
     const dist0 = fitCameraDistance(w / h);
     camera.position.set(0, CAMERA_AXIS_Y, dist0); camera.lookAt(0, CAMERA_AXIS_Y, 0); cameraRef.current = camera;
-    // Optimize renderer dynamically for low quality mode (disable antialiasing on weak GPUs)
-    const isLow = qualityModeRef.current === 'low';
+    // 抗锯齿 / 渲染倍率由传入的细项控制（自定义档位下由用户决定）。
+    const useAA = antialiasRef.current;
     const renderer = new THREE.WebGLRenderer({
-      antialias: !isLow,
+      antialias: useAA,
       alpha: true,
       powerPreference: 'high-performance'
     });
@@ -805,8 +1032,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // plane" behaviour (and the editor far-plane trim) without rebuilding geometry.
     renderer.localClippingEnabled = true;
     renderer.setSize(w, h);
-    // Low quality mode locks pixel ratio to exactly 1.0 (saves up to 3x GPU power on 2K displays)
-    renderer.setPixelRatio(isLow ? 1.0 : Math.min(window.devicePixelRatio, 1.5));
+    // 渲染倍率（分辨率缩放）：>1 超采样更清晰但更耗 GPU，<1 降分辨率换帧率。
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5) * renderScaleRef.current);
     // Remove any previous canvas without touching other DOM children (text overlays, etc.)
     const existingCanvas = container.querySelector('canvas');
     if (existingCanvas) existingCanvas.remove();
@@ -873,8 +1100,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // NOTE: EffectComposer renders to its own framebuffer (opaque black),
     // so we paint a radial gradient onto a CanvasTexture as scene.background
     // — otherwise the CSS ambient bg behind the canvas would be hidden.
-    const qm = qualityModeRef.current;
-    const useBloom = (qm === 'high' || qm === 'ultra') && toggles.bloom !== false;
+    const useBloom = allowBloomRef.current && toggles.bloom !== false;
     if (useBloom) {
       // Build radial-gradient CanvasTexture mirroring App.tsx ambient bg.
       const bg = chart.metadata.bgScheme;
@@ -950,7 +1176,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     //
     // Distribution follows the user's "note render distance" setting so the
     // particle cloud density scales with the visible tunnel length.
-    const useParticles = (qm === 'high' || qm === 'ultra') && toggles.particles !== false;
+    const useParticles = allowParticlesRef.current && toggles.particles !== false;
     if (useParticles) {
       // Build shared soft-circle sprite texture once (32×32 radial gradient).
       // Used by both ambient particles and ultra-mode shatter bursts.
@@ -1014,7 +1240,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // 1000-note charts, so instead we use a small pool of N lights that are
     // repositioned each frame to follow the closest-to-judge-plane notes
     // (see render loop). Notes themselves stay MeshBasicMaterial (cheap).
-    if (qm === 'ultra') {
+    if (allowDynamicLightingRef.current) {
       const walls = new THREE.Group();
       // Wall material: deep navy base + transparent so scene.background
       // (radial gradient) shows through; MeshStandardMaterial catches light
@@ -1128,7 +1354,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       ultraWallsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, noteRenderDistance, vpKey]);
+  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, antialias, renderScale, allowBloom, allowParticles, allowDynamicLighting, allowHitEffects, noteRenderDistance, vpKey]);
 
   // ====== Quick-Create time/beat helpers =========================================
   /** Chart-clock timestamp -> beat, via the shared inverse in beatTime.ts.
@@ -1251,34 +1477,85 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     return false;
   };
 
+  // 默认皮肤：为音符添加 内框(紧贴音符、跟随音符色) + 外框(可自定义颜色/透明度) 两道软边环形描边。
+  // 颜色逐帧由渲染循环设置；此处仅按当前设置烘焙纹理粗细。
+  const addDefaultBorders = (g: THREE.Group, ringOuter: RingPt[]) => {
+    // 多边形外接半径（圆心在原点，取各顶点到原点距离的最大值）。
+    const maxR = (() => { let m = 0; for (const [x, y] of ringOuter) m = Math.max(m, Math.hypot(x, y)); return m; })();
+    const gap = maxR * 0.05; // 外框与内框之间的留白
+    g.add(makeRingMesh(ringOuter, defaultSkinInnerWidthRef.current, '#ffffff', 1, 'inner'));
+    // 外框需位于内框之外：将多边形整体放大到 maxR + gap + 外框粗细。
+    const outerScale = (maxR + gap + defaultSkinOuterWidthRef.current) / maxR;
+    const outerPts = ringOuter.map(([x, y]) => [x * outerScale, y * outerScale] as RingPt);
+    g.add(makeRingMesh(outerPts, defaultSkinOuterWidthRef.current, defaultSkinOuterColorRef.current, 1, 'outer'));
+  };
+
   const mkTap = (c: string) => {
     const g = new THREE.Group();
-    const line = new THREE.Line(_tapOutlineGeo, new THREE.LineBasicMaterial({ color: new THREE.Color(c), linewidth: 2, transparent: true, opacity: 1 }));
-    const fill = new THREE.Mesh(_tapFillGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(c), transparent: true, opacity: 0.18, side: THREE.DoubleSide }));
-    // Tag for SelectiveBloom — only notes contribute to bloom, not tunnel/UI.
-    line.layers.enable(BLOOM_LAYER);
-    fill.layers.enable(BLOOM_LAYER);
-    g.add(line); g.add(fill);
+    const tapTex = skinTexturesRef.current?.tap;
+    // 皮肤生效：整块替换为灰度贴图（按判定色染色），不再绘制彩色边框。
+    if (tapTex) {
+      const fill = new THREE.Mesh(
+        _tapSkinGeo,
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(c), map: tapTex, transparent: true, opacity: 1, alphaTest: 0.02, side: THREE.DoubleSide, depthWrite: false }),
+      );
+      fill.layers.enable(BLOOM_LAYER);
+      g.add(fill);
+      return g;
+    }
+    // 默认外观：软边填充 + 内框(音符色) + 外框(可自定义) 双环描边。
+    addDefaultBorders(g, TAP_RING_OUTER);
+    g.add(makeSoftFillMesh(TAP_RING_OUTER.map(([x, y]) => [x * 0.94, y * 0.94] as RingPt), c, 0.18));
     return g;
   };
 
   const mkTouch = (c: string) => {
     const g = new THREE.Group();
-    const line = new THREE.Line(_touchOutlineGeo, new THREE.LineBasicMaterial({ color: new THREE.Color(c), linewidth: 2, transparent: true, opacity: 1 }));
-    const fill = new THREE.Mesh(_touchFillGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(c), transparent: true, opacity: 0.22, side: THREE.DoubleSide }));
-    line.layers.enable(BLOOM_LAYER);
-    fill.layers.enable(BLOOM_LAYER);
-    g.add(line); g.add(fill);
+    const touchTex = skinTexturesRef.current?.touch;
+    // 皮肤生效：整块替换为灰度贴图（按判定色染色），不再绘制彩色边框。
+    if (touchTex) {
+      const fill = new THREE.Mesh(
+        _touchSkinGeo,
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(c), map: touchTex, transparent: true, opacity: 1, alphaTest: 0.02, side: THREE.DoubleSide, depthWrite: false }),
+      );
+      fill.layers.enable(BLOOM_LAYER);
+      g.add(fill);
+      return g;
+    }
+    // 默认外观：软边填充 + 内框(音符色) + 外框(可自定义) 双环描边。
+    addDefaultBorders(g, TOUCH_RING_OUTER);
+    g.add(makeSoftFillMesh(TOUCH_RING_OUTER.map(([x, y]) => [x * 0.92, y * 0.92] as RingPt), c, 0.22));
     return g;
   };
 
+  // 按 note 类型取投影贴图：优先专属键，缺失时回退共享 projection。
+  const pickProj = (nt: NoteType): THREE.Texture | undefined => {
+    const s = skinTexturesRef.current;
+    if (!s) return undefined;
+    if (nt === 'tap') return s.projTap ?? s.projTouch ?? s.projSlide ?? s.projection;
+    if (nt === 'touch') return s.projTouch ?? s.projTap ?? s.projSlide ?? s.projection;
+    return s.projSlide ?? s.projTap ?? s.projTouch ?? s.projection;
+  };
+  const projSize = (nt: NoteType) => (nt === 'tap' ? TAP_SIZE : nt === 'touch' ? TOUCH_SIZE : SLIDE_SIZE);
+
   const mkProj = (type: NoteType, c: string) => {
     const g = new THREE.Group();
-    // Reuse shared outline geometries — the projection guide is faint and
-    // animated (opacity 0 → target), so the 24-vs-32 segment difference on the
-    // old per-instance touch circle is visually negligible.
-    const geo = type === 'tap' ? _tapOutlineGeo : type === 'touch' ? _touchOutlineGeo : _slideOutlineGeo;
-    g.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: new THREE.Color(c), transparent: true, opacity: 0 })));
+    const projTex = pickProj(type);
+    if (projTex) {
+      // 皮肤投影：灰度贴图绘制在"与屏幕平行"的判定面（xy 平面）上，由
+      // material.color × map 染色。不做 x 轴旋转，否则会落到 xz 平面（水平）。
+      const size = projSize(type);
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(size, size),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(c), transparent: true, opacity: 0.5, map: projTex, alphaTest: 0.02, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      mesh.layers.enable(BLOOM_LAYER);
+      g.add(mesh);
+      return g;
+    }
+    // 默认外观：判定框（投影引导）颜色恒等于音符色，仅粗细可调。
+    const outer = type === 'tap' ? TAP_RING_OUTER : type === 'touch' ? TOUCH_RING_OUTER : SLIDE_RING_OUTER;
+    g.add(makeRingMesh(outer, defaultSkinJudgeWidthRef.current, c, 0, 'judge'));
     return g;
   };
 
@@ -1291,11 +1568,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // note visuals: negate because Three's +rotation.z is counterclockwise.
     g.rotation.z = -(angle ?? 0);
     const col = new THREE.Color(cfg.hex);
-    // Burst geometry is shared — bursts spawn on every hit, so reusing the
-    // shared outline geo (instead of allocating + disposing per burst) removes
-    // a significant per-hit allocation source.
-    const geo = nt === 'tap' ? _tapOutlineGeo : nt === 'touch' ? _touchOutlineGeo : _slideOutlineGeo;
-    g.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.95 })));
+    // 打击特效框复用同类型投影贴图，但按"判定等级"染色（而非 note 颜色）。
+    const projTex = pickProj(nt);
+    if (projTex) {
+      const size = projSize(nt);
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(size, size),
+        new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.95, map: projTex, alphaTest: 0.02, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      mesh.layers.enable(BLOOM_LAYER);
+      g.add(mesh);
+    } else {
+      // 默认外观：用软边环形当作打击框，粗细使用判定框宽度。
+      const outer = nt === 'tap' ? TAP_RING_OUTER : nt === 'touch' ? TOUCH_RING_OUTER : SLIDE_RING_OUTER;
+      g.add(makeRingMesh(outer, defaultSkinJudgeWidthRef.current, col, 0.95));
+    }
     const visualScale = sizeScaleRef.current;
     g.scale.set(visualScale, visualScale, 1);
     scene.add(g);
@@ -1313,7 +1600,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // the note's own shape (square for tap, circle for touch, diamond for
     // slide) so it looks like the note literally broke apart. Color = note
     // color (not judgement color) so the burst matches the note's identity.
-    if (qualityModeRef.current === 'ultra' && j !== 'Miss') {
+    if (allowHitEffectsRef.current && j !== 'Miss') {
       const noteCol = new THREE.Color(noteColorHex || cfg.hex);
       const PCOUNT = 90;
       const pos = new Float32Array(PCOUNT * 3);
@@ -1663,28 +1950,72 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     for (let i = 0; i < count; i++) {
       const group = new THREE.Group();
       const isHead = i === 0;
-      let wire: THREE.LineBasicMaterial | undefined;
+      const slideTex = skinTexturesRef.current?.slide;
+      let innerWire: THREE.MeshBasicMaterial | undefined;
+      let outerWire: THREE.MeshBasicMaterial | undefined;
 
-      // Only the head node keeps the diamond outline. Child nodes are fill-only.
-      if (isHead) {
-        wire = new THREE.LineBasicMaterial({ color: new THREE.Color(colorHex), linewidth: 2 });
-      } else {
-        // F*ck, I think the outline is still necessary.
-        wire = new THREE.LineBasicMaterial({ color: new THREE.Color(colorHex), linewidth: 1 });
+      // 皮肤生效时整块替换 node，不绘制彩色边框。否则保留 内框(音符色)+外框(自定义) 双环软边描边。
+      if (!slideTex) {
+        // 默认皮肤：软边环形描边（内框=音符色，外框=自定义颜色）。
+        const maxR = (() => { let m = 0; for (const [x, y] of SLIDE_RING_OUTER) m = Math.max(m, Math.hypot(x, y)); return m; })();
+        const gap = maxR * 0.05;
+        const recIn = makeSoftRingTexture(SLIDE_RING_OUTER, defaultSkinInnerWidthRef.current);
+        innerWire = new THREE.MeshBasicMaterial({
+          color: new THREE.Color(colorHex),
+          transparent: true,
+          opacity: 0,
+          map: recIn.texture,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        });
+        const innerRing = new THREE.Mesh(_unitGeo, innerWire);
+        innerRing.scale.set(recIn.size, recIn.size, 1);
+        innerRing.userData.isBorder = 'inner';
+        innerRing.layers.enable(BLOOM_LAYER);
+        group.add(innerRing);
+
+        const outerScale = (maxR + gap + defaultSkinOuterWidthRef.current) / maxR;
+        const outerPts = SLIDE_RING_OUTER.map(([x, y]) => [x * outerScale, y * outerScale] as RingPt);
+        const recOut = makeSoftRingTexture(outerPts, defaultSkinOuterWidthRef.current);
+        outerWire = new THREE.MeshBasicMaterial({
+          color: new THREE.Color(defaultSkinOuterColorRef.current),
+          transparent: true,
+          opacity: 0,
+          map: recOut.texture,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        });
+        const outerRing = new THREE.Mesh(_unitGeo, outerWire);
+        outerRing.scale.set(recOut.size, recOut.size, 1);
+        outerRing.userData.isBorder = 'outer';
+        outerRing.layers.enable(BLOOM_LAYER);
+        group.add(outerRing);
       }
-      const wireLine = new THREE.Line(_slideOutlineGeo, wire);
-        wireLine.layers.enable(BLOOM_LAYER);
-        group.add(wireLine);
 
       const fill = new THREE.MeshBasicMaterial({
         color: new THREE.Color(colorHex),
         transparent: true,
-        opacity: isHead ? 0.2 : 0.26,
+        opacity: slideTex ? 1 : (isHead ? 0.2 : 0.26),
         side: THREE.DoubleSide,
         depthWrite: false,
       });
-      const plane = new THREE.Mesh(_slideFillGeo, fill);
-      plane.rotation.z = Math.PI / 4;
+      let plane: THREE.Mesh;
+      if (slideTex) {
+        // 皮肤：用灰度贴图替换 slide 节点纯色填充。
+        fill.map = slideTex;
+        fill.alphaTest = 0.02;
+        plane = new THREE.Mesh(_slideFillGeo, fill);
+        plane.position.z = FILL_Z;
+        plane.rotation.z = Math.PI / 4;
+      } else {
+        // 默认皮肤：软边半透明填充（菱形），替代硬边几何填充以消除边缘闪烁。
+        const rec = makeSoftFillTexture(SLIDE_RING_OUTER.map(([x, y]) => [x * 0.94, y * 0.94] as RingPt));
+        fill.map = rec.texture;
+        fill.userData.defaultFill = true;
+        plane = new THREE.Mesh(_unitGeo, fill);
+        plane.scale.set(rec.size, rec.size, 1);
+        plane.position.z = FILL_Z;
+      }
       plane.layers.enable(BLOOM_LAYER);
       group.add(plane);
       group.visible = false;
@@ -1699,7 +2030,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         proj.visible = false;
         scene.add(proj);
       }
-      nodes.push({ group, wire, fill, proj, projMat });
+      nodes.push({ group, innerWire, outerWire, fill, proj, projMat });
     }
     const pipes: SlideMeshSet['pipes'] = [];
     for (let i = 0; i < count - 1; i++) {
@@ -2108,9 +2439,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // with negative scroll speed a note can come back into the visible
           // Z range visually, but it was already "judged" in the timeline and
           // should stay gone (matching gameplay behaviour).
-          const vis = isEditorModeRef.current
+          const vis = (isEditorModeRef.current
             ? (z >= spawnLimit && z <= 6 && allNodes[i].timeSec >= curTime - 0.05)
-            : (z >= spawnLimit && z <= 6 && !judged);
+            : (z >= spawnLimit && z <= 6 && !judged))
+            // 退出到菜单时（非 播放/暂停/编辑器）强制隐藏，避免 projection/边框残留。
+            && (playing || isPausedRef.current || isEditorModeRef.current);
           const nm = sm.nodes[i];
           nm.group.visible = vis;
           if (vis) {
@@ -2121,17 +2454,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             // +, but we want +angle = clockwise (matching the 2D editor), so negate.
             nm.group.rotation.z = -(allNodes[i].angle ?? 0);
             if (nm.proj) nm.proj.rotation.z = -(allNodes[i].angle ?? 0);
-            nm.wire?.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
             nm.fill.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
+            // 内框跟随音符色；外框使用可自定义颜色（不随音符色变化）。
+            nm.innerWire?.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
+            nm.outerWire?.color.set(defaultSkinOuterColorRef.current);
 
             // Smooth fade-in animation as note enters the render distance
             const fadeZone = 12;
             const fadeInAlpha = isEditorModeRef.current
               ? 1
               : THREE.MathUtils.clamp((z - spawnLimit) / fadeZone, 0, 1);
-            nm.fill.opacity = (isRed ? 0.4 : (i === 0 ? 0.2 : 0.26)) * fadeInAlpha;
-            // The slide head wire must fade with its fill. Child wires are permanently hidden.
-            if (nm.wire) nm.wire.opacity = i === 0 ? fadeInAlpha : 0;
+            // 皮肤贴图整块显示（不透明）；默认填充保持半透明（defaultFill 标记区分）。
+            nm.fill.opacity = nm.fill.map && !nm.fill.userData.defaultFill ? fadeInAlpha : (isRed ? 0.4 : (i === 0 ? 0.2 : 0.26)) * fadeInAlpha;
+            // 仅 slide 头节点显示边框：内框跟随音符色，外框使用自定义颜色+透明度。
+            if (nm.innerWire) nm.innerWire.opacity = (i === 0 && defaultSkinInnerWidthRef.current > 0) ? 0.85 * fadeInAlpha : 0;
+            if (nm.outerWire) nm.outerWire.opacity = (i === 0 && defaultSkinOuterWidthRef.current > 0) ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
           }
           if (nm.proj && nm.projMat) {
             const timeToHitMs = (allNodes[i].timeSec - curTime) * 1000;
@@ -2392,9 +2729,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       // with negative scroll speed a note can come back into the visible
       // Z range visually, but it was already "judged" in the timeline and
       // should stay gone (matching gameplay behaviour).
-      const vis = isEditorModeRef.current
+      const vis = (isEditorModeRef.current
         ? (nz >= spawnLimit && nz <= 6 && note.timeSec >= curTime - 0.05)
-        : (nz >= spawnLimit && nz <= 6 && !judged);
+        : (nz >= spawnLimit && nz <= 6 && !judged))
+        // 退出到菜单时（非 播放/暂停/编辑器）强制隐藏，避免 projection/边框残留。
+        && (playing || isPausedRef.current || isEditorModeRef.current);
       let entry = noteMeshesRef.current.get(note.id);
       if (vis) {
         if (!entry) {
@@ -2416,8 +2755,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           : THREE.MathUtils.clamp((nz - spawnLimit) / fadeZone, 0, 1);
         entry.group.children.forEach((child) => {
           if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-            child.material.color.set(noteEffectiveColor);
-            child.material.opacity = (note.type === 'tap' ? 0.18 : 0.22) * fadeInAlpha;
+            if (child.userData.isBorder === 'inner') {
+              // 内框：颜色恒等于音符色，仅当宽度 > 0 时显示。
+              child.material.color.set(noteEffectiveColor);
+              child.material.opacity = defaultSkinInnerWidthRef.current > 0 ? 0.85 * fadeInAlpha : 0;
+            } else if (child.userData.isBorder === 'outer') {
+              // 外框：使用可自定义颜色与透明度，仅当宽度 > 0 时显示。
+              child.material.color.set(defaultSkinOuterColorRef.current);
+              child.material.opacity = defaultSkinOuterWidthRef.current > 0 ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
+            } else {
+              child.material.color.set(noteEffectiveColor);
+              // 皮肤贴图整块显示（不透明）；默认填充保持半透明（defaultFill 标记区分）。
+              child.material.opacity = child.material.map && !child.userData.defaultFill ? fadeInAlpha : (note.type === 'tap' ? 0.18 : 0.22) * fadeInAlpha;
+            }
           }
           if (child instanceof THREE.Line && child.material instanceof THREE.LineBasicMaterial) {
             child.material.color.set(noteEffectiveColor);
@@ -2438,11 +2788,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         entry.projectionGroup.scale.set(vScale, vScale, 1);
         entry.projectionGroup.rotation.z = -(note.angle ?? 0);
         entry.projectionGroup.children.forEach((c) => {
-          if ((c as THREE.Line).material) {
-            const material = (c as THREE.Line).material as THREE.LineBasicMaterial;
-            material.color.set(noteEffectiveColor);
-            material.opacity = po;
-          }
+          const material = (c as THREE.Mesh).material as THREE.MeshBasicMaterial | null;
+          if (!material) return;
+          // 判定框（投影引导）颜色恒等于音符色，不可修改，仅粗细可调。
+          material.color.set(noteEffectiveColor);
+          material.opacity = po;
         });
       } else if (entry) { entry.group.visible = false; entry.projectionGroup.visible = false; }
 
@@ -2651,8 +3001,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
     // Song end — O(1) check using precomputed metrics.
     // Previously this iterated all notes every frame to count judged vs total.
-    if (playing && !songEndedRef.current && totalNotesRef.current > 0 && !isEditorModeRef.current) {
-      if (judgedCountRef.current >= totalNotesRef.current || curTime > lastNoteTimeRef.current + 2) {
+    if (playing && !songEndedRef.current && !isEditorModeRef.current) {
+      const totalNotes = totalNotesRef.current;
+      // 空谱面（0 音符）也要能结束：没有任何可判定物件，等 lead-in 走完后直接结算 0 分。
+      const ended = totalNotes > 0
+        ? (judgedCountRef.current >= totalNotes || curTime > lastNoteTimeRef.current + 2)
+        : curTime > 2;
+      if (ended) {
         songEndedRef.current = true;
         setTimeout(() => onSongEndRef.current?.(), 800);
       }

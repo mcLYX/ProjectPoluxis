@@ -1,5 +1,56 @@
 export type NoteType = 'tap' | 'touch' | 'slide';
 
+/** A skin maps each note type to a grayscale (white/transparent) texture stored
+ *  as an `idb://` file reference. The game tints these textures with the note's
+ *  judgement colour at runtime (map × colour), so the images themselves should
+ *  be grayscale with an alpha channel defining the note shape. */
+export interface SkinMaps {
+  /** tap note body texture. */
+  tap?: string;
+  /** touch note body texture. */
+  touch?: string;
+  /** slide note body texture (also used for slide nodes / pipes). */
+  slide?: string;
+  /** Per-note-type projection guide textures, drawn on the screen-parallel
+   *  judgement plane and tinted with the note colour (tap→tap, touch→touch,
+   *  slide→slide). When absent, the shared `projection` key is used as fallback. */
+  projTap?: string;
+  projTouch?: string;
+  projSlide?: string;
+  /** Legacy shared projection guide texture (overrides the default outline guide).
+   *  Used as a fallback when the per-type `projTap/projTouch/projSlide` keys are
+   *  absent. Prefer the per-type keys for new skins. */
+  projection?: string;
+}
+
+/** Persisted skin metadata. `maps` holds `idb://` references to the textures,
+ *  which live in the shared file store. */
+export interface SkinMeta {
+  id: string;
+  name: string;
+  author?: string;
+  /** unix ms */
+  createdAt: number;
+  /** optional `idb://` preview image shown in the manager UI. */
+  preview?: string;
+  maps: SkinMaps;
+}
+
+/** Result of preloading a skin's textures into GPU-ready THREE.Texture objects.
+ *  Any map that fails to load is omitted (the game falls back to the default
+ *  solid-colour look for that note type). */
+export interface SkinTextureSet {
+  tap?: import('three').Texture;
+  touch?: import('three').Texture;
+  slide?: import('three').Texture;
+  /** Per-note-type projection guide textures. */
+  projTap?: import('three').Texture;
+  projTouch?: import('three').Texture;
+  projSlide?: import('three').Texture;
+  /** Legacy shared projection guide texture (fallback). */
+  projection?: import('three').Texture;
+}
+
 /** Easing curve for the segment connecting a slide node to its previous node.
  *  - 'linear'  : straight line (default).
  *  - 'sine-in' : curve leaves the previous node perpendicularly, then bends in
@@ -21,8 +72,10 @@ export type JudgementType = 'S-Perfect' | 'Perfect' | 'Good' | 'Miss';
  *              + ambient particle field (if chart.effectToggles.particles).
  * - 'ultra':   High + notes become real light sources illuminating tunnel walls
  *              + hit bursts emit shattering light particles. Heavy GPU cost.
+ * - 'custom':  User-defined tier; antialias / bloom / particles / renderScale
+ *              are each controlled independently via the custom* settings.
  */
-export type QualityMode = 'low' | 'standard' | 'high' | 'ultra';
+export type QualityMode = 'low' | 'standard' | 'high' | 'ultra' | 'custom';
 
 /** A single child node of a slide chain (the head is the NoteData itself). */
 export interface SlideNodeData {

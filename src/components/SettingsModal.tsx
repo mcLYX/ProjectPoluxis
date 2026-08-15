@@ -1,7 +1,30 @@
 import { useState } from 'react';
-import { Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages } from 'lucide-react';
+import { Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette } from 'lucide-react';
 import type { QualityMode } from '../types/game';
 import { useI18n, LANGS } from '../i18n';
+import { NetworkSettings } from './NetworkSettings';
+import { DocContent } from './DocModal';
+import SkinManager from './SkinManager';
+
+/** 自定义档位下的单项开关（抗锯齿 / Bloom / 粒子）。 */
+const QualityToggle: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({
+  label,
+  checked,
+  onChange,
+}) => (
+  <label className="flex items-center justify-between p-3 rounded-xl bg-white/[0.04] border border-white/10 cursor-pointer">
+    <span className="text-sm text-white/80">{label}</span>
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-cyan-500/70' : 'bg-white/15'}`}
+    >
+      <span
+        className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : ''}`}
+      />
+    </button>
+  </label>
+);
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -18,13 +41,37 @@ interface SettingsModalProps {
   setNoteSizeScale: (value: number) => void;
   qualityMode: QualityMode;
   setQualityMode: (value: QualityMode) => void;
+  customAntialias: boolean;
+  setCustomAntialias: (value: boolean) => void;
+  customBloom: boolean;
+  setCustomBloom: (value: boolean) => void;
+  customParticles: boolean;
+  setCustomParticles: (value: boolean) => void;
+  customDynamicLighting: boolean;
+  setCustomDynamicLighting: (value: boolean) => void;
+  customHitEffects: boolean;
+  setCustomHitEffects: (value: boolean) => void;
+  customRenderScale: number;
+  setCustomRenderScale: (value: number) => void;
   musicVolume: number;
   setMusicVolume: (value: number) => void;
   effectVolume: number;
   setEffectVolume: (value: number) => void;
+  selectedSkinId: string | null;
+  setSelectedSkinId: (value: string | null) => void;
+  defaultSkinInnerWidth: number;
+  setDefaultSkinInnerWidth: (value: number) => void;
+  defaultSkinOuterWidth: number;
+  setDefaultSkinOuterWidth: (value: number) => void;
+  defaultSkinOuterColor: string;
+  setDefaultSkinOuterColor: (value: string) => void;
+  defaultSkinOuterAlpha: number;
+  setDefaultSkinOuterAlpha: (value: number) => void;
+  defaultSkinJudgeWidth: number;
+  setDefaultSkinJudgeWidth: (value: number) => void;
 }
 
-type SettingsTab = 'graphics' | 'sound' | 'language';
+type SettingsTab = 'graphics' | 'skin' | 'sound' | 'language' | 'network' | 'about';
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
@@ -41,10 +88,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setNoteSizeScale,
   qualityMode,
   setQualityMode,
+  customAntialias,
+  setCustomAntialias,
+  customBloom,
+  setCustomBloom,
+  customParticles,
+  setCustomParticles,
+  customDynamicLighting,
+  setCustomDynamicLighting,
+  customHitEffects,
+  setCustomHitEffects,
+  customRenderScale,
+  setCustomRenderScale,
   musicVolume,
   setMusicVolume,
   effectVolume,
   setEffectVolume,
+  selectedSkinId,
+  setSelectedSkinId,
+  defaultSkinInnerWidth, setDefaultSkinInnerWidth,
+  defaultSkinOuterWidth, setDefaultSkinOuterWidth,
+  defaultSkinOuterColor, setDefaultSkinOuterColor,
+  defaultSkinOuterAlpha, setDefaultSkinOuterAlpha,
+  defaultSkinJudgeWidth, setDefaultSkinJudgeWidth,
 }) => {
   const { t, lang, setLang } = useI18n();
   const [tab, setTab] = useState<SettingsTab>('graphics');
@@ -53,15 +119,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const sliderClass = 'w-full accent-cyan-400 cursor-pointer';
   const valueClass = 'font-mono text-cyan-200 text-sm min-w-20 text-right';
 
-  const qualityIdx: Record<QualityMode, number> = { low: 0, standard: 1, high: 2, ultra: 3 };
-  const qualityOrder: QualityMode[] = ['low', 'standard', 'high', 'ultra'];
+  const qualityIdx: Record<QualityMode, number> = { low: 0, standard: 1, high: 2, ultra: 3, custom: 4 };
+  const qualityOrder: QualityMode[] = ['low', 'standard', 'high', 'ultra', 'custom'];
   const qualityLabel = (q: QualityMode) => t(`settings.quality.${q}`);
   const qualityDesc = (q: QualityMode) => t(`settings.quality.desc.${q}`);
 
   const tabs: { key: SettingsTab; label: string; icon: typeof Sliders }[] = [
     { key: 'graphics', label: t('settings.tab.graphics'), icon: Sliders },
+    { key: 'skin', label: t('settings.tab.skin'), icon: Palette },
     { key: 'sound', label: t('settings.tab.sound'), icon: Volume2 },
+    { key: 'network', label: t('settings.tab.network'), icon: Globe },
     { key: 'language', label: t('settings.tab.language'), icon: Languages },
+    { key: 'about', label: t('settings.tab.about'), icon: Info },
   ];
 
   const graphicsContent = (
@@ -73,16 +142,70 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
         <input
           type="range"
-          min="0" max="3" step="1"
+          min="0" max="4" step="1"
           value={qualityIdx[qualityMode]}
           onChange={(e) => setQualityMode(qualityOrder[Number(e.target.value)])}
           className={sliderClass}
         />
         <div className="flex justify-between text-[11px] text-white/40 font-mono">
-          <span>{qualityLabel('low')}</span><span>{qualityLabel('standard')}</span><span>{qualityLabel('high')}</span><span>{qualityLabel('ultra')}</span>
+          <span>{qualityLabel('low')}</span><span>{qualityLabel('standard')}</span><span>{qualityLabel('high')}</span><span>{qualityLabel('ultra')}</span><span>{qualityLabel('custom')}</span>
         </div>
         <p className="text-[11px] text-white/50 leading-relaxed">{qualityDesc(qualityMode)}</p>
       </section>
+
+      {qualityMode === 'custom' && (
+        <section className="space-y-3 p-4 rounded-xl glass-sub border border-cyan-400/30">
+          <div className="flex items-center gap-2 text-sm font-bold text-cyan-300">
+            <Sliders size={16} /> {t('settings.custom.title')}
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-medium text-white/80">{t('settings.custom.renderScale')}</label>
+              <span className={valueClass}>{(customRenderScale * 100).toFixed(0)}%</span>
+            </div>
+            <input
+              type="range"
+              min="0.5"
+              max="2"
+              step="0.05"
+              value={customRenderScale}
+              onChange={(e) => setCustomRenderScale(Number(e.target.value))}
+              className={sliderClass}
+            />
+            <div className="flex justify-between text-[11px] text-white/40 font-mono">
+              <span>50%</span><span>200%</span>
+            </div>
+            <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.custom.renderScaleHint')}</p>
+          </div>
+
+          <QualityToggle
+            label={t('settings.custom.antialias')}
+            checked={customAntialias}
+            onChange={setCustomAntialias}
+          />
+          <QualityToggle
+            label={t('settings.custom.bloom')}
+            checked={customBloom}
+            onChange={setCustomBloom}
+          />
+          <QualityToggle
+            label={t('settings.custom.particles')}
+            checked={customParticles}
+            onChange={setCustomParticles}
+          />
+          <QualityToggle
+            label={t('settings.custom.dynamicLighting')}
+            checked={customDynamicLighting}
+            onChange={setCustomDynamicLighting}
+          />
+          <QualityToggle
+            label={t('settings.custom.hitEffects')}
+            checked={customHitEffects}
+            onChange={setCustomHitEffects}
+          />
+        </section>
+      )}
 
       <section className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
@@ -169,6 +292,119 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <p className="text-[11px] text-white/50 leading-relaxed">
           {t('settings.projLeadHint')}
         </p>
+      </section>
+    </div>
+  );
+
+  const skinContent = (
+    <div className="space-y-5">
+      <section className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-center gap-2">
+          <Palette size={18} className="text-cyan-300" />
+          <h3 className="text-base font-semibold text-white">{t('skin.title')}</h3>
+        </div>
+        <p className="text-[11px] text-white/50 leading-relaxed">{t('skin.tabHint')}</p>
+        <SkinManager selectedSkinId={selectedSkinId} onSelect={setSelectedSkinId} />
+      </section>
+
+      <section className="space-y-4 rounded-xl border border-cyan-400/20 bg-white/[0.03] p-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-base font-semibold text-white">{t('settings.defaultSkin.title')}</h3>
+          <button
+            type="button"
+            onClick={() => {
+              setDefaultSkinInnerWidth(0.05);
+              setDefaultSkinOuterWidth(0);
+              setDefaultSkinOuterColor('#22d3ee');
+              setDefaultSkinOuterAlpha(1);
+              setDefaultSkinJudgeWidth(0.01);
+            }}
+            className="px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 text-white/60 border border-white/10 hover:bg-white/10 hover:text-white/80 transition cursor-pointer"
+          >
+            {t('settings.defaultSkin.reset')}
+          </button>
+        </div>
+        <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.desc')}</p>
+
+        {/* 内框：颜色恒等于音符色，仅可调粗细 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.innerWidth')}</label>
+            <span className={valueClass}>{(defaultSkinInnerWidth * 100).toFixed(1)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="0.20"
+            step="0.005"
+            value={defaultSkinInnerWidth}
+            onChange={(e) => setDefaultSkinInnerWidth(Number(e.target.value))}
+            className={sliderClass}
+          />
+          <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.innerWidthHint')}</p>
+        </div>
+
+        {/* 外框：默认禁用（宽度 0），可自定义颜色与透明度 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.outerWidth')}</label>
+            <span className={valueClass}>{(defaultSkinOuterWidth * 100).toFixed(1)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="0.20"
+            step="0.005"
+            value={defaultSkinOuterWidth}
+            onChange={(e) => setDefaultSkinOuterWidth(Number(e.target.value))}
+            className={sliderClass}
+          />
+          <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.outerWidthHint')}</p>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.outerColor')}</label>
+          <input
+            type="color"
+            value={defaultSkinOuterColor}
+            onChange={(e) => setDefaultSkinOuterColor(e.target.value)}
+            className="h-9 w-14 rounded-lg bg-transparent border border-white/15 cursor-pointer"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.outerAlpha')}</label>
+            <span className={valueClass}>{(defaultSkinOuterAlpha * 100).toFixed(0)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={defaultSkinOuterAlpha}
+            onChange={(e) => setDefaultSkinOuterAlpha(Number(e.target.value))}
+            className={sliderClass}
+          />
+        </div>
+
+        {/* 判定框：颜色恒等于音符色，仅可调粗细 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.judgeWidth')}</label>
+            <span className={valueClass}>{(defaultSkinJudgeWidth * 100).toFixed(1)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0.005"
+            max="0.20"
+            step="0.005"
+            value={defaultSkinJudgeWidth}
+            onChange={(e) => setDefaultSkinJudgeWidth(Number(e.target.value))}
+            className={sliderClass}
+          />
+          <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.judgeWidthHint')}</p>
+        </div>
       </section>
     </div>
   );
@@ -268,8 +504,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* 右侧内容区（独立滚动，X 固定不随内容滚动） */}
           <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-5 sm:p-6">
             {tab === 'graphics' && graphicsContent}
+            {tab === 'skin' && skinContent}
             {tab === 'sound' && soundContent}
+            {tab === 'network' && <NetworkSettings />}
             {tab === 'language' && languageContent}
+            {tab === 'about' && <DocContent />}
           </div>
         </div>
       </div>
