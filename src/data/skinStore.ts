@@ -1,5 +1,6 @@
 import { unzip } from 'fflate';
-import * as THREE from 'three';
+// 仅类型导入，避免把 three 拽入首屏主链；运行时按需动态 import('three')。
+import type * as THREE from 'three';
 import type { SkinMaps, SkinMeta, SkinTextureSet } from '../types/game';
 
 /** Translation function injected by the caller (keeps this module React-free). */
@@ -146,12 +147,11 @@ export async function deleteSkin(id: string): Promise<void> {
   await dbDeleteSkin(id);
 }
 
-const textureLoader = new THREE.TextureLoader();
-
 /** Rasterise an SVG (from an object URL) into a THREE.CanvasTexture so it can be
  *  tinted (color × map) and alpha-tested like a normal bitmap. Falls back to a
  *  256px square when the SVG declares no intrinsic size. */
-function loadSvgTexture(url: string): Promise<THREE.Texture> {
+async function loadSvgTexture(url: string): Promise<THREE.Texture> {
+  const THREE = await import('three');
   return new Promise((resolve, reject) => {
     void (async () => {
       try {
@@ -202,6 +202,8 @@ function loadSvgTexture(url: string): Promise<THREE.Texture> {
  *  silently omitted so the caller can fall back to the default solid look. */
 export async function loadSkinTextures(meta: SkinMeta | null | undefined): Promise<SkinTextureSet | null> {
   if (!meta) return null;
+  const THREE = await import('three');
+  const textureLoader = new THREE.TextureLoader();
   const loadOne = async (ref?: string): Promise<THREE.Texture | undefined> => {
     if (!ref) return undefined;
     try {

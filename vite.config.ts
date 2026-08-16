@@ -22,6 +22,24 @@ export default defineConfig({
   build: {
     assetsDir: "assets",
     chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        // 将体积最大的第三方库拆分到独立 chunk：
+        // - three 单独成块（仅在进入游戏/编辑器时按需下载，不再被拽入首屏主链）。
+        // - 常用依赖聚合到 vendor，利于浏览器缓存复用。
+        manualChunks: {
+          three: ["three"],
+          vendor: [
+            "react",
+            "react-dom",
+            "lucide-react",
+            "canvas-confetti",
+            "fflate",
+            "liquid-glass-react",
+          ],
+        },
+      },
+    },
   },
   plugins: [
     react(),

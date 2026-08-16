@@ -1,11 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { GameCanvas } from './components/GameCanvas';
-import { Editor2DCanvas } from './components/Editor2DCanvas';
-import { VisualChartEditor, EditorTool, BatchSelection, QuickCreateDelta } from './components/VisualChartEditor';
-import { UnitTestModal } from './components/UnitTestModal';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+// 重度/非首屏组件按需懒加载，降低菜单首屏 JS 体积（three 等仅在使用时下载）。
+const GameCanvas = lazy(() => import('./components/GameCanvas').then(m => ({ default: m.GameCanvas })));
+const Editor2DCanvas = lazy(() => import('./components/Editor2DCanvas').then(m => ({ default: m.Editor2DCanvas })));
+const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').then(m => ({ default: m.VisualChartEditor })));
+const UnitTestModal = lazy(() => import('./components/UnitTestModal').then(m => ({ default: m.UnitTestModal })));
+const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
+import type { EditorTool, BatchSelection, QuickCreateDelta } from './components/VisualChartEditor';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
 import { TimingBar, TimingMarker } from './components/TimingBar';
-import { SettingsModal } from './components/SettingsModal';
 import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
@@ -359,7 +361,9 @@ export function App() {
   }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, customAntialias, customBloom, customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
   // 选中皮肤变化时，预加载贴图（灰度图→THREE.Texture）。失败/无皮肤则回退纯色。
+  // 菜单态不预加载：避免把 three 拉进首屏；进入游戏/编辑器（GameCanvas 挂载）前才按需下载贴图。
   useEffect(() => {
+    if (gameState === 'menu') return;
     let cancelled = false;
     (async () => {
       if (!selectedSkinId) {
@@ -373,7 +377,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSkinId]);
+  }, [selectedSkinId, gameState]);
 
   // Calculate current beat from gameTime. Uses the shared inverse so charts
   // with a bpmlist stay accurate (a plain bpm*t/60 would drift after the first
@@ -1311,6 +1315,7 @@ export function App() {
         onWheel={handleEditorWheel}
         style={{ display: gameState === 'editor' && editorViewMode === '2d' ? 'none' : 'block' }}
       >
+        <Suspense fallback={null}>
         <GameCanvas
           chart={currentChart}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
@@ -1346,11 +1351,13 @@ export function App() {
           defaultSkinOuterAlpha={defaultSkinOuterAlpha}
           defaultSkinJudgeWidth={defaultSkinJudgeWidth}
         />
+        </Suspense>
       </div>
 
       {/* 2D top-down editor viewport (replaces 3D when in 2D mode) */}
       {gameState === 'editor' && editorViewMode === '2d' && (
         <div className="absolute inset-0 z-0" data-viewport="2d">
+          <Suspense fallback={null}>
           <Editor2DCanvas
             chart={currentChart}
             gameTime={gameTime}
@@ -1365,6 +1372,7 @@ export function App() {
             onSelectNote={handleSelectEditorNote}
             onSeekBeat={handleSeekBeat}
           />
+          </Suspense>
         </div>
       )}
 
@@ -1381,6 +1389,7 @@ export function App() {
 
       {/* Visual Chart Editor Overlay when in Editor Mode */}
       {gameState === 'editor' && (
+        <Suspense fallback={null}>
         <VisualChartEditor
           chart={currentChart}
           currentBeat={currentBeat}
@@ -1441,6 +1450,7 @@ export function App() {
           editorDsl={editorDsl}
           onEditorDslChange={(dsl: string) => { setEditorDsl(dsl); saveEditorDsl(dsl); }}
         />
+        </Suspense>
       )}
 
       {/* Normal Gameplay In-Game HUD */}
@@ -1695,7 +1705,10 @@ export function App() {
         </div>
       )}
 
+      <Suspense fallback={null}>
       <UnitTestModal isOpen={showUnitTest} onClose={() => setShowUnitTest(false)} />
+      </Suspense>
+      <Suspense fallback={null}>
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
@@ -1740,6 +1753,7 @@ export function App() {
         defaultSkinJudgeWidth={defaultSkinJudgeWidth}
         setDefaultSkinJudgeWidth={setDefaultSkinJudgeWidth}
       />
+      </Suspense>
       {/* Clear Banner (FC / AP / AP+) */}
       {clearBanner && (
         <div className="fixed inset-0 z-40 flex items-center justify-center pointer-events-none">

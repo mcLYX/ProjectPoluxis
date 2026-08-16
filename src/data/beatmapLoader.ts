@@ -235,7 +235,8 @@ function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
 }
 
 export async function loadOnlineManifest(baseUrl: string): Promise<BeatmapsManifest | null> {
-  const base = baseUrl.replace(/\/+$/, '');
+  // Strip FQDN trailing dot (host.:port) and trailing slashes defensively.
+  const base = baseUrl.trim().replace(/\.+(?=\/|$)/g, '').replace(/\/+$/, '');
   // A "server" is a beatmaps directory; its index is <dir>/beatmaps.json and all
   // paths inside it are relative to <dir>. Also accept a full manifest.json URL.
   const candidates = [`${base}/beatmaps.json`, `${base}/manifest.json`, base];

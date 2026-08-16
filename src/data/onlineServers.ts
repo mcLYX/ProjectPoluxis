@@ -13,6 +13,19 @@ const KEY_CURRENT = 'poluxis.currentServerId';
 export const CURRENT_SERVER_ID = 'current';
 
 /**
+ * Normalize a beatmaps base URL: trim whitespace, strip the FQDN trailing dot
+ * (some deployments expose the host as `host.:port`, i.e. a dot right before
+ * `/` or the end of the URL) which makes `fetch` reject the URL, and strip
+ * trailing slashes.
+ */
+function normalizeBaseUrl(url: string): string {
+  return url
+    .trim()
+    .replace(/\.+(?=\/|$)/g, '')
+    .replace(/\/+$/, '');
+}
+
+/**
  * The beatmaps directory served by the SAME deployment that is hosting this app.
  * For a full install at http://polux.is this resolves to http://polux.is/beatmaps,
  * and for `vite dev` it resolves to http://localhost:5173/beatmaps — i.e. the
@@ -21,7 +34,8 @@ export const CURRENT_SERVER_ID = 'current';
  */
 function currentServerBaseUrl(): string {
   const base = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
-  return `${location.origin}${base}/beatmaps`;
+  const full = `${location.origin}${base}/beatmaps`;
+  return normalizeBaseUrl(full);
 }
 
 export function makeCurrentServer(): OnlineServer {
@@ -41,7 +55,7 @@ function readUserServers(): OnlineServer[] {
       if (Array.isArray(parsed)) {
         return parsed
           .filter((s) => s && s.id !== CURRENT_SERVER_ID)
-          .map((s) => ({ ...s, baseUrl: s.baseUrl.replace(/\/+$/, '') }));
+          .map((s) => ({ ...s, baseUrl: normalizeBaseUrl(s.baseUrl) }));
       }
     }
   } catch (e) {
@@ -77,7 +91,7 @@ export function getServer(id: string): OnlineServer | null {
 }
 
 export function addServer(label: string, baseUrl: string): OnlineServer {
-  const cleanUrl = baseUrl.trim().replace(/\/+$/, '');
+  const cleanUrl = normalizeBaseUrl(baseUrl);
   let host = cleanUrl;
   try {
     host = new URL(cleanUrl).hostname;
@@ -100,7 +114,7 @@ export function addServer(label: string, baseUrl: string): OnlineServer {
 export function updateServer(id: string, patch: Partial<Omit<OnlineServer, 'id'>>): void {
   const all = readUserServers().map((s) =>
     s.id === id
-      ? { ...s, ...patch, baseUrl: patch.baseUrl ? patch.baseUrl.replace(/\/+$/, '') : s.baseUrl }
+      ? { ...s, ...patch, baseUrl: patch.baseUrl ? normalizeBaseUrl(patch.baseUrl) : s.baseUrl }
       : s,
   );
   writeUserServers(all);
