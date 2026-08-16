@@ -31,11 +31,24 @@ function normalizeBaseUrl(url: string): string {
  * and for `vite dev` it resolves to http://localhost:5173/beatmaps — i.e. the
  * index lives at <baseUrl>/beatmaps.json and all paths inside it are relative to
  * <baseUrl>.
+ *
+ * BASE_URL is resolved against the CURRENT page URL (`location.href`) instead of
+ * being naively concatenated to `location.origin`. The project's vite config uses
+ * a relative base `'./'`, so under a subdirectory deployment (e.g. the app served
+ * at https://site.com/poluxis/ with index.html inside that folder) the beatmaps
+ * directory correctly becomes https://site.com/poluxis/beatmaps — NOT the site
+ * root. An absolute base like '/poluxis/' (or '/') is used as-is.
  */
 function currentServerBaseUrl(): string {
-  const base = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
-  const full = `${location.origin}${base}/beatmaps`;
-  return normalizeBaseUrl(full);
+  const base = import.meta.env.BASE_URL || '/';
+  let root: string;
+  try {
+    root = new URL(base, location.href).href;
+  } catch {
+    // Defensive fallback: absolute base string against the origin.
+    root = `${location.origin}${base.replace(/\/+$/, '')}`;
+  }
+  return normalizeBaseUrl(`${root.replace(/\/+$/, '')}/beatmaps`);
 }
 
 export function makeCurrentServer(): OnlineServer {

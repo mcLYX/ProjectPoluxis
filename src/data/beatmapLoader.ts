@@ -29,7 +29,6 @@ function getFallbackChartData(): ChartData {
 const BASE_URL = import.meta.env.BASE_URL;
 const FALLBACK_SONG_ID = 'fallback-song';
 const FALLBACK_BG = `${BASE_URL}backgrounds/fallback.jpg`;
-const UNKNOWN_COVER = `${BASE_URL}covers/unknown.png`;
 
 export function isFallbackSong(songId: string): boolean {
   return songId === FALLBACK_SONG_ID || songId.startsWith('fallback');
@@ -122,9 +121,11 @@ export function buildBuiltinAlbum(): AlbumItem {
       title: isFb ? '敬请期待' : charts[0].chart.metadata.title,
       artist: isFb ? '' : charts[0].chart.metadata.artist,
       bpm: isFb ? 120 : charts[0].chart.metadata.bpm,
-      cover: isFb ? UNKNOWN_COVER : `${base}cover.jpg`,
+      // 内置谱面不随站部署封面文件，cover 留空 → UI 用音符强调色渐变占位，
+      // 不向服务器发起任何请求（与音频同理，均为 embedded:// 内置内容）。
+      cover: '',
       accentColor: isFb ? '#64748b' : charts[0].chart.metadata.bgScheme?.accentColor || DEFAULT_NOTE_COLOR,
-      audio: isFb ? '' : `${base}audio.mp3`,
+      audio: '',
       basePath: base,
       difficulties,
     });
@@ -375,4 +376,4 @@ export async function assembleManifest(): Promise<BeatmapsManifest> {
   return value;
 }
 
-export { FALLBACK_SONG_ID, FALLBACK_BG, UNKNOWN_COVER, BACKUP_BG_SCHEME, BACKUP_BPMCONFIG };
+export { FALLBACK_SONG_ID, FALLBACK_BG, BACKUP_BG_SCHEME, BACKUP_BPMCONFIG };
