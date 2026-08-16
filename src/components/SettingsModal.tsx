@@ -59,8 +59,10 @@ interface SettingsModalProps {
   setEffectVolume: (value: number) => void;
   selectedSkinId: string | null;
   setSelectedSkinId: (value: string | null) => void;
-  defaultSkinInnerWidth: number;
-  setDefaultSkinInnerWidth: (value: number) => void;
+  defaultSkinInnerEnabled: boolean;
+  setDefaultSkinInnerEnabled: (value: boolean) => void;
+  defaultSkinOuterEnabled: boolean;
+  setDefaultSkinOuterEnabled: (value: boolean) => void;
   defaultSkinOuterWidth: number;
   setDefaultSkinOuterWidth: (value: number) => void;
   defaultSkinOuterColor: string;
@@ -106,7 +108,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setEffectVolume,
   selectedSkinId,
   setSelectedSkinId,
-  defaultSkinInnerWidth, setDefaultSkinInnerWidth,
+  defaultSkinInnerEnabled, setDefaultSkinInnerEnabled,
+  defaultSkinOuterEnabled, setDefaultSkinOuterEnabled,
   defaultSkinOuterWidth, setDefaultSkinOuterWidth,
   defaultSkinOuterColor, setDefaultSkinOuterColor,
   defaultSkinOuterAlpha, setDefaultSkinOuterAlpha,
@@ -307,14 +310,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <SkinManager selectedSkinId={selectedSkinId} onSelect={setSelectedSkinId} />
       </section>
 
+      {/* 默认皮肤自定义面板：仅当未选择皮肤包（即正在使用默认皮肤）时显示。 */}
+      {!selectedSkinId && (
       <section className="space-y-4 rounded-xl border border-cyan-400/20 bg-white/[0.03] p-4">
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-base font-semibold text-white">{t('settings.defaultSkin.title')}</h3>
           <button
             type="button"
             onClick={() => {
-              setDefaultSkinInnerWidth(0.05);
-              setDefaultSkinOuterWidth(0);
+              setDefaultSkinInnerEnabled(true);
+              setDefaultSkinOuterEnabled(false);
+              setDefaultSkinOuterWidth(0.05);
               setDefaultSkinOuterColor('#22d3ee');
               setDefaultSkinOuterAlpha(1);
               setDefaultSkinJudgeWidth(0.01);
@@ -326,53 +332,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
         <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.desc')}</p>
 
-        {/* 内框：颜色恒等于音符色，仅可调粗细 */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.innerWidth')}</label>
-            <span className={valueClass}>{(defaultSkinInnerWidth * 100).toFixed(1)}%</span>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="0.20"
-            step="0.005"
-            value={defaultSkinInnerWidth}
-            onChange={(e) => setDefaultSkinInnerWidth(Number(e.target.value))}
-            className={sliderClass}
-          />
-          <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.innerWidthHint')}</p>
-        </div>
+        {/* 内框：颜色恒等于音符色，1px 描边，仅可开关 */}
+        <QualityToggle
+          label={t('settings.defaultSkin.innerEnabled')}
+          checked={defaultSkinInnerEnabled}
+          onChange={setDefaultSkinInnerEnabled}
+        />
+        <p className="text-[11px] text-white/50 leading-relaxed -mt-1">{t('settings.defaultSkin.innerEnabledHint')}</p>
 
-        {/* 外框：默认禁用（宽度 0），可自定义颜色与透明度 */}
-        <div className="space-y-1.5">
+        {/* 外框：软边纹理描边，可自定义颜色/粗细/透明度，由开关启用 */}
+        <QualityToggle
+          label={t('settings.defaultSkin.outerEnabled')}
+          checked={defaultSkinOuterEnabled}
+          onChange={setDefaultSkinOuterEnabled}
+        />
+        <p className="text-[11px] text-white/50 leading-relaxed -mt-1">{t('settings.defaultSkin.outerEnabledHint')}</p>
+
+        <div className={`space-y-1.5 transition-opacity ${defaultSkinOuterEnabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
           <div className="flex items-center justify-between gap-3">
             <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.outerWidth')}</label>
             <span className={valueClass}>{(defaultSkinOuterWidth * 100).toFixed(1)}%</span>
           </div>
           <input
             type="range"
-            min="0"
+            min="0.01"
             max="0.20"
             step="0.005"
             value={defaultSkinOuterWidth}
             onChange={(e) => setDefaultSkinOuterWidth(Number(e.target.value))}
             className={sliderClass}
+            disabled={!defaultSkinOuterEnabled}
           />
           <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.outerWidthHint')}</p>
         </div>
 
-        <div className="flex items-center justify-between gap-3">
+        <div className={`flex items-center justify-between gap-3 transition-opacity ${defaultSkinOuterEnabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
           <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.outerColor')}</label>
           <input
             type="color"
             value={defaultSkinOuterColor}
             onChange={(e) => setDefaultSkinOuterColor(e.target.value)}
             className="h-9 w-14 rounded-lg bg-transparent border border-white/15 cursor-pointer"
+            disabled={!defaultSkinOuterEnabled}
           />
         </div>
 
-        <div className="space-y-1.5">
+        <div className={`space-y-1.5 transition-opacity ${defaultSkinOuterEnabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
           <div className="flex items-center justify-between gap-3">
             <label className="text-sm font-medium text-white/80">{t('settings.defaultSkin.outerAlpha')}</label>
             <span className={valueClass}>{(defaultSkinOuterAlpha * 100).toFixed(0)}%</span>
@@ -385,6 +390,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             value={defaultSkinOuterAlpha}
             onChange={(e) => setDefaultSkinOuterAlpha(Number(e.target.value))}
             className={sliderClass}
+            disabled={!defaultSkinOuterEnabled}
           />
         </div>
 
@@ -406,6 +412,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.defaultSkin.judgeWidthHint')}</p>
         </div>
       </section>
+      )}
     </div>
   );
 

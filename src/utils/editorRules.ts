@@ -13,9 +13,14 @@ import { EASING_TYPES } from './easing';
  *   <条件表达式> : <赋值1>, <赋值2>, ...
  * 可用音符属性：beat, x, y, type, color, angle, easing
  * 运算符（类 JS 优先级）： || && == != < > <= >= + - * / %  ! -()   以及字符串字面量 "..." '...'
+ * 内置函数：abs sign floor ceil round sqrt fract near min max clamp
+ *           sin cos tan asin acos atan atan2 sinh cosh tanh（弧度）
+ *           rad(deg) deg(rad)（角度<->弧度互转，谱面 angle 单位为度）
+ * 内置常量：PI(π) TAU(2π) E
  * 例：
  *   beat % 0.5 == 0 : color = "#ff0000"
  *   x < 0 && y < 0 : angle = -(x + y) * 23, easing = "sine-out"
+ *   beat % 1 == 0 : x = sin(beat * PI) * 2.0, y = cos(beat * PI) * 1.5
  *
  * 解释器为纯函数、不触碰 React / Three，也不使用 eval（安全）。
  */
@@ -246,7 +251,7 @@ class Parser {
         }
         return { op: 'call', name: t.value, args };
       }
-      if (!(ALL_PROPS as readonly string[]).includes(t.value)) {
+      if (!(ALL_PROPS as readonly string[]).includes(t.value) && !(t.value in CONSTANTS)) {
         throw new DslError(`未知标识符 "${t.value}"（可用：${ALL_PROPS.join(', ')}）`);
       }
       return { op: 'id', value: t.value as string };
@@ -265,6 +270,14 @@ class Parser {
 // 求值
 // ---------------------------------------------------------------------------
 
+// 内置常量（DSL 可用，作为裸标识符引用，如 PI）。三角函数以弧度工作，
+// 故提供 PI / TAU(=2π) / E，便于 angle = sin(beat * PI) * 45 这类写法。
+const CONSTANTS: Record<string, number> = {
+  PI: Math.PI,
+  TAU: Math.PI * 2,
+  E: Math.E,
+};
+
 // 内置函数（DSL 可用）。参数为数组，支持变长参数。
 const BUILTINS: Record<string, (args: unknown[]) => unknown> = {
   abs: (a) => Math.abs(Number(a[0])),
@@ -280,6 +293,20 @@ const BUILTINS: Record<string, (args: unknown[]) => unknown> = {
   min: (a) => Math.min(...a.map(Number)),
   max: (a) => Math.max(...a.map(Number)),
   clamp: (a) => Math.max(Number(a[1]), Math.min(Number(a[2]), Number(a[0]))),
+  // 三角函数（弧度）。atan2(y, x) 用来由 x/y 直接求朝向角，谱面排布很常用。
+  sin: (a) => Math.sin(Number(a[0])),
+  cos: (a) => Math.cos(Number(a[0])),
+  tan: (a) => Math.tan(Number(a[0])),
+  asin: (a) => Math.asin(Number(a[0])),
+  acos: (a) => Math.acos(Number(a[0])),
+  atan: (a) => Math.atan(Number(a[0])),
+  atan2: (a) => Math.atan2(Number(a[0]), Number(a[1])),
+  sinh: (a) => Math.sinh(Number(a[0])),
+  cosh: (a) => Math.cosh(Number(a[0])),
+  tanh: (a) => Math.tanh(Number(a[0])),
+  // 角度 <-> 弧度 互转，便于直接写角度量（谱面 angle 单位为度）。
+  rad: (a) => (Number(a[0]) * Math.PI) / 180,
+  deg: (a) => (Number(a[0]) * 180) / Math.PI,
 };
 const BUILTIN_NAMES = Object.keys(BUILTINS);
 
@@ -334,6 +361,7 @@ function evalNode(node: DslNode, ctx: Ctx): unknown {
     case 'bool':
       return node.value;
     case 'id': {
+      if (node.value in CONSTANTS) return CONSTANTS[node.value];
       if (!(node.value in ctx)) throw new DslError(`未知标识符 "${node.value}"`);
       return ctx[node.value];
     }

@@ -74,9 +74,10 @@ const DEFAULT_SETTINGS = {
   // 当前选中的皮肤 id；null 表示使用默认纯色外观。
   selectedSkinId: null as string | null,
   // 默认皮肤（未选皮肤包时）的自定义项。
-  // 默认皮肤音符边框 = 内框(跟随音符色) + 外框(可自定义)。判定框颜色恒等于音符色。
-  defaultSkinInnerWidth: 0.05, // 内框粗细，默认 5%（跟随音符颜色）
-  defaultSkinOuterWidth: 0,    // 外框粗细，默认 0（禁用）
+  // 默认皮肤音符边框 = 内框(跟随音符色,1px) + 外框(软边纹理,可自定义)。判定框颜色恒等于音符色。
+  defaultSkinInnerEnabled: true,   // 内框开关，默认开
+  defaultSkinOuterEnabled: false,  // 外框开关，默认关（关闭时外框不渲染）
+  defaultSkinOuterWidth: 0.05,     // 外框粗细（仅开关启用时生效）
   defaultSkinOuterColor: '#22d3ee',
   defaultSkinOuterAlpha: 1,
   defaultSkinJudgeWidth: 0.01, // 判定框（投影引导）粗细，颜色恒等于音符色
@@ -92,6 +93,16 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
     if (parsed && typeof parsed.lowQualityMode === 'boolean' && parsed.qualityMode === undefined) {
       result.qualityMode = parsed.lowQualityMode ? 'low' : 'standard';
       delete (parsed as any).lowQualityMode;
+    }
+    // Migrate legacy `defaultSkinInnerWidth/OuterWidth` (number) → enabled booleans.
+    if (parsed && typeof parsed.defaultSkinInnerWidth === 'number') {
+      result.defaultSkinInnerEnabled = parsed.defaultSkinInnerWidth > 0;
+      delete (parsed as any).defaultSkinInnerWidth;
+    }
+    if (parsed && typeof parsed.defaultSkinOuterWidth === 'number') {
+      result.defaultSkinOuterEnabled = parsed.defaultSkinOuterWidth > 0;
+      if (parsed.defaultSkinOuterWidth > 0) result.defaultSkinOuterWidth = parsed.defaultSkinOuterWidth;
+      delete (parsed as any).defaultSkinOuterWidth;
     }
     for (const k of Object.keys(result) as Array<keyof typeof DEFAULT_SETTINGS>) {
       const val = parsed[k];
@@ -153,7 +164,8 @@ export function App() {
   const [selectedSkinId, setSelectedSkinId] = useState<string | null>(initialSettings.selectedSkinId);
   const [skinTextures, setSkinTextures] = useState<SkinTextureSet | null>(null);
   // 默认皮肤（未选皮肤包时）自定义项。
-  const [defaultSkinInnerWidth, setDefaultSkinInnerWidth] = useState(initialSettings.defaultSkinInnerWidth);
+  const [defaultSkinInnerEnabled, setDefaultSkinInnerEnabled] = useState(initialSettings.defaultSkinInnerEnabled);
+  const [defaultSkinOuterEnabled, setDefaultSkinOuterEnabled] = useState(initialSettings.defaultSkinOuterEnabled);
   const [defaultSkinOuterWidth, setDefaultSkinOuterWidth] = useState(initialSettings.defaultSkinOuterWidth);
   const [defaultSkinOuterColor, setDefaultSkinOuterColor] = useState(initialSettings.defaultSkinOuterColor);
   const [defaultSkinOuterAlpha, setDefaultSkinOuterAlpha] = useState(initialSettings.defaultSkinOuterAlpha);
@@ -356,9 +368,9 @@ export function App() {
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
       noteSizeScale, qualityMode, customAntialias, customBloom,
       customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume,
-      selectedSkinId, defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
+      selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
-  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, customAntialias, customBloom, customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
+  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, customAntialias, customBloom, customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
   // 选中皮肤变化时，预加载贴图（灰度图→THREE.Texture）。失败/无皮肤则回退纯色。
   // 菜单态不预加载：避免把 three 拉进首屏；进入游戏/编辑器（GameCanvas 挂载）前才按需下载贴图。
@@ -1308,12 +1320,16 @@ export function App() {
         />
       )}
 
-      {/* 3D Viewport — only active during gameplay/editor to save memory on low-end devices */}
+      {/* 3D Viewport — mounted only when visible. In 2D editor mode we fully
+          UNMOUNT it (instead of display:none) so its rAF render loop stops.
+          The hidden 3D loop was starving the 2D canvas of frame budget:
+          drag lag was worst near the chart start (full future render window)
+          and smoothest near the end (empty window). */}
+      {!(gameState === 'editor' && editorViewMode === '2d') && (
       <div
         className="absolute inset-0 z-0"
         data-viewport="3d"
         onWheel={handleEditorWheel}
-        style={{ display: gameState === 'editor' && editorViewMode === '2d' ? 'none' : 'block' }}
       >
         <Suspense fallback={null}>
         <GameCanvas
@@ -1345,7 +1361,8 @@ export function App() {
           onPlaceEditorNote={handlePlaceEditorNote}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           skinTextures={skinTextures}
-          defaultSkinInnerWidth={defaultSkinInnerWidth}
+          defaultSkinInnerEnabled={defaultSkinInnerEnabled}
+          defaultSkinOuterEnabled={defaultSkinOuterEnabled}
           defaultSkinOuterWidth={defaultSkinOuterWidth}
           defaultSkinOuterColor={defaultSkinOuterColor}
           defaultSkinOuterAlpha={defaultSkinOuterAlpha}
@@ -1353,6 +1370,7 @@ export function App() {
         />
         </Suspense>
       </div>
+      )}
 
       {/* 2D top-down editor viewport (replaces 3D when in 2D mode) */}
       {gameState === 'editor' && editorViewMode === '2d' && (
@@ -1742,8 +1760,10 @@ export function App() {
         setEffectVolume={setEffectVolume}
         selectedSkinId={selectedSkinId}
         setSelectedSkinId={setSelectedSkinId}
-        defaultSkinInnerWidth={defaultSkinInnerWidth}
-        setDefaultSkinInnerWidth={setDefaultSkinInnerWidth}
+        defaultSkinInnerEnabled={defaultSkinInnerEnabled}
+        setDefaultSkinInnerEnabled={setDefaultSkinInnerEnabled}
+        defaultSkinOuterEnabled={defaultSkinOuterEnabled}
+        setDefaultSkinOuterEnabled={setDefaultSkinOuterEnabled}
         defaultSkinOuterWidth={defaultSkinOuterWidth}
         setDefaultSkinOuterWidth={setDefaultSkinOuterWidth}
         defaultSkinOuterColor={defaultSkinOuterColor}

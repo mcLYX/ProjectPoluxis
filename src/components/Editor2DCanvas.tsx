@@ -4,6 +4,7 @@ import { beatToSecondsMultiBpm, secondsToBeatMultiBpm } from '../utils/beatTime'
 import { EASING_FNS } from '../utils/easing';
 import type { ChartData, NoteData, EasingType } from '../types/game';
 import type { EditorTool } from './VisualChartEditor';
+import { liveDragStore } from '../liveDragStore';
 
 /** World X range used by the game's judgement plane. */
 const X_MIN = -2.4;
@@ -105,6 +106,19 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   const onSeekRef = useRef(onSeekBeat);
   onSeekRef.current = onSeekBeat;
 
+  // Live-drag override: while a note is being dragged we keep its position in
+  // a ref and let the canvas draw loop render it every frame — this gives
+  // real-time visual feedback WITHOUT re-rendering the React tree (which, with
+  // ~2000 notes, is far too expensive to do at 60–120Hz, especially on Android
+  // Chromium). State is committed (throttled) so the side panel stays roughly
+  // in sync, and final-committed on pointer up.
+  const dragLiveRef = useRef<{ id: string; x: number; y: number; beat: number } | null>(null);
+  const lastCommitRef = useRef(0);
+  const commitMove = useCallback(() => {
+    const m = dragLiveRef.current;
+    if (m) onMoveRef.current(m.id, m.x, m.y, m.beat);
+  }, []);
+
   const vlineRef = useRef(vlineCount);
   vlineRef.current = vlineCount;
   const pxPerBeatRef = useRef(pxPerBeat);
@@ -167,6 +181,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     if (!ctx) return;
 
     let raf = 0;
+    // Backing-store scale capped at 2 for crisp grid/beat text. Frame rate on
+    // Android is now protected by unmounting the 3D viewport while in 2D mode,
+    // so the old dpr-1 workaround (which traded sharpness for FPS) is unnecessary.
     let dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     const resize = () => {
@@ -300,22 +317,61 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         ctx.restore();
       };
 
-      // Build a flat list of drawable items: head + slide nodes
+      // Visible beat window for culling: only build/draw what's on screen.
+      const CULL_MARGIN = 8; // beats of slack around the visible field
+      const winMin = Math.min(topBeat, botBeat) - CULL_MARGIN;
+      const winMax = Math.max(topBeat, botBeat) + CULL_MARGIN;
+
+      // Build a flat list of drawable items: head + slide nodes.
+      // While a note is being dragged, override its (head) position with the
+      // live-drag ref so the canvas reflects the drag in real time without any
+      // React state update. Notes (and their slide chains) outside the visible
+      // beat window are culled so per-frame work scales with what's on screen
+      // rather than the whole chart — critical for long charts on mobile Blink.
+      const live = dragLiveRef.current;
       type Item = { id: string; type: NoteData['type']; beat: number; x: number; color: string; angle: number };
       const items: Item[] = [];
-      const slideChains: Array<{ color: string; pts: Array<{ x: number; beat: number; easing: EasingType }> }> = [];
+      const slideChains: Array<{ id: string; color: string; pts: Array<{ x: number; beat: number; easing: EasingType }> }> = [];
       for (const n of chart.notes) {
         const color = n.color || noteColor;
         const headAngle = n.angle ?? 0;
-        items.push({ id: n.id, type: n.type, beat: n.beat, x: n.x, color, angle: headAngle });
+        const isLive = live != null && n.id === live.id;
+        const headX = isLive ? live.x : n.x;
+        const headBeat = isLive ? live.beat : n.beat;
+        // Cull notes outside the visible window (always keep the live-dragged one).
+        let inView = isLive || (headBeat >= winMin && headBeat <= winMax);
+        if (!inView && n.nodes && n.nodes.length > 0) {
+          for (const nd of n.nodes) {
+            if (nd.beat >= winMin && nd.beat <= winMax) { inView = true; break; }
+          }
+        }
+        if (!inView) continue;
+        items.push({ id: n.id, type: n.type, beat: headBeat, x: headX, color, angle: headAngle });
         if (n.nodes && n.nodes.length > 0) {
           const pts = [
-            { x: n.x, beat: n.beat, easing: n.easing ?? 'linear' },
-            ...n.nodes.map((nd) => ({ x: nd.x, beat: nd.beat, easing: nd.easing ?? n.easing ?? 'linear' })),
+            { x: headX, beat: headBeat, easing: n.easing ?? 'linear' },
+            ...n.nodes.map((nd, i) => {
+              const childId = `${n.id}#${i + 1}`;
+              const liveChild = live != null && childId === live.id ? live : null;
+              return {
+                x: liveChild ? liveChild.x : nd.x,
+                beat: liveChild ? liveChild.beat : nd.beat,
+                easing: nd.easing ?? n.easing ?? 'linear',
+              };
+            }),
           ];
-          slideChains.push({ color, pts });
-          n.nodes.forEach((nd, i) => {
-            items.push({ id: `${n.id}#${i + 1}`, type: n.type, beat: nd.beat, x: nd.x, color, angle: nd.angle ?? headAngle });
+          slideChains.push({ id: n.id, color, pts });
+          n.nodes.forEach((nd, k) => {
+            const childId = `${n.id}#${k + 1}`;
+            const liveChild = live != null && childId === live.id ? live : null;
+            items.push({
+              id: childId,
+              type: n.type,
+              beat: liveChild ? liveChild.beat : nd.beat,
+              x: liveChild ? liveChild.x : nd.x,
+              color,
+              angle: nd.angle ?? headAngle,
+            });
           });
         }
       }
@@ -385,6 +441,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      // Drop any live-drag override so the side panel doesn't show a frozen
+      // value if this canvas unmounts mid-drag (e.g. switching to 3D).
+      liveDragStore.clear();
     };
   }, [worldToPixel]);
 
@@ -443,6 +502,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
         const hitSec = beatToSecondsMultiBpm(hit.beat, bpm, offset, bpmlist);
         dragRef.current = { id: hit.id, isNew: false, isScrub: false, offBeat: t - hitSec, offX: worldX - hit.x, y0: hit.y, lastPy: py, moved: false };
+        dragLiveRef.current = { id: hit.id, x: hit.x, y: hit.y, beat: hit.beat };
       } else {
         // grab empty space -> vertical scrub (touch swipe / mouse drag).
         // No jump-to-click: avoids conflicting with the scrub gesture.
@@ -486,11 +546,29 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     let x = snap(worldX - drag.offX, xStep);
     drag.moved = true;
     // Preserve the note's original y (2D ignores y, but keep it intact on drag).
-    onMoveRef.current(drag.id, x, drag.y0, beat);
+    // Update the live-drag ref so the canvas draws the note in real time,
+    // and commit to React state only at a throttled cadence (keeps the side
+    // panel in sync without re-rendering the whole editor tree every move).
+    dragLiveRef.current = { id: drag.id, x, y: drag.y0, beat };
+    // Push live position to the editor side panel so its x/y/beat inputs update
+    // in real time (the panel subscribes to this store; it does not re-render the
+    // canvas). The authoritative chart state still commits at the throttled cadence.
+    liveDragStore.set({ id: drag.id, x, y: drag.y0, beat });
+    const now = performance.now();
+    if (now - lastCommitRef.current > 90) {
+      lastCommitRef.current = now;
+      commitMove();
+    }
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
-    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+    // Commit the final dragged position once and clear the live override.
+    if (dragLiveRef.current) {
+      commitMove();
+      dragLiveRef.current = null;
+      liveDragStore.clear();
+    }
     dragRef.current = null;
   };
 

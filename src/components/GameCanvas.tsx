@@ -8,6 +8,7 @@ import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, ge
 import { EASING_FNS } from '../utils/easing';
 
 import { globalAudio } from '../audio/AudioManager';
+import { liveDragStore } from '../liveDragStore';
 
 interface QuickCreateDelta {
   taps?: Array<{ beat: number; x: number; y: number }>;
@@ -56,7 +57,8 @@ interface GameCanvasProps {
   /** 预加载后的皮肤贴图集合；为 null 时走默认纯色外观。 */
   skinTextures?: SkinTextureSet | null;
   /** 默认皮肤（未选皮肤包时）自定义项：内框/外框/判定框。 */
-  defaultSkinInnerWidth?: number;
+  defaultSkinInnerEnabled?: boolean;
+  defaultSkinOuterEnabled?: boolean;
   defaultSkinOuterWidth?: number;
   defaultSkinOuterColor?: string;
   defaultSkinOuterAlpha?: number;
@@ -126,6 +128,12 @@ const _allNodesCache = new WeakMap<
 function getAllNodes(note: ResolvedNote): Array<{ x: number; y: number; timeSec: number; angle: number; easing: EasingType }> {
   let cached = _allNodesCache.get(note);
   if (!cached) {
+    // angle/easing are static per note — computed once here. x/y are re-synced
+    // from the live source objects on every call (see below) so an in-progress
+    // editor drag (which mutates note.x/y or resolvedNodes[i].x/y directly, with
+    // NO full chart re-resolve) is reflected immediately in the slide pipe and
+    // node meshes. This keeps the slide following the pointer in real time during
+    // a drag instead of only the selection gizmo ("dragging just the box").
     cached = [
       { x: note.x, y: note.y, timeSec: note.timeSec, angle: note.angle ?? 0, easing: note.easing ?? 'linear' },
       ...(note.resolvedNodes ?? []).map((rn) => ({
@@ -137,6 +145,17 @@ function getAllNodes(note: ResolvedNote): Array<{ x: number; y: number; timeSec:
       })),
     ];
     _allNodesCache.set(note, cached);
+  }
+  // Live-follow: write the latest x/y from the source objects into the cached
+  // elements. Zero allocation (the array + element objects already exist), just
+  // a couple of assignments per frame.
+  cached[0].x = note.x;
+  cached[0].y = note.y;
+  if (note.resolvedNodes) {
+    for (let i = 0; i < note.resolvedNodes.length; i++) {
+      cached[i + 1].x = note.resolvedNodes[i].x;
+      cached[i + 1].y = note.resolvedNodes[i].y;
+    }
   }
   return cached;
 }
@@ -408,10 +427,36 @@ const SLIDE_RING_OUTER: RingPt[] = [
   [-SLIDE_HALF, 0],
 ];
 
-// 描边闪烁的根因：默认皮肤的填充/描边是「硬边透明几何体」，音符移动时产生
-// 时间域锯齿（看起来像低分辨率+无抗锯齿）。皮肤贴图不闪是因为纹理自带平滑
-// alpha 边缘。现已把默认皮肤的填充/描边改为软边 Canvas 纹理（makeSoftRingTexture /
-// makeSoftFillTexture）。FILL_Z 让半透明填充面略微后移，保证描边环稳定压在填充之上；
+// ---------------------------------------------------------------------------
+// 音符描边改用 THREE.Line（旧版渲染）：WebGL 中 LineBasicMaterial.linewidth 在
+// 几乎所有平台都被忽略，描边恒为 ~1px 屏幕像素 —— 粗细不随音符距离变化，远处
+// 不会因透视把世界恒定宽度的软纹理缩小采样而模糊/闪烁。填充仍用软边纹理
+// （makeSoftFillMesh），以保证平滑抗锯齿。几何体按世界坐标烘焙一次并跨音符
+// 复用（markShared），音符 group 的 vScale 负责整体缩放。
+// ---------------------------------------------------------------------------
+function makeOutlineGeo(pts: RingPt[]): THREE.BufferGeometry {
+  const v: number[] = [];
+  for (const [x, y] of pts) v.push(x, y, 0);
+  v.push(pts[0][0], pts[0][1], 0); // 闭合
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  return g;
+}
+const _tapOutlineGeo = markShared(makeOutlineGeo(TAP_RING_OUTER));
+const _touchOutlineGeo = markShared(makeOutlineGeo(TOUCH_RING_OUTER));
+const _slideOutlineGeo = markShared(makeOutlineGeo(SLIDE_RING_OUTER));
+
+/** 音符描边 Line（几何体共享，材质每音符一个，供逐帧改色/透明度）。 */
+function makeOutlineLine(geo: THREE.BufferGeometry, color: string | THREE.Color, opacity: number, isBorder: 'inner' | 'outer'): THREE.Line {
+  const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity, depthWrite: false });
+  const line = new THREE.Line(geo, mat);
+  line.userData.isBorder = isBorder;
+  line.layers.enable(BLOOM_LAYER);
+  return line;
+}
+
+// 填充仍用软边 Canvas 纹理（makeSoftRingTexture / makeSoftFillTexture）。
+// FILL_Z 让半透明填充面略微后移，保证描边稳定压在填充之上；
 // 所有透明材质均 depthWrite:false，避免写入深度而错误遮挡更远音符的描边。
 const FILL_Z = -0.012;
 
@@ -449,8 +494,8 @@ interface SlideRt {
 interface SlideMeshSet {
   nodes: Array<{
     group: THREE.Group;
-    /** Only the slide head keeps a border: inner (note color) + outer (custom). */
-    innerWire?: THREE.MeshBasicMaterial;
+    /** Only the slide head keeps a border: inner (note color, Line) + outer (custom, soft texture). */
+    innerWire?: THREE.LineBasicMaterial;
     outerWire?: THREE.MeshBasicMaterial;
     fill: THREE.MeshBasicMaterial;
     /** Only the slide head has a 2D judgement projection guide. */
@@ -473,6 +518,35 @@ interface SlideMeshSet {
     /** World-space midpoint, reused by the ultra light pool. */
     mid: THREE.Vector3;
   }>;
+}
+
+/**
+ * Live-drag follow without a React re-render. Directly mutates the dragged
+ * note's resolved position so the windowed render loop (which reads these
+ * fields) places its mesh correctly on the very next frame. The authoritative
+ * React commit (setCurrentChart → resolveChart over the whole chart) is
+ * throttled separately, so a long drag no longer re-resolves 2000 notes every
+ * frame — that was the source of per-frame jank on lower-end Android WebViews.
+ */
+function liveMoveResolvedNote(notes: ResolvedNote[], id: string, x: number, y: number): void {
+  const hashIdx = id.indexOf('#');
+  if (hashIdx < 0) {
+    const n = notes.find((nn) => nn.id === id);
+    if (n) { n.x = x; n.y = y; }
+    return;
+  }
+  // tap/touch chains are expanded into standalone resolved notes whose id
+  // already carries the "#i" suffix — prefer an exact match (same convention
+  // as the selection gizmo and handleMoveEditorNote).
+  const exact = notes.find((nn) => nn.id === id);
+  if (exact) { exact.x = x; exact.y = y; return; }
+  const base = id.slice(0, hashIdx);
+  const childIdx = parseInt(id.slice(hashIdx + 1), 10) - 1;
+  const n = notes.find((nn) => nn.id === base);
+  if (n && n.resolvedNodes && childIdx >= 0 && childIdx < n.resolvedNodes.length) {
+    n.resolvedNodes[childIdx].x = x;
+    n.resolvedNodes[childIdx].y = y;
+  }
 }
 
 const GameCanvasImpl: React.FC<GameCanvasProps> = ({
@@ -504,8 +578,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   onPlaceEditorNote,
   onApplyQuickCreateDelta,
   skinTextures,
-  defaultSkinInnerWidth = 0.05,
-  defaultSkinOuterWidth = 0,
+  defaultSkinInnerEnabled = true,
+  defaultSkinOuterEnabled = false,
+  defaultSkinOuterWidth = 0.05,
   defaultSkinOuterColor = '#22d3ee',
   defaultSkinOuterAlpha = 1,
   defaultSkinJudgeWidth = 0.05,
@@ -515,6 +590,17 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const dragPointerIdRef = useRef<number | null>(null);
   const pointerDownStartRef = useRef<{ x: number; y: number } | null>(null);
   const isDraggingRef = useRef(false);
+
+  // Throttled editor-drag commit. The drag itself live-updates the dragged
+  // note's mesh every frame (via liveMoveResolvedNote), but we only push the
+  // authoritative position into React state at a reduced rate + on release.
+  // This avoids resolveChart() over the full chart on every rAF frame.
+  const dragLiveXRef = useRef<number>(NaN);
+  const dragLiveYRef = useRef<number>(NaN);
+  // The authoritative position is committed to React state ONCE, on pointer
+  // release (see dragFinalCommitRef handling in tick) — never per-frame, so a
+  // drag never re-resolves the full chart mid-move.
+  const dragFinalCommitRef = useRef<boolean>(false);
 
   // ====== Quick-Create gesture tracking =========================================
   /** Per-pointer state used by the "quick-create" gesture mode. */
@@ -550,6 +636,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const onApplyQuickCreateDeltaRef = useRef(onApplyQuickCreateDelta);
   const judgedNotesRef = useRef<Set<string>>(new Set());
   const songEndedRef = useRef(false);
+  /** 本局开始时的时间（秒）。从谱面中间试玩时>0，用于把起点之前的音符预先
+   *  标记为已判定，避免开局瞬间刷出一排先前音符的 Miss 框。 */
+  const playStartTimeRef = useRef(0);
   /** Incremented in commitJudgement / commitSlideNode so the song-end check
    *  is O(1) instead of iterating all notes every frame. */
   const judgedCountRef = useRef(0);
@@ -662,7 +751,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const renderDistRef = useRef(noteRenderDistance);
   const sizeScaleRef = useRef(noteSizeScale);
   const skinTexturesRef = useRef<SkinTextureSet | null>(skinTextures ?? null);
-  const defaultSkinInnerWidthRef = useRef(defaultSkinInnerWidth);
+  const defaultSkinInnerEnabledRef = useRef(defaultSkinInnerEnabled);
+  const defaultSkinOuterEnabledRef = useRef(defaultSkinOuterEnabled);
   const defaultSkinOuterWidthRef = useRef(defaultSkinOuterWidth);
   const defaultSkinOuterColorRef = useRef(defaultSkinOuterColor);
   const defaultSkinOuterAlphaRef = useRef(defaultSkinOuterAlpha);
@@ -778,7 +868,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // 默认皮肤自定义项：变更时同步到 ref（新建 note 时读取），并重建已存在的
   // 默认外观网格，使线框粗细/颜色即时生效。
   useEffect(() => {
-    defaultSkinInnerWidthRef.current = defaultSkinInnerWidth;
+    defaultSkinInnerEnabledRef.current = defaultSkinInnerEnabled;
+    defaultSkinOuterEnabledRef.current = defaultSkinOuterEnabled;
     defaultSkinOuterWidthRef.current = defaultSkinOuterWidth;
     defaultSkinOuterColorRef.current = defaultSkinOuterColor;
     defaultSkinOuterAlphaRef.current = defaultSkinOuterAlpha;
@@ -801,7 +892,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       });
       slideMeshesRef.current.clear();
     }
-  }, [defaultSkinInnerWidth, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth, skinTextures]);
+  }, [defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth, skinTextures]);
   useEffect(() => {
     lowQualityModeRef.current = qualityMode === 'low';
   }, [qualityMode]);
@@ -923,6 +1014,23 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     judgedCountRef.current = 0;
     touchTrackRef.current.clear();
     slideStateRef.current.clear();
+    // 从谱面中间开始试玩：把起点之前的音符预先标记为"已判定"（只标记、不产生
+    // 判定/不计入 judgedCount），从而开局瞬间不再刷出一排先前音符的 Miss 框，
+    // 同时其网格/连线也会因 judged 而被隐藏/退役。歌曲结束由时间判定
+    // `curTime > lastNoteTime + 2` 兜底，因此不会因这些音符未计入而卡结算。
+    playStartTimeRef.current = gameTimeRef.current;
+    if (playStartTimeRef.current > 0) {
+      for (const n of resolved) {
+        if (n.timeSec < playStartTimeRef.current) judgedNotesRef.current.add(n.id);
+        if (n.type === 'slide') {
+          const count = 1 + (n.resolvedNodes?.length ?? 0);
+          for (let i = 0; i < count; i++) {
+            const t = i === 0 ? n.timeSec : (n.resolvedNodes?.[i - 1]?.timeSec ?? n.timeSec);
+            if (t < playStartTimeRef.current) judgedNotesRef.current.add(`${n.id}#${i}`);
+          }
+        }
+      }
+    }
     // Reset event system state
     nextEventIdxRef.current = 0;
     currentTextRef.current = null;
@@ -1352,6 +1460,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       cv.removeEventListener('touchstart', onCanvasTouchStart);
       sceneRef.current = null; cameraRef.current = null; rendererRef.current = null;
       ultraWallsRef.current = null;
+      // Drop any live-drag override so the side panel doesn't keep showing a
+      // frozen value if this canvas unmounts mid-drag (e.g. switching to 2D).
+      liveDragStore.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, antialias, renderScale, allowBloom, allowParticles, allowDynamicLighting, allowHitEffects, noteRenderDistance, vpKey]);
@@ -1456,6 +1567,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       if (down && dragPointerIdRef.current === null) {
         dragPointerIdRef.current = pointerId;
         pointerDownStartRef.current = { x: t.x, y: t.y };
+        // Start a fresh drag: reset throttled-commit tracking so the first move
+        // is always committed immediately to React state.
+        dragLiveXRef.current = NaN;
+        dragLiveYRef.current = NaN;
+        dragFinalCommitRef.current = false;
       }
     }
   };
@@ -1465,6 +1581,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (dragPointerIdRef.current === pointerId) {
       dragPointerIdRef.current = null;
       pointerDownStartRef.current = null;
+      // Mark a pending final commit so the next tick persists the last live
+      // position to React state (only if a real drag actually happened).
+      if (isDraggingRef.current) dragFinalCommitRef.current = true;
       isDraggingRef.current = false;
     }
   };
@@ -1477,17 +1596,17 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     return false;
   };
 
-  // 默认皮肤：为音符添加 内框(紧贴音符、跟随音符色) + 外框(可自定义颜色/透明度) 两道软边环形描边。
-  // 颜色逐帧由渲染循环设置；此处仅按当前设置烘焙纹理粗细。
-  const addDefaultBorders = (g: THREE.Group, ringOuter: RingPt[]) => {
-    // 多边形外接半径（圆心在原点，取各顶点到原点距离的最大值）。
-    const maxR = (() => { let m = 0; for (const [x, y] of ringOuter) m = Math.max(m, Math.hypot(x, y)); return m; })();
-    const gap = maxR * 0.05; // 外框与内框之间的留白
-    g.add(makeRingMesh(ringOuter, defaultSkinInnerWidthRef.current, '#ffffff', 1, 'inner'));
-    // 外框需位于内框之外：将多边形整体放大到 maxR + gap + 外框粗细。
-    const outerScale = (maxR + gap + defaultSkinOuterWidthRef.current) / maxR;
-    const outerPts = ringOuter.map(([x, y]) => [x * outerScale, y * outerScale] as RingPt);
-    g.add(makeRingMesh(outerPts, defaultSkinOuterWidthRef.current, defaultSkinOuterColorRef.current, 1, 'outer'));
+  // 默认皮肤：为音符添加 内框(紧贴音符、跟随音符色，Line 恒 1px) + 外框(软边纹理，
+  // 颜色/粗细/透明度可调)。外框内径 = 内框外径（视觉上附着在内框上）；颜色/透明度
+  // 逐帧由渲染循环设置，粗细在创建时烘焙纹理、设置变更时经 effect 重建网格。
+  const addDefaultBorders = (g: THREE.Group, type: 'tap' | 'touch') => {
+    const innerGeo = type === 'tap' ? _tapOutlineGeo : _touchOutlineGeo;
+    const outer = type === 'tap' ? TAP_RING_OUTER : TOUCH_RING_OUTER;
+    g.add(makeOutlineLine(innerGeo, '#ffffff', 1, 'inner'));
+    const maxR = (() => { let m = 0; for (const [x, y] of outer) m = Math.max(m, Math.hypot(x, y)); return m; })();
+    const w = Math.max(0.001, defaultSkinOuterWidthRef.current);
+    const outerPts = outer.map(([x, y]) => [x * ((maxR + w) / maxR), y * ((maxR + w) / maxR)] as RingPt);
+    g.add(makeRingMesh(outerPts, w, defaultSkinOuterColorRef.current, 1, 'outer'));
   };
 
   const mkTap = (c: string) => {
@@ -1503,8 +1622,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       g.add(fill);
       return g;
     }
-    // 默认外观：软边填充 + 内框(音符色) + 外框(可自定义) 双环描边。
-    addDefaultBorders(g, TAP_RING_OUTER);
+    // 默认外观：软边填充 + 内框(音符色) + 外框(可自定义) 双描边。
+    addDefaultBorders(g, 'tap');
     g.add(makeSoftFillMesh(TAP_RING_OUTER.map(([x, y]) => [x * 0.94, y * 0.94] as RingPt), c, 0.18));
     return g;
   };
@@ -1522,8 +1641,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       g.add(fill);
       return g;
     }
-    // 默认外观：软边填充 + 内框(音符色) + 外框(可自定义) 双环描边。
-    addDefaultBorders(g, TOUCH_RING_OUTER);
+    // 默认外观：软边填充 + 内框(音符色) + 外框(可自定义) 双描边。
+    addDefaultBorders(g, 'touch');
     g.add(makeSoftFillMesh(TOUCH_RING_OUTER.map(([x, y]) => [x * 0.92, y * 0.92] as RingPt), c, 0.22));
     return g;
   };
@@ -1757,6 +1876,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     for (let i = 0; i < allNodes.length; i++) {
       const ns = rt.nodes[i];
       if (ns.judged) continue;
+      // 从谱面中间试玩：起点之前（且未被 resetPlayState 预标记）的节点直接标记
+      // 已判定、不产生 Miss 框——它们是开局前就已越过的音符。
+      if (allNodes[i].timeSec < playStartTimeRef.current) {
+        ns.judged = true;
+        ns.redWarn = false;
+        continue;
+      }
       const dtI = (curTime - allNodes[i].timeSec) * 1000;
       if (dtI > HIT_WINDOW_MS) {
         ns.judged = true;
@@ -1951,45 +2077,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const group = new THREE.Group();
       const isHead = i === 0;
       const slideTex = skinTexturesRef.current?.slide;
-      let innerWire: THREE.MeshBasicMaterial | undefined;
+      let innerWire: THREE.LineBasicMaterial | undefined;
       let outerWire: THREE.MeshBasicMaterial | undefined;
 
-      // 皮肤生效时整块替换 node，不绘制彩色边框。否则保留 内框(音符色)+外框(自定义) 双环软边描边。
+      // 皮肤生效时整块替换 node，不绘制彩色边框。否则保留 内框(音符色,Line) + 外框(软边纹理) 两道描边。
       if (!slideTex) {
-        // 默认皮肤：软边环形描边（内框=音符色，外框=自定义颜色）。
-        const maxR = (() => { let m = 0; for (const [x, y] of SLIDE_RING_OUTER) m = Math.max(m, Math.hypot(x, y)); return m; })();
-        const gap = maxR * 0.05;
-        const recIn = makeSoftRingTexture(SLIDE_RING_OUTER, defaultSkinInnerWidthRef.current);
-        innerWire = new THREE.MeshBasicMaterial({
-          color: new THREE.Color(colorHex),
-          transparent: true,
-          opacity: 0,
-          map: recIn.texture,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-        });
-        const innerRing = new THREE.Mesh(_unitGeo, innerWire);
-        innerRing.scale.set(recIn.size, recIn.size, 1);
-        innerRing.userData.isBorder = 'inner';
-        innerRing.layers.enable(BLOOM_LAYER);
+        const innerRing = makeOutlineLine(_slideOutlineGeo, colorHex, 0, 'inner');
         group.add(innerRing);
-
-        const outerScale = (maxR + gap + defaultSkinOuterWidthRef.current) / maxR;
-        const outerPts = SLIDE_RING_OUTER.map(([x, y]) => [x * outerScale, y * outerScale] as RingPt);
-        const recOut = makeSoftRingTexture(outerPts, defaultSkinOuterWidthRef.current);
-        outerWire = new THREE.MeshBasicMaterial({
-          color: new THREE.Color(defaultSkinOuterColorRef.current),
-          transparent: true,
-          opacity: 0,
-          map: recOut.texture,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-        });
-        const outerRing = new THREE.Mesh(_unitGeo, outerWire);
-        outerRing.scale.set(recOut.size, recOut.size, 1);
-        outerRing.userData.isBorder = 'outer';
-        outerRing.layers.enable(BLOOM_LAYER);
+        innerWire = innerRing.material as THREE.LineBasicMaterial;
+        // 外框：软边纹理环，内径 = 内框外径（附着在内框上）。
+        const maxR = (() => { let m = 0; for (const [x, y] of SLIDE_RING_OUTER) m = Math.max(m, Math.hypot(x, y)); return m; })();
+        const w = Math.max(0.001, defaultSkinOuterWidthRef.current);
+        const outerPts = SLIDE_RING_OUTER.map(([x, y]) => [x * ((maxR + w) / maxR), y * ((maxR + w) / maxR)] as RingPt);
+        const outerRing = makeRingMesh(outerPts, w, defaultSkinOuterColorRef.current, 0, 'outer');
         group.add(outerRing);
+        outerWire = outerRing.material as THREE.MeshBasicMaterial;
       }
 
       const fill = new THREE.MeshBasicMaterial({
@@ -2286,9 +2388,38 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           isDraggingRef.current = true;
           const clampedX = Math.round(THREE.MathUtils.clamp(dragPointer.x, -2.4, 2.4) * 10) / 10;
           const clampedY = Math.round(THREE.MathUtils.clamp(dragPointer.y, -1.5, 1.5) * 10) / 10;
-          onMoveEditorNoteRef.current?.(selectedNoteIdRef.current, clampedX, clampedY);
+          // Live-follow: mutate the dragged note's resolved position directly so
+          // the windowed render loop below places its mesh correctly THIS frame.
+          // The authoritative React commit happens ONLY on pointer release (the
+          // dragFinalCommitRef block below) — committing every frame would
+          // re-resolve the whole ~2000-note chart through React state and saturate
+          // the main thread (single-digit FPS during fast drags, even on flagship
+          // Android). The mesh still follows the pointer perfectly every frame via
+          // this live override, so the drag looks smooth.
+          liveMoveResolvedNote(notes, selectedNoteIdRef.current, clampedX, clampedY);
+          dragLiveXRef.current = clampedX;
+          dragLiveYRef.current = clampedY;
+          // Push the live position to the editor side panel so its x/y inputs
+          // update in real time during the drag. This only re-renders the panel
+          // (it subscribes to the store); it does NOT touch React chart state or
+          // re-render this canvas. Dedup inside the store keeps notifications to
+          // one per visible grid-step change.
+          liveDragStore.set({ id: selectedNoteIdRef.current, x: clampedX, y: clampedY });
         }
       }
+    }
+
+    // Final commit after the drag pointer is released — guarantees the last
+    // live position is persisted to React state once (the only commit during a
+    // drag, so the full chart is never re-resolved mid-move).
+    if (dragFinalCommitRef.current && selectedNoteIdRef.current) {
+      dragFinalCommitRef.current = false;
+      if (!Number.isNaN(dragLiveXRef.current)) {
+        onMoveEditorNoteRef.current?.(selectedNoteIdRef.current, dragLiveXRef.current, dragLiveYRef.current);
+      }
+      // Drop the live override now that the authoritative position is committed
+      // to React state; the panel will show the committed value from `chart`.
+      liveDragStore.clear();
     }
 
     // Selection gizmo — supports slide child ids "id#i", positioned at the node's own depth.
@@ -2467,8 +2598,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             // 皮肤贴图整块显示（不透明）；默认填充保持半透明（defaultFill 标记区分）。
             nm.fill.opacity = nm.fill.map && !nm.fill.userData.defaultFill ? fadeInAlpha : (isRed ? 0.4 : (i === 0 ? 0.2 : 0.26)) * fadeInAlpha;
             // 仅 slide 头节点显示边框：内框跟随音符色，外框使用自定义颜色+透明度。
-            if (nm.innerWire) nm.innerWire.opacity = (i === 0 && defaultSkinInnerWidthRef.current > 0) ? 0.85 * fadeInAlpha : 0;
-            if (nm.outerWire) nm.outerWire.opacity = (i === 0 && defaultSkinOuterWidthRef.current > 0) ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
+            if (nm.innerWire) nm.innerWire.opacity = (i === 0 && defaultSkinInnerEnabledRef.current) ? 0.85 * fadeInAlpha : 0;
+            if (nm.outerWire) nm.outerWire.opacity = (i === 0 && defaultSkinOuterEnabledRef.current) ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
           }
           if (nm.proj && nm.projMat) {
             const timeToHitMs = (allNodes[i].timeSec - curTime) * 1000;
@@ -2754,24 +2885,29 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           ? 1
           : THREE.MathUtils.clamp((nz - spawnLimit) / fadeZone, 0, 1);
         entry.group.children.forEach((child) => {
-          if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-            if (child.userData.isBorder === 'inner') {
-              // 内框：颜色恒等于音符色，仅当宽度 > 0 时显示。
-              child.material.color.set(noteEffectiveColor);
-              child.material.opacity = defaultSkinInnerWidthRef.current > 0 ? 0.85 * fadeInAlpha : 0;
-            } else if (child.userData.isBorder === 'outer') {
-              // 外框：使用可自定义颜色与透明度，仅当宽度 > 0 时显示。
-              child.material.color.set(defaultSkinOuterColorRef.current);
-              child.material.opacity = defaultSkinOuterWidthRef.current > 0 ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
-            } else {
-              child.material.color.set(noteEffectiveColor);
-              // 皮肤贴图整块显示（不透明）；默认填充保持半透明（defaultFill 标记区分）。
-              child.material.opacity = child.material.map && !child.userData.defaultFill ? fadeInAlpha : (note.type === 'tap' ? 0.18 : 0.22) * fadeInAlpha;
+          // 内/外框为 Line（默认皮肤描边）或旧式 Mesh（兼容），统一按 isBorder 处理。
+          if (child.userData.isBorder === 'inner') {
+            if (child instanceof THREE.Mesh || child instanceof THREE.Line) {
+              const m = child.material;
+              if (m instanceof THREE.MeshBasicMaterial || m instanceof THREE.LineBasicMaterial) {
+                // 内框：颜色恒等于音符色，由开关控制显示。
+                m.color.set(noteEffectiveColor);
+                m.opacity = defaultSkinInnerEnabledRef.current ? 0.85 * fadeInAlpha : 0;
+              }
             }
-          }
-          if (child instanceof THREE.Line && child.material instanceof THREE.LineBasicMaterial) {
+          } else if (child.userData.isBorder === 'outer') {
+            if (child instanceof THREE.Mesh || child instanceof THREE.Line) {
+              const m = child.material;
+              if (m instanceof THREE.MeshBasicMaterial || m instanceof THREE.LineBasicMaterial) {
+                // 外框：使用可自定义颜色与透明度，由开关控制显示。
+                m.color.set(defaultSkinOuterColorRef.current);
+                m.opacity = defaultSkinOuterEnabledRef.current ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
+              }
+            }
+          } else if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
             child.material.color.set(noteEffectiveColor);
-            child.material.opacity = fadeInAlpha;
+            // 皮肤贴图整块显示（不透明）；默认填充保持半透明（defaultFill 标记区分）。
+            child.material.opacity = child.material.map && !child.userData.defaultFill ? fadeInAlpha : (note.type === 'tap' ? 0.18 : 0.22) * fadeInAlpha;
           }
         });
 

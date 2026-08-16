@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { lintDsl } from '../utils/editorRules';
+import { useLiveDrag } from '../liveDragStore';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
 
@@ -410,11 +411,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
   const [snappingPos, setSnappingPos] = useState({ x: 0, y: 0 });
 
-  const panelDragStart = useRef<{ startX: number; startY: number; posX: number; posY: number } | null>(null);
-  const snapDragStart = useRef<{ startX: number; startY: number; posX: number; posY: number } | null>(null);
-
   const selectedBaseId = selectedNoteId ? selectedNoteId.split('#')[0] : null;
   const selectedNote = chart.notes.find((n) => n.id === selectedBaseId);
+
+  // Live-drag override: while a note is being dragged (in 2D or 3D) the canvas
+  // pushes the current position here every frame so these input boxes show the
+  // real-time value without waiting for the throttled/on-release chart commit.
+  // Subscribing only re-renders this panel — App and the canvases stay untouched.
+  const liveDrag = useLiveDrag();
 
   const maxBeat = Math.max(16, getMaxBeat(chart)) + 4;
 
@@ -697,54 +701,47 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  // General Panel Drag Handlers
+  // Panel drag via window listeners — robust in WebViews where
+  // setPointerCapture is dropped when the element re-renders mid-drag.
   const onPanelPointerDown = (e: React.PointerEvent) => {
-    panelDragStart.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      posX: panelPos.x,
-      posY: panelPos.y,
+    e.stopPropagation();
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const posX = panelPos.x;
+    const posY = panelPos.y;
+    const move = (ev: PointerEvent) => {
+      setPanelPos({ x: posX + (ev.clientX - startX), y: posY + (ev.clientY - startY) });
     };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const onPanelPointerMove = (e: React.PointerEvent) => {
-    if (!panelDragStart.current) return;
-    const dx = e.clientX - panelDragStart.current.startX;
-    const dy = e.clientY - panelDragStart.current.startY;
-    setPanelPos({
-      x: panelDragStart.current.posX + dx,
-      y: panelDragStart.current.posY + dy,
-    });
-  };
-
-  const onPanelPointerUp = () => {
-    panelDragStart.current = null;
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
 
   // Snapping Panel Drag Handlers
   const onSnapPointerDown = (e: React.PointerEvent) => {
-    snapDragStart.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      posX: snappingPos.x,
-      posY: snappingPos.y,
+    e.stopPropagation();
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const posX = snappingPos.x;
+    const posY = snappingPos.y;
+    const move = (ev: PointerEvent) => {
+      setSnappingPos({ x: posX + (ev.clientX - startX), y: posY + (ev.clientY - startY) });
     };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const onSnapPointerMove = (e: React.PointerEvent) => {
-    if (!snapDragStart.current) return;
-    const dx = e.clientX - snapDragStart.current.startX;
-    const dy = e.clientY - snapDragStart.current.startY;
-    setSnappingPos({
-      x: snapDragStart.current.posX + dx,
-      y: snapDragStart.current.posY + dy,
-    });
-  };
-
-  const onSnapPointerUp = () => {
-    snapDragStart.current = null;
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
 
   const toolBtnCls = (tool: EditorTool) =>
@@ -1252,9 +1249,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {/* Drag Handle */}
               <div
                 onPointerDown={onPanelPointerDown}
-                onPointerMove={onPanelPointerMove}
-                onPointerUp={onPanelPointerUp}
                 className="w-5 h-5 flex items-center justify-center text-cyan-400/50 hover:text-cyan-400 active:text-cyan-300 cursor-grab active:cursor-grabbing mr-1 select-none shrink-0 animate-pulse"
+                style={{ touchAction: 'none' }}
                 title={t('editor.dragPanel')}
               >
                 <Compass size={14} />
@@ -1309,21 +1305,21 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           >
             <span className="col-span-2 text-white/70">{t('editor.headNode')}</span>
             <NumField
-              value={selectedNote.beat}
+              value={liveDrag && liveDrag.id === selectedNote.id && liveDrag.beat !== undefined ? liveDrag.beat : selectedNote.beat}
               onCommit={(v) => handleModifySelected({ beat: v ?? 0 })}
               step={snapSubdivision}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
             <NumField
-              value={selectedNote.x}
+              value={liveDrag && liveDrag.id === selectedNote.id ? liveDrag.x : selectedNote.x}
               onCommit={(v) => handleModifySelected({ x: v ?? 0 })}
               step="any" min={-2.4} max={2.4}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
             <NumField
-              value={selectedNote.y}
+              value={liveDrag && liveDrag.id === selectedNote.id ? liveDrag.y : selectedNote.y}
               onCommit={(v) => handleModifySelected({ y: v ?? 0 })}
               step="any" min={-1.5} max={1.5}
               placeholder="0"
@@ -1353,7 +1349,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           {/* Child node rows — click anywhere in the row (text, padding) to select
               (first click) or seek (second click). Inputs/buttons are ignored, and
               the delete button stops propagation. */}
-          {(selectedNote.nodes ?? []).map((sn, i) => (
+          {(selectedNote.nodes ?? []).map((sn, i) => {
+            const cl = liveDrag && liveDrag.id === `${selectedNote.id}#${i + 1}` ? liveDrag : null;
+            return (
             <div
               key={i}
               onClick={(e) => { const el = e.target as HTMLElement; if (el.tagName === 'INPUT' || el.tagName === 'BUTTON') return; handleNodeClick(`${selectedNote.id}#${i + 1}`, sn.beat); }}
@@ -1363,21 +1361,21 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             >
               <span className="col-span-2 text-white/70">{t('editor.nodeN', { n: i + 1 })}</span>
               <NumField
-                value={sn.beat}
+                value={cl && cl.beat !== undefined ? cl.beat : sn.beat}
                 onCommit={(v) => handlePatchSlideNode(i, { beat: v ?? 0 })}
                 step={snapSubdivision}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
               <NumField
-                value={sn.x}
+                value={cl ? cl.x : sn.x}
                 onCommit={(v) => handlePatchSlideNode(i, { x: v ?? 0 })}
                 step="any" min={-2.4} max={2.4}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
               <NumField
-                value={sn.y}
+                value={cl ? cl.y : sn.y}
                 onCommit={(v) => handlePatchSlideNode(i, { y: v ?? 0 })}
                 step="any" min={-1.5} max={1.5}
                 placeholder="0"
@@ -1402,7 +1400,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 />
               )}
             </div>
-          ))}
+            );
+          })}
 
           <div className="grid grid-cols-12 gap-1.5 text-[10px] text-white/40 font-mono px-2 mb-2">
             <span className="col-span-2" />
@@ -1432,9 +1431,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
       >
         <div
           onPointerDown={onSnapPointerDown}
-          onPointerMove={onSnapPointerMove}
-          onPointerUp={onSnapPointerUp}
           className="w-full h-3 flex items-center justify-center text-cyan-400/40 hover:text-cyan-400 active:text-cyan-300 cursor-grab active:cursor-grabbing border-b border-white/10 pb-1 select-none animate-pulse shrink-0"
+          style={{ touchAction: 'none' }}
           title={t('editor.snapFine')}
         >
           <Compass size={12} />
