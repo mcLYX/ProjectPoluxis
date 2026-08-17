@@ -5,7 +5,7 @@ const Editor2DCanvas = lazy(() => import('./components/Editor2DCanvas').then(m =
 const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').then(m => ({ default: m.VisualChartEditor })));
 const UnitTestModal = lazy(() => import('./components/UnitTestModal').then(m => ({ default: m.UnitTestModal })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
-import type { EditorTool, BatchSelection, QuickCreateDelta } from './components/VisualChartEditor';
+import type { EditorTool, BatchSelection, QuickCreateDelta, MarqueeMode } from './components/VisualChartEditor';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
 import { TimingBar, TimingMarker } from './components/TimingBar';
 import { DEMO_CHARTS } from './data/demoCharts';
@@ -189,6 +189,21 @@ export function App() {
   const [editorTool, setEditorTool] = useState<EditorTool>('select');
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [batchSelection, setBatchSelection] = useState<BatchSelection>({ startBeat: null, endBeat: null });
+  // 多选模式：双击“选择/移动”工具、双击 R 键、或按住 Ctrl 临时进入。
+  const [isMultiSelect, setIsMultiSelect] = useState(false);
+  // 多选集合（note base id，不含 # 子节点后缀）。与单选 selectedNoteId 并存：
+  // 多选模式下的单击/框选改写此集合；批量编辑弹窗据此显示。
+  const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
+  // ref 镜像，供事件回调读取最新集合，避免闭包过期。
+  const selectedNoteIdsRef = useRef<string[]>(selectedNoteIds);
+  useEffect(() => { selectedNoteIdsRef.current = selectedNoteIds; }, [selectedNoteIds]);
+  // 2D 框选合并方式（仅多选 + 2D 生效）。
+  const [marqueeMode, setMarqueeMode] = useState<MarqueeMode>('normal');
+  // Ctrl 临时多选：按住时生效，松开恢复。与 isMultiSelect 取或为“当前是否多选”。
+  // 用 state 而非 ref，以在按住/松开时触发 re-render，让子组件及时感知多选状态。
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  /** 当前是否处于多选模式（含 Ctrl 临时多选）。供子组件判断交互分支。 */
+  const effectiveMultiSelect = isMultiSelect || ctrlHeld;
   const [snapSubdivision, setSnapSubdivision] = useState<number>(0.25);
   const [editorPreviewPlaying, setEditorPreviewPlaying] = useState(false);
   const [editorPlaybackRate, setEditorPlaybackRate] = useState<number>(1);
@@ -1036,23 +1051,64 @@ export function App() {
   // 编辑器放置工具快捷键：q=tap, w=touch, e=slide, r=select(移动)
   useEffect(() => {
     if (gameState !== 'editor') return;
+    let lastRTime = 0;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+
+      // Ctrl 临时多选：按住 Control 时进入多选，松开恢复。
+      // 无条件 set 以规避 effect 闭包中 ctrlHeld 的过期值（React 对相同值会跳过重渲染）。
+      if (e.key === 'Control') {
+        setCtrlHeld(true);
+        return;
+      }
+
       let next: EditorTool | null = null;
       switch (e.key.toLowerCase()) {
         case 'q': next = 'place-tap'; break;
         case 'w': next = 'place-touch'; break;
         case 'e': next = 'place-slide'; break;
-        case 'r': next = 'select'; break;
+        case 'r': {
+          // 双击 R 切换多选 / 单选模式。单击 R 仍切到 select 工具。
+          const now = performance.now();
+          if (now - lastRTime < 300) {
+            // 双击：切换多选模式。
+            lastRTime = 0;
+            setIsMultiSelect((v) => !v);
+            setEditorTool('select');
+            e.preventDefault();
+            return;
+          }
+          lastRTime = now;
+          next = 'select';
+          break;
+        }
         default: return;
       }
       e.preventDefault();
       setEditorTool(next);
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control') {
+        setCtrlHeld(false);
+      }
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+    };
   }, [gameState]);
+
+  // 不满足批量编辑条件时，框选方式重置为“正常”（默认）。
+  // 批量编辑条件：多选模式下选中 ≥1；或非多选模式下选中 ≥2（回到单选不清除已选）。
+  useEffect(() => {
+    const batchActive = effectiveMultiSelect
+      ? selectedNoteIds.length >= 1
+      : selectedNoteIds.length >= 2;
+    if (!batchActive) setMarqueeMode('normal');
+  }, [effectiveMultiSelect, selectedNoteIds]);
 
   useEffect(() => {
     if (gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)) {
@@ -1183,8 +1239,109 @@ export function App() {
   }, []);
 
   const handleSelectEditorNote = useCallback((id: string | null) => {
-    setSelectedNoteId(id);
+    // 统一选中逻辑：selectedNoteIds 为唯一数据源（含子节点 id#i），
+    // selectedNoteId 仅在集合长度为 1 时作为单选焦点（与集合同步）。
+    if (id === null) {
+      // 取消单选焦点。多选模式保留集合（批量弹窗不消失）；
+      // 单选模式（含切换工具后）清空集合，使音符视觉上取消选中。
+      setSelectedNoteId(null);
+      if (!effectiveMultiSelect) setSelectedNoteIds([]);
+      return;
+    }
+    if (effectiveMultiSelect) {
+      // 多选模式：切换精确 id（头节点或子节点独立选中，子节点不带动整条链）。
+      const wasSelected = selectedNoteIdsRef.current.includes(id);
+      setSelectedNoteIds((prev) =>
+        wasSelected ? prev.filter((x) => x !== id) : [...prev, id]
+      );
+      if (wasSelected) {
+        // 取消选中：若该 note 恰是单选焦点，同步清除焦点，避免残留选中高亮。
+        setSelectedNoteId((cur) => (cur === id ? null : cur));
+      } else {
+        setSelectedNoteId(id);
+      }
+    } else {
+      // 单选模式：精确 id 作为集合唯一成员（子节点可独立选中，缺省参数继承头节点）。
+      setSelectedNoteId(id);
+      setSelectedNoteIds([id]);
+    }
+  }, [effectiveMultiSelect]);
+
+  /** 切换多选模式（双击 select 工具 / 双击 R 触发）。 */
+  const handleToggleMultiSelect = useCallback(() => {
+    setIsMultiSelect((v) => !v);
   }, []);
+
+  /** 覆盖式设置多选集合（null = 清空）。同时清空单选焦点以避免两者不一致，
+   *  也避免关闭批量弹窗后残留单音符面板。 */
+  const handleSelectNotes = useCallback((ids: string[] | null) => {
+    setSelectedNoteIds(ids ?? []);
+    setSelectedNoteId(null);
+  }, []);
+
+  /** 按 marqueeMode 合并框选命中的 note id 到多选集合。 */
+  const handleMarqueeSelect = useCallback((hitIds: string[], mode: MarqueeMode) => {
+    setSelectedNoteIds((prev) => {
+      const set = new Set(prev);
+      if (mode === 'normal') {
+        return hitIds;
+      }
+      if (mode === 'add') {
+        for (const id of hitIds) set.add(id);
+        return Array.from(set);
+      }
+      if (mode === 'subtract') {
+        for (const id of hitIds) set.delete(id);
+        return Array.from(set);
+      }
+      // intersect: 框中已选中→取消，未选中→加入
+      for (const id of hitIds) {
+        if (set.has(id)) set.delete(id);
+        else set.add(id);
+      }
+      return Array.from(set);
+    });
+    setSelectedNoteId(null);
+  }, []);
+
+  /** 批量移动：接收一组绝对位置（头节点与子节点 id 均可），一次性写入。
+   *  x 钳制 ±2.4、y 钳制 ±1.5；beat 不做下限钳制（2D 允许负拍）。
+   *  传入绝对位置而非位移，避免节流多次提交造成位移累积。 */
+  const handleMoveEditorNotes = useCallback((positions: Array<{ id: string; x: number; y: number; beat: number }>) => {
+    if (positions.length === 0) return;
+    const headMap = new Map<string, { x: number; y: number; beat: number }>();
+    const childMap = new Map<string, { x: number; y: number; beat: number }>();
+    for (const p of positions) {
+      if (p.id.includes('#')) childMap.set(p.id, p);
+      else headMap.set(p.id, p);
+    }
+    setCurrentChart((prev) => {
+      const updatedNotes = prev.notes.map((n) => {
+        const hp = headMap.get(n.id);
+        let next = n;
+        let changed = false;
+        if (hp) {
+          const nx = Math.max(-2.4, Math.min(2.4, hp.x));
+          const ny = Math.max(-1.5, Math.min(1.5, hp.y));
+          next = { ...n, x: nx, y: ny, beat: hp.beat };
+          changed = true;
+        }
+        // 整条链一起移动：子节点也按绝对位置写入。
+        if (n.nodes && n.nodes.length > 0) {
+          const nodes = n.nodes.map((sn, i) => {
+            const cp = childMap.get(`${n.id}#${i + 1}`);
+            if (!cp) return sn;
+            changed = true;
+            return { ...sn, x: cp.x, y: cp.y, beat: cp.beat };
+          });
+          if (changed) next = { ...next, nodes };
+        }
+        return changed ? next : n;
+      }).sort((a, b) => a.beat - b.beat);
+      return { ...prev, notes: updatedNotes };
+    });
+  }, []);
+
 
   /** Batch-note insertion used by the "quick-create" gesture system. */
   type QcSlideEntry = NonNullable<QuickCreateDelta['slides']>[number];
@@ -1406,6 +1563,8 @@ export function App() {
           isEditorMode={gameState === 'editor'}
           activeEditorTool={editorTool}
           selectedNoteId={selectedNoteId}
+          selectedNoteIds={selectedNoteIds}
+          isMultiSelect={effectiveMultiSelect}
           snapSubdivision={snapSubdivision}
           onJudgement={handleJudgementStable}
           onSongEnd={handleSongEnd}
@@ -1435,12 +1594,18 @@ export function App() {
             snapSubdivision={snapSubdivision}
             activeTool={editorTool}
             selectedNoteId={selectedNoteId}
+            isMultiSelect={effectiveMultiSelect}
+            selectedNoteIds={selectedNoteIds}
+            marqueeMode={marqueeMode}
             vlineCount={editorVlineCount}
             pxPerBeat={editorPxPerBeat}
             onPlaceNote={(x, y, beat) => handlePlaceEditorNote(x, y, beat)}
             onMoveNote={(id, x, y, beat) => handleMoveEditorNote(id, x, y, beat)}
             onSelectNote={handleSelectEditorNote}
             onSeekBeat={handleSeekBeat}
+            onSelectNotes={handleSelectNotes}
+            onMarqueeSelect={handleMarqueeSelect}
+            onMoveNotes={handleMoveEditorNotes}
           />
           </Suspense>
         </div>
@@ -1468,6 +1633,9 @@ export function App() {
           activeTool={editorTool}
           selectedNoteId={selectedNoteId}
           batchSelection={batchSelection}
+          isMultiSelect={effectiveMultiSelect}
+          selectedNoteIds={selectedNoteIds}
+          marqueeMode={marqueeMode}
           snapSubdivision={snapSubdivision}
           viewMode={editorViewMode}
           onSetViewMode={(mode) => {
@@ -1491,8 +1659,13 @@ export function App() {
               setBatchSelection({ startBeat: null, endBeat: null });
             }
           }}
-          onSelectNote={(id) => setSelectedNoteId(id)}
+          onSelectNote={handleSelectEditorNote}
           onSetBatchSelection={(sel) => setBatchSelection(sel)}
+          onToggleMultiSelect={handleToggleMultiSelect}
+          onSelectNotes={handleSelectNotes}
+          onMarqueeSelect={handleMarqueeSelect}
+          onSetMarqueeMode={(m) => setMarqueeMode(m)}
+          onMoveEditorNotes={handleMoveEditorNotes}
           onSetSnapSubdivision={(snap) => setSnapSubdivision(snap)}
           vlineCount={editorVlineCount}
           onSetVlineCount={(n) => setEditorVlineCount(n)}

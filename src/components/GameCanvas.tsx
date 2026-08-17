@@ -52,6 +52,11 @@ interface GameCanvasProps {
   isEditorMode?: boolean;
   activeEditorTool?: 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
   selectedNoteId?: string | null;
+  /** 多选集合（note base id；可能含子节点 id#i）。用于在 3D 视图为所有
+   *  选中的 note 绘制选中框（金色）。 */
+  selectedNoteIds?: string[];
+  /** 是否处于多选模式（含 Ctrl 临时）。为 true 时绘制多选框。 */
+  isMultiSelect?: boolean;
   snapSubdivision?: number;
   onJudgement?: (feedback: JudgementFeedback) => void;
   onSongEnd?: () => void;
@@ -576,6 +581,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   isEditorMode = false,
   activeEditorTool = 'select',
   selectedNoteId = null,
+  selectedNoteIds,
+  isMultiSelect = false,
   snapSubdivision = 0.25,
   onJudgement,
   onSongEnd,
@@ -729,6 +736,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const noteMeshesRef = useRef<Map<string, { group: THREE.Group; projectionGroup: THREE.Group }>>(new Map());
   const slideMeshesRef = useRef<Map<string, SlideMeshSet>>(new Map());
   const selectionGizmoRef = useRef<THREE.Line | null>(null);
+  // 多选 gizmo 池：为每个选中的 note（头节点）绘制一个金色选中框。
+  const multiGizmosRef = useRef<THREE.Line[]>([]);
+  const selectedNoteIdsRef = useRef<string[]>(selectedNoteIds ?? []);
+  useEffect(() => { selectedNoteIdsRef.current = selectedNoteIds ?? []; }, [selectedNoteIds]);
+  const isMultiSelectRef = useRef(isMultiSelect);
+  useEffect(() => { isMultiSelectRef.current = isMultiSelect; }, [isMultiSelect]);
   const activeBurstsRef = useRef<Array<{
     group: THREE.Group;
     startTime: number;
@@ -1228,6 +1241,20 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     gizmo.visible = false;
     scene.add(gizmo);
     selectionGizmoRef.current = gizmo;
+
+    // Multi-select gizmo pool: one gold outline per selected note (lazily grown).
+    const multiMat = new THREE.LineBasicMaterial({ color: 0xffd700, linewidth: 2, transparent: true, opacity: 0.85 });
+    const pool: THREE.Line[] = [];
+    const ensurePool = (n: number) => {
+      while (pool.length < n) {
+        const g = new THREE.Line(gizmoGeo, multiMat);
+        g.visible = false;
+        scene.add(g);
+        pool.push(g);
+      }
+    };
+    ensurePool(32);
+    multiGizmosRef.current = pool;
 
     scene.add(tunnel);
 
@@ -2525,6 +2552,39 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       }
       if (!placed) selGizmo.visible = false;
     }
+
+    // Multi-select gizmos: gold outline at each EXACTLY selected unit
+    // (head id or child id "id#i"), independent selection. Only editor mode
+    // + multi-select mode (so a single focused note doesn't get a double box).
+    const multiGizmos = multiGizmosRef.current;
+    const multiSel = selectedNoteIdsRef.current;
+    let mi = 0;
+    if (multiGizmos.length > 0 && isEditorModeRef.current && isMultiSelectRef.current && multiSel.length > 0) {
+      for (const selId of multiSel) {
+        // 焦点 note 由单选 gizmo 绘制，避免双框重叠。
+        if (selId === selectedNoteIdRef.current) continue;
+        const hashIdx = selId.indexOf('#');
+        const base = hashIdx >= 0 ? selId.slice(0, hashIdx) : selId;
+        const childIdx = hashIdx >= 0 ? parseInt(selId.slice(hashIdx + 1)) : 0;
+        const n = notes.find((nn) => nn.id === base);
+        if (!n) continue;
+        // 精确定位选中的单位坐标（头节点或指定子节点）。
+        let px = n.x, py = n.y, pt = n.timeSec;
+        if (childIdx >= 1) {
+          // slide 链：子节点在 resolvedNodes；tap/touch 链：子节点是独立 "#i" 条目。
+          const resolved = n.resolvedNodes ?? [];
+          const c = resolved[childIdx - 1] ?? notes.find((nn) => nn.id === selId);
+          if (c) { px = c.x; py = c.y; pt = c.timeSec; }
+        }
+        const noteScrollDist = getScrollDistance(pt, speedPointsRef.current);
+        const gz = JUDGE_Z - (noteScrollDist - curScrollDist) * unitPerSecond;
+        const g = multiGizmos[mi++];
+        g.position.set(px, py, gz + 0.1);
+        g.visible = true;
+        if (mi >= multiGizmos.length) break;
+      }
+    }
+    for (; mi < multiGizmos.length; mi++) multiGizmos[mi].visible = false;
 
     // Hoist invariants out of the per-note loop.
     const spawnLimit = -renderDistRef.current;

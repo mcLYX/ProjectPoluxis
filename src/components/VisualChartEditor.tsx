@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData } from '../types/game';
 import { exportChartJson, parseAndValidateChart } from '../utils/chartParser';
 import { countPlayableNotes, getMaxBeat, beatToSecondsMultiBpm } from '../utils/beatTime';
-import { EASING_TYPES } from '../utils/easing';
+import { EASING_TYPES, EASING_FNS } from '../utils/easing';
 import {
   ChevronLeft,
   ChevronRight,
@@ -35,7 +35,7 @@ import {
   FileDown,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { lintDsl } from '../utils/editorRules';
+import { lintDsl, applyDslToNote } from '../utils/editorRules';
 import { useLiveDrag } from '../liveDragStore';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
@@ -44,6 +44,16 @@ export interface BatchSelection {
   startBeat: number | null;
   endBeat: number | null;
 }
+
+/** 2D 编辑器框选合并方式（仅多选模式下生效）。 */
+export type MarqueeMode = 'normal' | 'add' | 'subtract' | 'intersect';
+
+/** 批量编辑弹窗的功能项（下拉 + 按钮共用）。 */
+export type BatchOp =
+  | 'ToTap' | 'ToTouch' | 'ToSlide' | 'MkChain' | 'SplitChain'
+  | 'FillL' | 'FillSI' | 'FillSO' | 'FillSIO'
+  | 'FlipX' | 'FlipY' | 'UseRule'
+  | 'Clone' | 'Delete';
 
 /** Payload used by the "quick-create" gesture system to batch-place notes
  *  into the chart. A single pointer up / move dispatch may produce multiple
@@ -71,6 +81,12 @@ interface VisualChartEditorProps {
   activeTool: EditorTool;
   selectedNoteId: string | null;
   batchSelection: BatchSelection;
+  /** 多选模式是否开启（双击工具 / Ctrl 临时 / 双击 R 切换）。 */
+  isMultiSelect: boolean;
+  /** 当前多选集合（note 的 base id，不含子节点 # 后缀）。 */
+  selectedNoteIds: string[];
+  /** 2D 框选合并方式。 */
+  marqueeMode: MarqueeMode;
   snapSubdivision: number;
   playbackRate: number;
   onSetPlaybackRate: (rate: number) => void;
@@ -80,6 +96,15 @@ interface VisualChartEditorProps {
   onSetActiveTool: (tool: EditorTool) => void;
   onSelectNote: (id: string | null) => void;
   onSetBatchSelection: (sel: BatchSelection) => void;
+  /** 翻转多选模式（双击工具 / 双击 R 触发）。 */
+  onToggleMultiSelect: () => void;
+  /** 覆盖式设置多选集合（null = 清空）。 */
+  onSelectNotes: (ids: string[] | null) => void;
+  /** 按当前 marqueeMode 合并框选命中的 note id 到多选集合。 */
+  onMarqueeSelect: (hitIds: string[], mode: MarqueeMode) => void;
+  onSetMarqueeMode: (mode: MarqueeMode) => void;
+  /** 批量移动：写入一组绝对位置（头节点与子节点 id 均可）。 */
+  onMoveEditorNotes: (positions: Array<{ id: string; x: number; y: number; beat: number }>) => void;
   onSetSnapSubdivision: (snap: number) => void;
   /** 2D editor: number of vertical grid lines (incl. edges) -> X snap columns. */
   vlineCount: number;
@@ -168,13 +193,20 @@ const EasingSelect: React.FC<{
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const [rect, setRect] = useState<DOMRect | null>(null);
   useEffect(() => {
     if (!open) return;
     setRect(btnRef.current?.getBoundingClientRect() ?? null);
-    // Close on any scroll/resize: the panel can move, and since we position
+    // Close on page scroll/resize: the panel can move, and since we position
     // against the viewport the menu would otherwise detach from the trigger.
-    const close = () => setOpen(false);
+    // Ignore the popup's own internal scroll (otherwise the list disappears
+    // when the user tries to scroll it).
+    const close = (e?: Event) => {
+      const t = (e?.target as Node | null) ?? null;
+      if (t && popRef.current && popRef.current.contains(t)) return;
+      setOpen(false);
+    };
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
     return () => {
@@ -205,6 +237,7 @@ const EasingSelect: React.FC<{
           <>
             <div className="fixed inset-0 z-[60]" onMouseDown={() => setOpen(false)} />
             <div
+              ref={popRef}
               className="fixed z-[61] glass-panel-strong rounded-xl border-white/15 p-1 space-y-0.5 max-h-44 overflow-y-auto"
               style={{ left: rect.left, top: rect.bottom + 4, minWidth: rect.width }}
             >
@@ -229,6 +262,120 @@ const EasingSelect: React.FC<{
     </div>
   );
 };
+
+/** Generic frosted-glass dropdown (portal-based, same pattern as EasingSelect).
+ *  Used by the batch-edit panel for the function selector and marquee mode. */
+function GlassDropdown<T extends string>({
+  value,
+  options,
+  onChange,
+  className,
+  accent = 'cyan',
+}: {
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (v: T) => void;
+  className?: string;
+  accent?: 'cyan' | 'amber';
+}) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setRect(btnRef.current?.getBoundingClientRect() ?? null);
+    // 关闭下拉：页面滚动 / 窗口缩放时关闭；但忽略下拉自身列表滚动
+    // （避免“滚动到底部时下拉直接消失”）。
+    const close = (e?: Event) => {
+      const t = (e?.target as Node | null) ?? null;
+      if (t && popRef.current && popRef.current.contains(t)) return;
+      setOpen(false);
+    };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+  const current = options.find((o) => o.value === value) ?? options[0];
+  const textCls = accent === 'amber' ? 'text-amber-300' : 'text-cyan-300';
+  const selCls = accent === 'amber' ? 'bg-amber-500/25 text-amber-200' : 'bg-cyan-500/25 text-cyan-200';
+  return (
+    <div className={`relative ${className ?? ''}`}>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`w-full glass-input border rounded px-1.5 py-0.5 ${textCls} text-left cursor-pointer flex items-center justify-between text-[11px] font-mono ${
+          open ? (accent === 'amber' ? 'border-amber-400/60' : 'border-cyan-400/60') : 'border-white/12'
+        }`}
+      >
+        <span className="truncate">{current?.label}</span>
+        <span className="text-white/40 text-[9px] shrink-0">▾</span>
+      </button>
+      {open && rect &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-[60]" onMouseDown={() => setOpen(false)} />
+            <div
+              ref={popRef}
+              className="fixed z-[61] glass-panel-strong rounded-xl border-white/15 p-1 space-y-0.5 max-h-52 overflow-y-auto"
+              style={{ left: rect.left, top: rect.bottom + 4, minWidth: Math.max(rect.width, 120) }}
+            >
+              {options.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => { onChange(o.value); setOpen(false); }}
+                  className={`w-full text-left px-2 py-1.5 rounded-lg text-[11px] font-mono transition cursor-pointer ${
+                    o.value === value
+                      ? selCls
+                      : 'text-white/70 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+/** Batch-edit function selector + execute button. Holds the selected op in
+ *  local state and fires onExecute when the execute button is pressed. */
+function BatchOpStateful<T extends string>({
+  options,
+  onExecute,
+  executeLabel,
+}: {
+  options: Array<{ value: T; label: string }>;
+  onExecute: (op: T) => void;
+  executeLabel: string;
+}) {
+  const [op, setOp] = useState<T>(options[0].value);
+  return (
+    <>
+      <GlassDropdown<T>
+        value={op}
+        options={options}
+        onChange={(v) => setOp(v)}
+        className="flex-1"
+        accent="amber"
+      />
+      <button
+        onClick={() => onExecute(op)}
+        className="shrink-0 px-3 py-1 rounded-lg border border-amber-400/40 bg-amber-500/20 text-amber-200 font-bold text-[11px] hover:bg-amber-500/35 transition cursor-pointer"
+      >
+        {executeLabel}
+      </button>
+    </>
+  );
+}
 
 /** Compact row editing a node's rotation angle (deg) and segment easing. */
 function AngleEasingRow({
@@ -273,6 +420,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   activeTool,
   selectedNoteId,
   batchSelection,
+  isMultiSelect,
+  selectedNoteIds,
+  marqueeMode,
   snapSubdivision,
   playbackRate,
   onSetPlaybackRate,
@@ -282,6 +432,11 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onSetActiveTool,
   onSelectNote,
   onSetBatchSelection,
+  onToggleMultiSelect,
+  onSelectNotes,
+  onMarqueeSelect: _onMarqueeSelect,
+  onSetMarqueeMode,
+  onMoveEditorNotes: _onMoveEditorNotes,
   onSetSnapSubdivision,
   vlineCount,
   onSetVlineCount,
@@ -416,6 +571,25 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   // Dragging State for Floating Quick Edit and Snapping Panels
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
   const [snappingPos, setSnappingPos] = useState({ x: 0, y: 0 });
+
+  // 批量删除二次确认：第一次点击“删除”进入武装状态，第二次才真正删除。
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  // 选中变化时自动解除删除确认状态。
+  useEffect(() => { setDeleteArmed(false); }, [selectedNoteIds, isMultiSelect]);
+
+  // 手动双击检测（iOS Safari 的 onDoubleClick 不可靠）：两次 click 间隔
+  // <300ms 视为双击，用于切换多选模式。
+  const lastSelectTapRef = useRef(0);
+  const handleSelectToolClick = () => {
+    const now = performance.now();
+    if (now - lastSelectTapRef.current < 300) {
+      lastSelectTapRef.current = 0;
+      onToggleMultiSelect();
+    } else {
+      lastSelectTapRef.current = now;
+      onSetActiveTool('select');
+    }
+  };
 
   const selectedBaseId = selectedNoteId ? selectedNoteId.split('#')[0] : null;
   const selectedNote = chart.notes.find((n) => n.id === selectedBaseId);
@@ -570,6 +744,606 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         : n
     );
     onUpdateChart({ ...chart, notes: updatedNotes });
+  };
+
+  // 对区间内所有音符应用放置规则 DSL：头节点完整应用；子节点应用位置类字段
+  // （beat/x/y/angle/easing，color 子节点无字段自动忽略）。
+  const handleBatchApplyRule = () => {
+    if (!validBatchRange || notesInBatch.length === 0) return;
+    const dsl = editorDsl;
+    const ruleIds = new Set(notesInBatch.map((n) => n.id));
+    const updatedNotes = chart.notes.map((n) => {
+      if (!ruleIds.has(n.id)) return n;
+      const applied = applyDslToNote(n, dsl);
+      if (!n.nodes || n.nodes.length === 0) return applied;
+      // 子节点逐个应用 DSL（以自身位置 + 头节点缺省参数构造临时 note）。
+      const nodes = n.nodes.map((sn) => {
+        const tmp = applyDslToNote(
+          { ...applied, beat: sn.beat, x: sn.x, y: sn.y, angle: sn.angle ?? applied.angle, easing: sn.easing ?? applied.easing, nodes: undefined },
+          dsl,
+        );
+        const out: SlideNodeData = {
+          beat: tmp.beat,
+          x: Math.max(-2.4, Math.min(2.4, tmp.x)),
+          y: Math.max(-1.5, Math.min(1.5, tmp.y)),
+        };
+        if (tmp.angle != null) out.angle = tmp.angle;
+        if (tmp.easing != null) out.easing = tmp.easing;
+        return out;
+      });
+      return { ...applied, nodes };
+    });
+    onUpdateChart({ ...chart, notes: updatedNotes });
+  };
+
+  // ---- 批量编辑弹窗功能实现 ----
+  // 多选集合可包含头节点 id（"id"）与子节点 id（"id#i"）。批量操作按“单位”执行：
+  // 每个被选中的头节点或子节点都视为一个独立 note（子节点的缺省参数继承自其头节点）。
+  type SelUnit = {
+    /** 精确 id（头节点 id 或 "id#i"）。 */
+    id: string;
+    isChild: boolean;
+    beat: number;
+    x: number;
+    y: number;
+    type: NoteType;
+    /** 子节点继承自头节点的颜色。 */
+    color?: string;
+    /** 子节点自身角度或继承头节点角度。 */
+    angle?: number;
+    /** 子节点自身缓动或继承头节点缓动。 */
+    easing?: EasingType;
+    /** 所属链头节点 id。 */
+    headId: string;
+    /** 子节点 1 基序号（仅子节点有）。 */
+    childIndex?: number;
+  };
+
+  // 将多选集合解析为排序后的“单位”列表。
+  const selectedUnits: SelUnit[] = (() => {
+    const selSet = new Set(selectedNoteIds);
+    const units: SelUnit[] = [];
+    for (const n of chart.notes) {
+      const color = n.color;
+      if (selSet.has(n.id)) {
+        units.push({ id: n.id, isChild: false, beat: n.beat, x: n.x, y: n.y, type: n.type, color, angle: n.angle, easing: n.easing, headId: n.id });
+      }
+      if (n.nodes) {
+        n.nodes.forEach((nd, i) => {
+          const cid = `${n.id}#${i + 1}`;
+          if (selSet.has(cid)) {
+            units.push({
+              id: cid, isChild: true, beat: nd.beat, x: nd.x, y: nd.y, type: n.type,
+              color, angle: nd.angle ?? n.angle, easing: nd.easing ?? n.easing,
+              headId: n.id, childIndex: i + 1,
+            });
+          }
+        });
+      }
+    }
+    return units.sort((a, b) => a.beat - b.beat);
+  })();
+
+  // 批量编辑弹窗显示条件：多选模式（含 Ctrl 临时）下选中 ≥1；或不论模式选中 ≥2。
+  // （修改要求：多选模式下选中单个也弹出批量编辑框。）
+  const batchEditActive = (isMultiSelect && selectedUnits.length >= 1) || selectedUnits.length >= 2;
+
+  /** 对多选集合执行批量操作。全部一次性走 onUpdateChart 提交。
+   *  语义：按“单位”执行——每个被选中的头节点或子节点都是一个独立 note。 */
+  const applyBatchOp = (op: BatchOp) => {
+    if (selectedUnits.length < 1) return;
+    // 精确 id 集合（头节点 id 或 "id#i"）。
+    const selIds = new Set(selectedNoteIds);
+    // 填充步进：跟随吸附设置；“自由”（吸附值 0.01）视为 1/16。
+    // “自由”是吸附下拉中的哨兵值，其数值 0.01 是编辑用的最小步长，并非用户想要的实际填充间隔。
+    const SNAP_FREE = 0.01;
+    const snap = Math.abs(snapSubdivision - SNAP_FREE) < 0.00001 || snapSubdivision <= 0 ? 1 / 16 : snapSubdivision;
+
+    // ---- 克隆（Clone）：把选中的单位克隆一份到当前时间点 ----
+    // 选中单位中时间最早的作为 0 时刻：克隆体 beat = currentBeat + (原 beat - 最早 beat)。
+    // 子节点处理与类型转换类似：按“选中/未选中”拆连续段，选中段整体克隆为新链，
+    // 保持段内相邻连接；克隆出的新头节点缺省参数继承自原头节点。
+    if (op === 'Clone') {
+      const baseBeat = selectedUnits[0].beat; // 最早选中单位的 beat
+      const dBeat = currentBeat - baseBeat;
+      const affectedChains = new Set<string>();
+      for (const id of selIds) affectedChains.add(id.indexOf('#') >= 0 ? id.split('#')[0] : id);
+
+      const cloneChain = (head: NoteData): NoteData[] => {
+        const units: Array<{ id: string; beat: number; x: number; y: number; angle?: number; easing?: EasingType; selected: boolean }> = [
+          { id: head.id, beat: head.beat, x: head.x, y: head.y, angle: head.angle, easing: head.easing, selected: selIds.has(head.id) },
+          ...(head.nodes ?? []).map((nd, i) => ({
+            id: `${head.id}#${i + 1}`, beat: nd.beat, x: nd.x, y: nd.y, angle: nd.angle, easing: nd.easing, selected: selIds.has(`${head.id}#${i + 1}`),
+          })),
+        ];
+        const runs: Array<typeof units> = [];
+        for (const u of units) {
+          const last = runs[runs.length - 1];
+          if (last && last[0].selected === u.selected) last.push(u);
+          else runs.push([u]);
+        }
+        const out: NoteData[] = [];
+        for (const run of runs) {
+          if (run.length === 0 || !run[0].selected) continue;
+          const first = run[0];
+          const note: NoteData = {
+            id: `clone-${Math.random().toString(36).slice(2, 10)}`,
+            beat: first.beat + dBeat,
+            x: first.x,
+            y: first.y,
+            type: head.type,
+            ...(head.color != null ? { color: head.color } : {}),
+            ...((first.angle ?? head.angle) != null ? { angle: first.angle ?? head.angle } : {}),
+            ...((first.easing ?? head.easing) != null ? { easing: first.easing ?? head.easing } : {}),
+          };
+          const children = run.slice(1).map((u) => ({
+            beat: u.beat + dBeat,
+            x: u.x,
+            y: u.y,
+            ...(u.angle != null ? { angle: u.angle } : {}),
+            ...(u.easing != null ? { easing: u.easing } : {}),
+          }));
+          if (children.length > 0) note.nodes = children;
+          out.push(note);
+        }
+        return out;
+      };
+
+      const cloned: NoteData[] = [];
+      for (const n of chart.notes) {
+        if (affectedChains.has(n.id)) cloned.push(...cloneChain(n));
+      }
+      if (cloned.length === 0) return;
+      const updatedNotes = [...chart.notes, ...cloned].sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      // 克隆后保持克隆源选中（克隆体不选入，便于连续克隆调整）。
+      onSelectNotes(selectedNoteIds);
+      return;
+    }
+
+    // ---- 删除（Delete）：删除选中的单位 ----
+    // 子节点处理与类型转换类似：按“选中/未选中”拆连续段，选中段整体删除；
+    // 剩下的有相邻则连，被断开产生的新链头（原为子节点）缺省参数继承自原头节点。
+    // 二次确认由 UI（deleteArmed）负责，这里直接执行。
+    if (op === 'Delete') {
+      const affectedChains = new Set<string>();
+      for (const id of selIds) affectedChains.add(id.indexOf('#') >= 0 ? id.split('#')[0] : id);
+
+      const deleteFromChain = (head: NoteData): NoteData[] => {
+        const units: Array<{ id: string; beat: number; x: number; y: number; angle?: number; easing?: EasingType; selected: boolean }> = [
+          { id: head.id, beat: head.beat, x: head.x, y: head.y, angle: head.angle, easing: head.easing, selected: selIds.has(head.id) },
+          ...(head.nodes ?? []).map((nd, i) => ({
+            id: `${head.id}#${i + 1}`, beat: nd.beat, x: nd.x, y: nd.y, angle: nd.angle, easing: nd.easing, selected: selIds.has(`${head.id}#${i + 1}`),
+          })),
+        ];
+        const runs: Array<typeof units> = [];
+        for (const u of units) {
+          const last = runs[runs.length - 1];
+          if (last && last[0].selected === u.selected) last.push(u);
+          else runs.push([u]);
+        }
+        const out: NoteData[] = [];
+        for (const run of runs) {
+          if (run.length === 0 || run[0].selected) continue; // 选中段删除
+          const first = run[0];
+          const isOriginalHead = first.id === head.id;
+          const note: NoteData = {
+            id: isOriginalHead ? head.id : `${head.id}-${Math.random().toString(36).slice(2, 8)}`,
+            beat: first.beat,
+            x: first.x,
+            y: first.y,
+            type: head.type,
+            ...(head.color != null ? { color: head.color } : {}),
+            ...((first.angle ?? head.angle) != null ? { angle: first.angle ?? head.angle } : {}),
+            ...((first.easing ?? head.easing) != null ? { easing: first.easing ?? head.easing } : {}),
+          };
+          const children = run.slice(1).map((u) => ({
+            beat: u.beat,
+            x: u.x,
+            y: u.y,
+            ...(u.angle != null ? { angle: u.angle } : {}),
+            ...(u.easing != null ? { easing: u.easing } : {}),
+          }));
+          if (children.length > 0) note.nodes = children;
+          out.push(note);
+        }
+        return out;
+      };
+
+      const updatedNotes: NoteData[] = [];
+      for (const n of chart.notes) {
+        if (affectedChains.has(n.id)) updatedNotes.push(...deleteFromChain(n));
+        else updatedNotes.push(n);
+      }
+      updatedNotes.sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      onSelectNotes(null);
+      return;
+    }
+
+    // ---- 类型转换（ToTap / ToTouch / ToSlide）：仅改动选中的节点 ----
+    // 把一条链按“选中/未选中”拆成连续段：选中段转换为新类型并保持相邻连接；
+    // 断开处前后拆开，剩下的有相邻则连；被断开产生的新链头（原为子节点）
+    // 缺省参数（color/angle/easing）继承自原头节点。
+    if (op === 'ToTap' || op === 'ToTouch' || op === 'ToSlide') {
+      const nt: NoteType = op === 'ToTap' ? 'tap' : op === 'ToTouch' ? 'touch' : 'slide';
+      const affectedChains = new Set<string>();
+      for (const id of selIds) affectedChains.add(id.indexOf('#') >= 0 ? id.split('#')[0] : id);
+
+      const convertChain = (head: NoteData): NoteData[] => {
+        // 目标类型与链当前类型相同 → 无需转换，整条链原样保留，不做拆分。
+        if (nt === head.type) return [head];
+        const units: Array<{ id: string; beat: number; x: number; y: number; angle?: number; easing?: EasingType; selected: boolean }> = [
+          { id: head.id, beat: head.beat, x: head.x, y: head.y, angle: head.angle, easing: head.easing, selected: selIds.has(head.id) },
+          ...(head.nodes ?? []).map((nd, i) => ({
+            id: `${head.id}#${i + 1}`, beat: nd.beat, x: nd.x, y: nd.y, angle: nd.angle, easing: nd.easing, selected: selIds.has(`${head.id}#${i + 1}`),
+          })),
+        ];
+        const runs: Array<typeof units> = [];
+        for (const u of units) {
+          const last = runs[runs.length - 1];
+          if (last && last[0].selected === u.selected) last.push(u);
+          else runs.push([u]);
+        }
+        const out: NoteData[] = [];
+        for (const run of runs) {
+          if (run.length === 0) continue;
+          const first = run[0];
+          const isOriginalHead = first.id === head.id;
+          const type = run[0].selected ? nt : head.type;
+          // 拆分出的新链头使用随机唯一 id，避免与历史拆分结果重复。
+          const nid = isOriginalHead ? head.id : `${head.id}-${Math.random().toString(36).slice(2, 8)}`;
+          const note: NoteData = {
+            id: nid,
+            beat: first.beat,
+            x: first.x,
+            y: first.y,
+            type,
+            ...(head.color != null ? { color: head.color } : {}),
+            ...((first.angle ?? head.angle) != null ? { angle: first.angle ?? head.angle } : {}),
+            ...((first.easing ?? head.easing) != null ? { easing: first.easing ?? head.easing } : {}),
+          };
+          const children = run.slice(1).map((u) => ({
+            beat: u.beat,
+            x: u.x,
+            y: u.y,
+            ...(u.angle != null ? { angle: u.angle } : {}),
+            ...(u.easing != null ? { easing: u.easing } : {}),
+          }));
+          if (children.length > 0) note.nodes = children;
+          out.push(note);
+        }
+        return out;
+      };
+
+      const updatedNotes: NoteData[] = [];
+      for (const n of chart.notes) {
+        if (affectedChains.has(n.id)) updatedNotes.push(...convertChain(n));
+        else updatedNotes.push(n);
+      }
+      updatedNotes.sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      // 结构已变，清空多选避免残留失效 id。
+      onSelectNotes(null);
+      return;
+    }
+
+    // ---- MkChain：把选中的单位按 beat 桥接成一条链（全部同一 type 才生效）----
+    // 本质是“桥接/拼接”：将选中的节点按时间排序串成一条链。
+    //  - 选中节点排序 s0..sn。
+    //  - s0 的原前驱链段（s0 之前未选中的连续节点）保留为新链头部。
+    //  - sn 的原后继链段（sn 之后未选中的连续节点）保留为新链尾部。
+    //  - s0..sn 之间逐一建立连接。
+    //  - 被绕过的节点（s0 之后、sn 之前，以及各选中节点的旧相邻节点）断开，
+    //    按原链连续段自成链。
+    // 例：ACE(A→C→E) + BDF(B→D→F)，选 C、D → A-C-D-F，B、E 独立。
+    if (op === 'MkChain') {
+      const types = new Set(selectedUnits.map((u) => u.type));
+      if (types.size !== 1 || selectedUnits.length < 2) return;
+      const sorted = [...selectedUnits].sort((a, b) => a.beat - b.beat);
+      const s0 = sorted[0];
+      const sn = sorted[sorted.length - 1];
+
+      // 链节点序列（id/beat/x/y/angle/easing）。
+      type ChainU = { id: string; beat: number; x: number; y: number; angle?: number; easing?: EasingType };
+      const chainUnits = (head: NoteData): ChainU[] => [
+        { id: head.id, beat: head.beat, x: head.x, y: head.y, angle: head.angle, easing: head.easing },
+        ...(head.nodes ?? []).map((nd, i) => ({
+          id: `${head.id}#${i + 1}`, beat: nd.beat, x: nd.x, y: nd.y, angle: nd.angle, easing: nd.easing,
+        })),
+      ];
+      const toNode = (u: ChainU): SlideNodeData => ({
+        beat: u.beat,
+        x: u.x,
+        y: u.y,
+        ...(u.angle != null ? { angle: u.angle } : {}),
+        ...(u.easing != null ? { easing: u.easing } : {}),
+      });
+
+      // s0 的前缀链段：s0 所在链中位于 s0 之前的连续未选中节点。
+      const s0Head = chart.notes.find((n) => n.id === s0.headId)!;
+      const s0Chain = chainUnits(s0Head);
+      const s0Idx = s0Chain.findIndex((u) => u.id === s0.id);
+      const prefix = s0Idx > 0 ? s0Chain.slice(0, s0Idx) : [];
+      // sn 的后缀链段：sn 所在链中位于 sn 之后的连续未选中节点。
+      const snHead = chart.notes.find((n) => n.id === sn.headId)!;
+      const snChain = chainUnits(snHead);
+      const snIdx = snChain.findIndex((u) => u.id === sn.id);
+      const suffix = snIdx >= 0 && snIdx < snChain.length - 1 ? snChain.slice(snIdx + 1) : [];
+
+      // 主链头：有前缀段则沿用其首节点（保持原 id）；否则为 s0。
+      const headFromPrefix = prefix.length > 0;
+      const headId = headFromPrefix
+        ? prefix[0].id
+        : (s0.isChild ? `${s0.headId}-${Math.random().toString(36).slice(2, 8)}` : s0.id);
+      const headUnit = headFromPrefix ? prefix[0] : s0;
+      const children: SlideNodeData[] = [
+        ...(headFromPrefix ? prefix.slice(1) : []),
+        ...(headFromPrefix ? sorted : sorted.slice(1)).map((u) => ({
+          beat: u.beat,
+          x: u.x,
+          y: u.y,
+          ...(u.angle != null ? { angle: u.angle } : {}),
+          ...(u.easing != null ? { easing: u.easing } : {}),
+        })),
+        ...suffix,
+      ];
+      const newHead: NoteData = {
+        id: headId,
+        beat: headUnit.beat,
+        x: headUnit.x,
+        y: headUnit.y,
+        type: s0.type,
+        // 颜色/角度/缓动缺省参数继承自 s0 所在链头。
+        ...(s0Head.color != null ? { color: s0Head.color } : {}),
+        ...((headUnit.angle ?? s0Head.angle) != null ? { angle: headUnit.angle ?? s0Head.angle } : {}),
+        ...((headUnit.easing ?? s0Head.easing) != null ? { easing: headUnit.easing ?? s0Head.easing } : {}),
+        ...(children.length > 0 ? { nodes: children } : {}),
+      };
+
+      // 受影响链重建：移除所有选中节点 + 已进主链的前缀/后缀节点，
+      // 其余未选中节点按原链连续段成链（被绕过的 B、E 各自独立）。
+      const affectedHeads = new Set(selectedUnits.map((u) => u.headId));
+      const takenIds = new Set<string>([
+        ...sorted.map((u) => u.id),
+        ...prefix.map((u) => u.id),
+        ...suffix.map((u) => u.id),
+      ]);
+      const updatedNotes: NoteData[] = [];
+      for (const n of chart.notes) {
+        if (!affectedHeads.has(n.id)) { updatedNotes.push(n); continue; }
+        const units = chainUnits(n).map((u) => ({ ...u, taken: takenIds.has(u.id) }));
+        // 整条链都被取走 → 无残留。
+        if (units.every((u) => u.taken)) continue;
+        // 连续未取走段成链。
+        const runs: Array<Array<ChainU & { taken: boolean }>> = [];
+        let cur: Array<ChainU & { taken: boolean }> = [];
+        for (const u of units) {
+          if (u.taken) { if (cur.length) { runs.push(cur); cur = []; } }
+          else cur.push(u);
+        }
+        if (cur.length) runs.push(cur);
+        for (const run of runs) {
+          const first = run[0];
+          const isOrigHead = first.id === n.id;
+          const note: NoteData = {
+            id: isOrigHead ? n.id : `${n.id}-${Math.random().toString(36).slice(2, 8)}`,
+            beat: first.beat,
+            x: first.x,
+            y: first.y,
+            type: n.type,
+            ...(n.color != null ? { color: n.color } : {}),
+            ...((first.angle ?? n.angle) != null ? { angle: first.angle ?? n.angle } : {}),
+            ...((first.easing ?? n.easing) != null ? { easing: first.easing ?? n.easing } : {}),
+          };
+          const children = run.slice(1).map((u) => toNode(u));
+          if (children.length > 0) note.nodes = children;
+          updatedNotes.push(note);
+        }
+      }
+      updatedNotes.push(newHead);
+      updatedNotes.sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      onSelectNotes([newHead.id]);
+      return;
+    }
+
+    // ---- 拆散链（SplitChain）：断开选中节点对之间的连接 ----
+    // 语义：只断开“选中的相邻节点对”之间的连接，其余连接保留。
+    // 必须选中链中至少两个连接的相邻节点才有效；整链断开需选全链
+    // （每个相邻对都选中 → 全部连接断开 → 所有节点独立）。
+    // 例：链 H-C1-C2-C3，选 C1、C2 → 只断 C1-C2 → [H-C1] 与 [C2-C3] 两条链。
+    if (op === 'SplitChain') {
+      const affectedChains = new Set<string>();
+      for (const id of selIds) affectedChains.add(id.indexOf('#') >= 0 ? id.split('#')[0] : id);
+      // 只处理含 ≥1 个“相邻选中对”的链（即至少一处连接被断开）。
+      const validChains = new Set<string>();
+      for (const chainId of affectedChains) {
+        const head = chart.notes.find((n) => n.id === chainId);
+        if (!head) continue;
+        const selectedMask = [
+          selIds.has(head.id),
+          ...(head.nodes ?? []).map((_, i) => selIds.has(`${head.id}#${i + 1}`)),
+        ];
+        let hasCut = false;
+        for (let i = 1; i < selectedMask.length; i++) {
+          if (selectedMask[i - 1] && selectedMask[i]) { hasCut = true; break; }
+        }
+        if (hasCut) validChains.add(chainId);
+      }
+      if (validChains.size === 0) return;
+
+      const splitChain = (head: NoteData): NoteData[] => {
+        const units: Array<{ id: string; beat: number; x: number; y: number; angle?: number; easing?: EasingType; selected: boolean }> = [
+          { id: head.id, beat: head.beat, x: head.x, y: head.y, angle: head.angle, easing: head.easing, selected: selIds.has(head.id) },
+          ...(head.nodes ?? []).map((nd, i) => ({
+            id: `${head.id}#${i + 1}`, beat: nd.beat, x: nd.x, y: nd.y, angle: nd.angle, easing: nd.easing, selected: selIds.has(`${head.id}#${i + 1}`),
+          })),
+        ];
+        // 断点集合：在单位 i 与 i+1 之间断开，当且仅当两者都选中。
+        const cutAfter = new Set<number>();
+        for (let i = 0; i < units.length - 1; i++) {
+          if (units[i].selected && units[i + 1].selected) cutAfter.add(i);
+        }
+        // 按断点把链切成连续段，每段保留为一条链（单节点段为独立 note）。
+        const runs: Array<typeof units> = [];
+        let cur: typeof units = [];
+        for (let i = 0; i < units.length; i++) {
+          cur.push(units[i]);
+          if (cutAfter.has(i)) { runs.push(cur); cur = []; }
+        }
+        if (cur.length > 0) runs.push(cur);
+
+        const out: NoteData[] = [];
+        for (const run of runs) {
+          if (run.length === 0) continue;
+          const first = run[0];
+          const isOriginalHead = first.id === head.id;
+          const note: NoteData = {
+            id: isOriginalHead ? head.id : `${head.id}-${Math.random().toString(36).slice(2, 8)}`,
+            beat: first.beat,
+            x: first.x,
+            y: first.y,
+            type: head.type,
+            ...(head.color != null ? { color: head.color } : {}),
+            ...((first.angle ?? head.angle) != null ? { angle: first.angle ?? head.angle } : {}),
+            ...((first.easing ?? head.easing) != null ? { easing: first.easing ?? head.easing } : {}),
+          };
+          const children = run.slice(1).map((u) => ({
+            beat: u.beat,
+            x: u.x,
+            y: u.y,
+            ...(u.angle != null ? { angle: u.angle } : {}),
+            ...(u.easing != null ? { easing: u.easing } : {}),
+          }));
+          if (children.length > 0) note.nodes = children;
+          out.push(note);
+        }
+        return out;
+      };
+
+      const updatedNotes: NoteData[] = [];
+      for (const n of chart.notes) {
+        if (validChains.has(n.id)) updatedNotes.push(...splitChain(n));
+        else updatedNotes.push(n);
+      }
+      updatedNotes.sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      onSelectNotes(null);
+      return;
+    }
+
+    // ---- FlipX / FlipY：只翻转被选中的单位（头或子）----
+    if (op === 'FlipX' || op === 'FlipY') {
+      const flipX = op === 'FlipX';
+      const updatedNotes = chart.notes.map((n) => {
+        let next = n;
+        let changed = false;
+        if (selIds.has(n.id)) {
+          next = { ...n, x: flipX ? -n.x : n.x, y: !flipX ? -n.y : n.y };
+          changed = true;
+        }
+        if (n.nodes) {
+          const nodes = n.nodes.map((sn, i) => {
+            if (!selIds.has(`${n.id}#${i + 1}`)) return sn;
+            changed = true;
+            return { ...sn, x: flipX ? -sn.x : sn.x, y: !flipX ? -sn.y : sn.y };
+          });
+          if (changed) next = { ...next, nodes };
+        }
+        return changed ? next : n;
+      });
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      return;
+    }
+
+    // ---- UseRule：对每个选中单位应用放置规则 DSL ----
+    // 头节点：完整应用；子节点：应用位置类字段（beat/x/y/angle/easing）。
+    // 子节点无 color 字段，DSL 对颜色的改动自动忽略（无害）。
+    if (op === 'UseRule') {
+      const dsl = editorDsl;
+      const updatedNotes = chart.notes.map((n) => {
+        let next = n;
+        let changed = false;
+        if (selIds.has(n.id)) {
+          next = applyDslToNote(n, dsl);
+          changed = true;
+        }
+        if (n.nodes) {
+          const nodes = n.nodes.map((sn, i) => {
+            const cid = `${n.id}#${i + 1}`;
+            if (!selIds.has(cid)) return sn;
+            changed = true;
+            // 以子节点自身位置 + 头节点缺省参数构造临时 note 应用 DSL。
+            const tmp = applyDslToNote(
+              { ...n, beat: sn.beat, x: sn.x, y: sn.y, angle: sn.angle ?? n.angle, easing: sn.easing ?? n.easing, nodes: undefined },
+              dsl,
+            );
+            const out: SlideNodeData = {
+              beat: tmp.beat,
+              x: Math.max(-2.4, Math.min(2.4, tmp.x)),
+              y: Math.max(-1.5, Math.min(1.5, tmp.y)),
+            };
+            if (tmp.angle != null) out.angle = tmp.angle;
+            if (tmp.easing != null) out.easing = tmp.easing;
+            return out;
+          });
+          if (changed) next = { ...next, nodes };
+        }
+        return changed ? next : n;
+      });
+      onUpdateChart({ ...chart, notes: updatedNotes });
+      return;
+    }
+
+    // ---- Fill 系列：在相邻选中单位之间按 snap 步进插入新音符 ----
+    // 新音符为独立头节点，继承前一个单位的 type/color/angle/easing，坐标按缓动插值。
+    const easingFn: (t: number) => number =
+      op === 'FillL' ? (t) => t
+      : op === 'FillSI' ? EASING_FNS['sine-in']
+      : op === 'FillSO' ? EASING_FNS['sine-out']
+      : op === 'FillSIO' ? EASING_FNS['sine-io']
+      : (t) => t;
+    const newNotes: NoteData[] = [];
+    for (let i = 0; i < selectedUnits.length - 1; i++) {
+      const a = selectedUnits[i];
+      const b = selectedUnits[i + 1];
+      const beatStep = snap;
+      let beat = Math.round((a.beat + beatStep) / beatStep) * beatStep;
+      while (beat < b.beat - 1e-6) {
+        const t = (beat - a.beat) / (b.beat - a.beat || 1);
+        const e = easingFn(Math.max(0, Math.min(1, t)));
+        const nx = a.x + (b.x - a.x) * e;
+        const ny = a.y + (b.y - a.y) * e;
+        const note: NoteData = {
+          id: `fill-${Date.now().toString().slice(-5)}-${newNotes.length}-${i}`,
+          beat: Math.round(beat * 1000) / 1000,
+          x: Math.round(nx * 1000) / 1000,
+          y: Math.round(ny * 1000) / 1000,
+          type: a.type,
+          ...(a.color != null ? { color: a.color } : {}),
+          ...(a.angle != null ? { angle: a.angle } : {}),
+          ...(a.easing != null ? { easing: a.easing } : {}),
+        };
+        newNotes.push(note);
+        beat += beatStep;
+      }
+    }
+    if (newNotes.length > 0) {
+      const updatedNotes = [...chart.notes, ...newNotes].sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, notes: updatedNotes });
+    }
+  };
+
+  /** 批量编辑弹窗的删除按钮：需二次确认。第一次点击武装，第二次执行。 */
+  const handlePanelBatchDelete = () => {
+    if (selectedUnits.length < 1) return;
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      return;
+    }
+    setDeleteArmed(false);
+    applyBatchOp('Delete');
   };
 
   const handleModifySelected = (patch: Partial<NoteData>) => {
@@ -742,7 +1516,10 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const toolBtnCls = (tool: EditorTool) =>
     `py-2 px-1 rounded-lg border font-bold text-center transition cursor-pointer flex flex-col items-center gap-1 ${
       activeTool === tool
-        ? 'bg-cyan-500/20 border-cyan-400/60 text-cyan-200 shadow-[0_0_16px_rgba(34,211,238,0.25),inset_0_1px_0_rgba(255,255,255,0.14)]'
+        ? (tool === 'select' && isMultiSelect
+            // 多选模式：select 工具高亮由青色变为金色发光
+            ? 'bg-amber-500/20 border-amber-400/60 text-amber-200 shadow-[0_0_16px_rgba(251,191,36,0.3),inset_0_1px_0_rgba(255,255,255,0.14)]'
+            : 'bg-cyan-500/20 border-cyan-400/60 text-cyan-200 shadow-[0_0_16px_rgba(34,211,238,0.25),inset_0_1px_0_rgba(255,255,255,0.14)]')
         : 'glass-sub border-white/10 text-white/70 hover:text-white hover:bg-white/[0.08]'
     }`;
 
@@ -762,16 +1539,25 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   // Collapsed Tool Selector Icons
   const collapsedToolIcon = (tool: EditorTool) => {
     const isSelected = activeTool === tool;
+    // 多选模式下 select 工具高亮金色发光（其余工具仍青色）。
+    const selectGold = tool === 'select' && isMultiSelect;
     const baseCls = `w-8 h-8 rounded-lg flex items-center justify-center border transition cursor-pointer ${
       isSelected
-        ? 'bg-cyan-500/20 border-cyan-400/60 text-cyan-200 shadow-[0_0_14px_rgba(34,211,238,0.25)]'
+        ? (selectGold
+            ? 'bg-amber-500/20 border-amber-400/60 text-amber-200 shadow-[0_0_14px_rgba(251,191,36,0.3)]'
+            : 'bg-cyan-500/20 border-cyan-400/60 text-cyan-200 shadow-[0_0_14px_rgba(34,211,238,0.25)]')
         : 'border-transparent text-white/55 hover:bg-white/[0.08] hover:text-white'
     }`;
 
     switch (tool) {
       case 'select':
         return (
-          <button key={tool} onClick={() => onSetActiveTool(tool)} className={baseCls} title={t('editor.select') + ' (R)'}>
+          <button
+            key={tool}
+            onClick={handleSelectToolClick}
+            className={baseCls}
+            title={t('editor.select') + ' (R) · ' + t('editor.multiSelect')}
+          >
             <Move size={16} />
           </button>
         );
@@ -924,7 +1710,13 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {sectionOpen.tools && (
                 <div className="p-3 space-y-1.5 border-t border-white/10">
                   <div className="grid grid-cols-2 gap-1.5">
-                    <button onClick={() => onSetActiveTool('select')} className={toolBtnCls('select')} title={t('editor.select') + ' (R)'}><Move size={14} /><span>{t('editor.select')}</span></button>
+                    <button
+                      onClick={handleSelectToolClick}
+                      className={toolBtnCls('select')}
+                      title={t('editor.select') + ' (R) · ' + t('editor.multiSelect')}
+                    >
+                      <Move size={14} /><span>{isMultiSelect ? t('editor.multiSelect') : t('editor.select')}</span>
+                    </button>
                     {viewMode !== '2d' && (
                       <button onClick={() => onSetActiveTool('quick-create')} className={toolBtnCls('quick-create')}><Zap size={14} /><span>{t('editor.quickCreate')}</span></button>
                     )}
@@ -1156,10 +1948,10 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('batch')} className={sectionHeaderClass}>
-                <span className="flex items-center gap-1.5"><BoxSelect size={12} /> {t('editor.batch')}</span>
+                <span className="flex items-center gap-1.5"><BoxSelect size={12} /> {t('editor.rangeOp')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.batch ? '−' : '+'}</span>
               </button>
-              {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-cyan-400 font-mono">{t('editor.batchNotes', { n: notesInBatch.length })}</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchStart')}: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : t('editor.batchUnset')}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchEnd')}: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : t('editor.batchUnset')}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">{t('editor.batchRange')}: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> {t('editor.clone')}</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> {t('editor.delete')}</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">{t('editor.confirmQ')}</button>}</div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={handleBatchFlipX} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipHorizontal size={12} /> {t('editor.flipX')}</button><button onClick={handleBatchFlipY} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipVertical size={12} /> {t('editor.flipY')}</button></div></div>}</div>}
+              {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-cyan-400 font-mono">{t('editor.batchNotes', { n: notesInBatch.length })}</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchStart')}: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : t('editor.batchUnset')}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchEnd')}: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : t('editor.batchUnset')}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">{t('editor.batchRange')}: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> {t('editor.clone')}</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> {t('editor.delete')}</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">{t('editor.confirmQ')}</button>}</div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={handleBatchFlipX} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipHorizontal size={12} /> {t('editor.flipX')}</button><button onClick={handleBatchFlipY} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipVertical size={12} /> {t('editor.flipY')}</button></div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={() => onSelectNotes(notesInBatch.map((n) => n.id))} disabled={notesInBatch.length === 0} className={`py-1.5 rounded glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition ${notesInBatch.length === 0 ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}><BoxSelect size={12} /> {t('editor.selectAll')}</button><button onClick={handleBatchApplyRule} disabled={notesInBatch.length === 0} className={`py-1.5 rounded glass-btn border-violet-400/40 text-violet-300 hover:text-violet-200 flex items-center justify-center gap-1 font-bold transition ${notesInBatch.length === 0 ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}><Wand2 size={12} /> {t('editor.applyRule')}</button></div></div>}</div>}
             </div>
 
             <div className={sectionClass}>
@@ -1229,8 +2021,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
       {/* 2. Draggable & Semi-Transparent Floating Note Chain Editor.
           Tap / Touch / Slide all share this chain-based editor: a chain is a
           head node plus optional child nodes, and the whole chain can be
-          switched between the three note types. */}
-      {selectedNote && (
+          switched between the three note types.
+          多选集合满足批量编辑条件时，此处改为显示“批量编辑”弹窗。 */}
+      {selectedNote && !batchEditActive && (
         <div
           className="glass-panel-strong absolute pointer-events-auto border-cyan-400/40 rounded-2xl p-4 text-white z-40 w-[26rem] max-h-[50vh] overflow-y-auto select-none"
           style={{
@@ -1414,6 +2207,110 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           </button>
         </div>
       )}
+
+      {/* 2b. Batch Edit Panel — shown when the batch-edit condition is active.
+          Reuses the same draggable container as the note chain editor. */}
+      {batchEditActive && (() => {
+        const batchOpOptions: Array<{ value: BatchOp; label: string }> = [
+          { value: 'ToTap', label: t('editor.opToTap') },
+          { value: 'ToTouch', label: t('editor.opToTouch') },
+          { value: 'ToSlide', label: t('editor.opToSlide') },
+          { value: 'MkChain', label: t('editor.opMkChain') },
+          { value: 'SplitChain', label: t('editor.opSplitChain') },
+          { value: 'FillL', label: t('editor.opFillL') },
+          { value: 'FillSI', label: t('editor.opFillSI') },
+          { value: 'FillSO', label: t('editor.opFillSO') },
+          { value: 'FillSIO', label: t('editor.opFillSIO') },
+          { value: 'FlipX', label: t('editor.flipX') },
+          { value: 'FlipY', label: t('editor.flipY') },
+          { value: 'UseRule', label: t('editor.opUseRule') },
+        ];
+        const marqueeOptions: Array<{ value: MarqueeMode; label: string }> = [
+          { value: 'normal', label: t('editor.mmNormal') },
+          { value: 'add', label: t('editor.mmAdd') },
+          { value: 'subtract', label: t('editor.mmSubtract') },
+          { value: 'intersect', label: t('editor.mmIntersect') },
+        ];
+        return (
+          <div
+            className="glass-panel-strong absolute pointer-events-auto border-amber-400/40 rounded-2xl p-4 text-white z-40 w-[24rem] select-none"
+            style={{
+              transform: `translate(${panelPos.x}px, ${panelPos.y}px)`,
+              left: '24rem',
+              top: '1rem',
+            }}
+          >
+            <div className="flex items-center justify-between mb-3 border-b border-amber-500/20 pb-2">
+              <div className="flex items-center gap-2">
+                <div
+                  onPointerDown={onPanelPointerDown}
+                  className="w-5 h-5 flex items-center justify-center text-amber-400/50 hover:text-amber-400 active:text-amber-300 cursor-grab active:cursor-grabbing mr-1 select-none shrink-0 animate-pulse"
+                  style={{ touchAction: 'none' }}
+                  title={t('editor.dragPanel')}
+                >
+                  <Compass size={14} />
+                </div>
+                <BoxSelect size={14} className="text-amber-300" />
+                <span className="font-bold text-sm text-amber-300 font-orbitron">{t('editor.batchEdit')}</span>
+                <span className="text-[10px] text-white/50 font-mono">
+                  {t('editor.batchSelected', { n: selectedUnits.length })}
+                </span>
+              </div>
+              <button onClick={() => onSelectNotes(null)} className="p-1 text-white/50 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* 功能下拉 + 执行按钮 */}
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-[10px] text-white/60 font-mono shrink-0">{t('editor.batchOp')}</span>
+              <BatchOpStateful
+                options={batchOpOptions}
+                onExecute={(op) => applyBatchOp(op)}
+                executeLabel={t('editor.execute')}
+              />
+            </div>
+
+            {/* 克隆 / 删除动作按钮 */}
+            <div className="flex items-center gap-2 mb-2">
+              <button
+                onClick={() => applyBatchOp('Clone')}
+                disabled={selectedUnits.length < 1}
+                className="flex-1 py-1 rounded-lg glass-btn border-emerald-400/40 text-emerald-300 hover:text-emerald-200 flex items-center justify-center gap-1.5 font-bold transition cursor-pointer text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+                title={t('editor.cloneTitle')}
+              >
+                <Copy size={12} /> {t('editor.clone')}
+              </button>
+              <button
+                onClick={() => handlePanelBatchDelete()}
+                disabled={selectedUnits.length < 1}
+                className={`flex-1 py-1 rounded-lg glass-btn flex items-center justify-center gap-1.5 font-bold transition text-[11px] disabled:opacity-40 disabled:cursor-not-allowed ${
+                  deleteArmed
+                    ? 'border-red-400/70 bg-red-500/30 text-red-100'
+                    : 'border-red-400/40 text-red-300 hover:text-red-200'
+                }`}
+                title={t('editor.deleteNote')}
+              >
+                <Trash2 size={12} /> {deleteArmed ? t('editor.confirmQ') : t('editor.delete')}
+              </button>
+            </div>
+
+            {/* 框选方式下拉（仅 2D） */}
+            {viewMode === '2d' && (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-white/60 font-mono shrink-0">{t('editor.marqueeMode')}</span>
+                <GlassDropdown
+                  value={marqueeMode}
+                  options={marqueeOptions}
+                  onChange={(m) => onSetMarqueeMode(m)}
+                  className="flex-1"
+                  accent="amber"
+                />
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* 3. Draggable & Semi-Transparent Right Scrub & Snap Panel */}
       <div

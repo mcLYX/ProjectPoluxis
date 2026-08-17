@@ -3,13 +3,15 @@ import { globalAudio } from '../audio/AudioManager';
 import { beatToSecondsMultiBpm, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
 import type { ChartData, NoteData, EasingType } from '../types/game';
-import type { EditorTool } from './VisualChartEditor';
+import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
 
 /** World X range used by the game's judgement plane. */
 const X_MIN = -2.4;
 const X_MAX = 2.4;
 const X_SPAN = X_MAX - X_MIN;
+/** Round to at most 9 decimal places to avoid floating-point jitter in coords/beats. */
+const round9 = (v: number) => Math.round(v * 1000000000) / 1000000000;
 const NOTE_R = 11;
 /** Fraction of the canvas width used by the centered playfield. */
 const FIELD_WIDTH_RATIO = 0.62;
@@ -26,6 +28,12 @@ interface Editor2DCanvasProps {
   snapSubdivision: number;
   activeTool: EditorTool;
   selectedNoteId: string | null;
+  /** 多选模式开启时，在画布空白处拖动变为框选而非移动时间轴。 */
+  isMultiSelect: boolean;
+  /** 当前多选集合（note base id）。 */
+  selectedNoteIds: string[];
+  /** 框选合并方式。 */
+  marqueeMode: MarqueeMode;
   /** Number of vertical grid lines (incl. both edges); sets X snap columns. */
   vlineCount: number;
   /** Vertical pixels between adjacent integer beats (横向 zoom for the time axis). */
@@ -36,6 +44,12 @@ interface Editor2DCanvasProps {
   onMoveNote: (id: string, x: number, y: number, beat: number) => void;
   onSelectNote: (id: string | null) => void;
   onSeekBeat: (beat: number) => void;
+  /** 覆盖式设置多选集合（null = 清空）。 */
+  onSelectNotes: (ids: string[] | null) => void;
+  /** 按当前 marqueeMode 合并框选命中的 note id 到多选集合。 */
+  onMarqueeSelect: (hitIds: string[], mode: MarqueeMode) => void;
+  /** 多选批量移动：写入一组绝对位置（头节点与子节点 id 均可）。 */
+  onMoveNotes: (positions: Array<{ id: string; x: number; y: number; beat: number }>) => void;
 }
 
 /* Beat <-> chart-time conversion. Both directions delegate to the shared
@@ -69,12 +83,18 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   snapSubdivision,
   activeTool,
   selectedNoteId,
+  isMultiSelect,
+  selectedNoteIds,
+  marqueeMode,
   vlineCount,
   pxPerBeat,
   onPlaceNote,
   onMoveNote,
   onSelectNote,
   onSeekBeat,
+  onSelectNotes,
+  onMarqueeSelect,
+  onMoveNotes,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -105,6 +125,19 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   onSelectRef.current = onSelectNote;
   const onSeekRef = useRef(onSeekBeat);
   onSeekRef.current = onSeekBeat;
+  const onSelectNotesRef = useRef(onSelectNotes);
+  onSelectNotesRef.current = onSelectNotes;
+  const onMarqueeSelectRef = useRef(onMarqueeSelect);
+  onMarqueeSelectRef.current = onMarqueeSelect;
+  const onMoveNotesRef = useRef(onMoveNotes);
+  onMoveNotesRef.current = onMoveNotes;
+
+  const multiSelectRef = useRef(isMultiSelect);
+  multiSelectRef.current = isMultiSelect;
+  const selectedIdsRef = useRef<string[]>(selectedNoteIds);
+  selectedIdsRef.current = selectedNoteIds;
+  const marqueeModeRef = useRef<MarqueeMode>(marqueeMode);
+  marqueeModeRef.current = marqueeMode;
 
   // Live-drag override: while a note is being dragged we keep its position in
   // a ref and let the canvas draw loop render it every frame — this gives
@@ -129,12 +162,30 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     id: string | null;
     isNew: boolean;
     isScrub: boolean;
+    isMarquee: boolean;
+    isMultiDrag: boolean;
     offBeat: number;
     offX: number;
     y0: number;
     lastPy: number;
     moved: boolean;
+    /** Marquee start pixel (for drawing the selection rectangle). */
+    mx0: number;
+    my0: number;
+    /** Multi-drag: snapshot of all selected notes' (id, beat, x, y) at drag start. */
+    multiSnapshot?: Array<{ id: string; beat: number; x: number; y: number }>;
+    /** Multi-drag: the grabbed note's id (child id may be grabbed; used for delta). */
+    multiGrabId?: string;
+    /** Multi-drag: base (head) id of the grabbed note — used to toggle selection off. */
+    multiGrabBaseId?: string;
   } | null>(null);
+
+  /** Current marquee rectangle in CSS pixels (for drawing during drag). */
+  const marqueeRectRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+  /** Multi-drag live positions: id (head or child "head#i") -> absolute position.
+   *  Read by the render loop for real-time drawing; committed once on release. */
+  const multiLiveRef = useRef<Map<string, { x: number; y: number; beat: number }> | null>(null);
 
   /** Compute the centered playfield rect in CSS pixels. */
   const fieldRect = useCallback((w: number, h: number) => {
@@ -329,15 +380,18 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // beat window are culled so per-frame work scales with what's on screen
       // rather than the whole chart — critical for long charts on mobile Blink.
       const live = dragLiveRef.current;
+      const multiLive = multiLiveRef.current;
+      const multiPos = (id: string) => (multiLive ? multiLive.get(id) : undefined);
       type Item = { id: string; type: NoteData['type']; beat: number; x: number; color: string; angle: number };
       const items: Item[] = [];
-      const slideChains: Array<{ id: string; color: string; pts: Array<{ x: number; beat: number; easing: EasingType }> }> = [];
+      const slideChains: Array<{ id: string; type: NoteData['type']; color: string; pts: Array<{ x: number; beat: number; easing: EasingType }> }> = [];
       for (const n of chart.notes) {
         const color = n.color || noteColor;
         const headAngle = n.angle ?? 0;
-        const isLive = live != null && n.id === live.id;
-        const headX = isLive ? live.x : n.x;
-        const headBeat = isLive ? live.beat : n.beat;
+        const mp = multiPos(n.id);
+        const isLive = (live != null && n.id === live.id) || mp != null;
+        const headX = mp ? mp.x : (live != null && n.id === live.id ? live.x : n.x);
+        const headBeat = mp ? mp.beat : (live != null && n.id === live.id ? live.beat : n.beat);
         // Cull notes outside the visible window (always keep the live-dragged one).
         let inView = isLive || (headBeat >= winMin && headBeat <= winMax);
         if (!inView && n.nodes && n.nodes.length > 0) {
@@ -352,23 +406,25 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
             { x: headX, beat: headBeat, easing: n.easing ?? 'linear' },
             ...n.nodes.map((nd, i) => {
               const childId = `${n.id}#${i + 1}`;
+              const mc = multiPos(childId);
               const liveChild = live != null && childId === live.id ? live : null;
               return {
-                x: liveChild ? liveChild.x : nd.x,
-                beat: liveChild ? liveChild.beat : nd.beat,
+                x: mc ? mc.x : (liveChild ? liveChild.x : nd.x),
+                beat: mc ? mc.beat : (liveChild ? liveChild.beat : nd.beat),
                 easing: nd.easing ?? n.easing ?? 'linear',
               };
             }),
           ];
-          slideChains.push({ id: n.id, color, pts });
+          slideChains.push({ id: n.id, type: n.type, color, pts });
           n.nodes.forEach((nd, k) => {
             const childId = `${n.id}#${k + 1}`;
+            const mc = multiPos(childId);
             const liveChild = live != null && childId === live.id ? live : null;
             items.push({
               id: childId,
               type: n.type,
-              beat: liveChild ? liveChild.beat : nd.beat,
-              x: liveChild ? liveChild.x : nd.x,
+              beat: mc ? mc.beat : (liveChild ? liveChild.beat : nd.beat),
+              x: mc ? mc.x : (liveChild ? liveChild.x : nd.x),
               color,
               angle: nd.angle ?? headAngle,
             });
@@ -387,9 +443,12 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
           const tb = beatToSecondsMultiBpm(pt.beat, bpm, offset, bpmlist);
           return worldToPixel(tb, pt.x, cssW, cssH, curTime);
         });
+        // 非 Slide 链（tap/touch 链）用更细的虚线连接，以示与 Slide 链区分。
+        const isSlide = chain.type === 'slide';
         ctx.strokeStyle = chain.color;
         ctx.globalAlpha = 0.55;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = isSlide ? 3 : 1.5;
+        if (!isSlide) ctx.setLineDash([4, 4]);
         ctx.beginPath();
         for (let s = 0; s < pxPts.length - 1; s++) {
           const a = pxPts[s], b = pxPts[s + 1];
@@ -404,6 +463,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
           }
         }
         ctx.stroke();
+        ctx.setLineDash([]);
         ctx.globalAlpha = 1;
 
         ctx.fillStyle = chain.color;
@@ -424,11 +484,32 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       }
 
       // Draw notes (future first so near-line notes draw on top)
+      const multiIds = selectedIdsRef.current;
+      const multiSet = multiIds.length > 0 ? new Set(multiIds) : null;
       for (const it of items) {
         const tb = beatToSecondsMultiBpm(it.beat, bpm, offset, bpmlist);
         const { px, py } = worldToPixel(tb, it.x, cssW, cssH, curTime);
         if (py < field.top - 60 || py > field.top + field.height + 60) continue;
-        drawNoteShape(it.type, px, py, it.color, it.id === selectedRef.current, it.angle);
+        // 高亮精确选中的单位（头节点或子节点独立高亮）。
+        const selected = it.id === selectedRef.current || (multiSet != null && multiSet.has(it.id));
+        drawNoteShape(it.type, px, py, it.color, selected, it.angle);
+      }
+
+      // Draw marquee selection rectangle (if active).
+      const mq = marqueeRectRef.current;
+      if (mq) {
+        const x = Math.min(mq.x0, mq.x1);
+        const y = Math.min(mq.y0, mq.y1);
+        const ww = Math.abs(mq.x1 - mq.x0);
+        const hh = Math.abs(mq.y1 - mq.y0);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(251, 191, 36, 0.7)';
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.1)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.fillRect(x, y, ww, hh);
+        ctx.strokeRect(x, y, ww, hh);
+        ctx.restore();
       }
 
       // close field clip
@@ -496,27 +577,73 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const tool = toolRef.current;
 
     if (tool === 'select') {
+      const isMulti = multiSelectRef.current;
       if (hit) {
-        onSelectRef.current(hit.id);
-        // start drag: record grab offset in world space (time in seconds, x in world units)
-        const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-        const hitSec = beatToSecondsMultiBpm(hit.beat, bpm, offset, bpmlist);
-        dragRef.current = { id: hit.id, isNew: false, isScrub: false, offBeat: t - hitSec, offX: worldX - hit.x, y0: hit.y, lastPy: py, moved: false };
-        dragLiveRef.current = { id: hit.id, x: hit.x, y: hit.y, beat: hit.beat };
+        if (isMulti) {
+          // 多选模式：点击音符。子节点与头节点独立选中（不带动整条链）。
+          const alreadySelected = selectedIdsRef.current.includes(hit.id);
+          if (alreadySelected) {
+            // 已选中 → 开始多选拖拽（只移动被选中的单位：头节点或子节点）。
+            // 点击时暂不 toggle；若 pointerup 时未移动，则在 up 中 toggle 取消选中。
+            const selSet = new Set(selectedIdsRef.current);
+            const snapshot: Array<{ id: string; beat: number; x: number; y: number }> = [];
+            for (const n of chartRef.current.notes) {
+              if (selSet.has(n.id)) snapshot.push({ id: n.id, beat: n.beat, x: n.x, y: n.y });
+              if (n.nodes) {
+                n.nodes.forEach((nd, i) => {
+                  const cid = `${n.id}#${i + 1}`;
+                  if (selSet.has(cid)) snapshot.push({ id: cid, beat: nd.beat, x: nd.x, y: nd.y });
+                });
+              }
+            }
+            const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
+            const hitSec = beatToSecondsMultiBpm(hit.beat, bpm, offset, bpmlist);
+            dragRef.current = {
+              id: hit.id, isNew: false, isScrub: false, isMarquee: false, isMultiDrag: true,
+              offBeat: t - hitSec, offX: worldX - hit.x, y0: hit.y, lastPy: py, moved: false,
+              mx0: 0, my0: 0,
+              multiSnapshot: snapshot, multiGrabId: hit.id, multiGrabBaseId: hit.id,
+            };
+            // 初始化所有选中音符的 live-drag（用各自当前位置，后续 move 更新）。
+            for (const s of snapshot) {
+              liveDragStore.set({ id: s.id, x: s.x, y: s.y, beat: s.beat });
+            }
+          } else {
+            // 未选中 → 加入多选集合（App 的 onSelectNote 会 toggle 添加）。
+            onSelectRef.current(hit.id);
+          }
+        } else {
+          // 单选模式：选中并开始拖拽。
+          onSelectRef.current(hit.id);
+          const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
+          const hitSec = beatToSecondsMultiBpm(hit.beat, bpm, offset, bpmlist);
+          dragRef.current = { id: hit.id, isNew: false, isScrub: false, isMarquee: false, isMultiDrag: false, offBeat: t - hitSec, offX: worldX - hit.x, y0: hit.y, lastPy: py, moved: false, mx0: 0, my0: 0 };
+          dragLiveRef.current = { id: hit.id, x: hit.x, y: hit.y, beat: hit.beat };
+        }
       } else {
-        // grab empty space -> vertical scrub (touch swipe / mouse drag).
-        // No jump-to-click: avoids conflicting with the scrub gesture.
-        onSelectRef.current(null);
-        dragRef.current = { id: null, isNew: false, isScrub: true, offBeat: 0, offX: 0, y0: 0, lastPy: py, moved: false };
+        // 空白处：
+        // 框选仅在“音符编辑区域”（居中 playfield）内生效；区域外（左右空白）
+        // 即使在多选模式也仍为移动时间轴（scrub）。
+        const fr = fieldRect(w, h);
+        const inField = px >= fr.left && px <= fr.left + fr.width;
+        if (isMulti && inField) {
+          // 多选模式 → 框选（不 scrub，不清除选中）。
+          dragRef.current = { id: null, isNew: false, isScrub: false, isMarquee: true, isMultiDrag: false, offBeat: 0, offX: 0, y0: 0, lastPy: py, moved: false, mx0: px, my0: py };
+          marqueeRectRef.current = { x0: px, y0: py, x1: px, y1: py };
+        } else {
+          // 区域外 / 单选模式 → 移动时间轴（scrub）。
+          onSelectRef.current(null);
+          dragRef.current = { id: null, isNew: false, isScrub: true, isMarquee: false, isMultiDrag: false, offBeat: 0, offX: 0, y0: 0, lastPy: py, moved: false, mx0: 0, my0: 0 };
+        }
       }
       return;
     }
 
     // placement tools
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    const beat = snap(timeToBeat(t, segsRef.current), snapRef.current);
+    const beat = round9(snap(timeToBeat(t, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
-    const x = snap(worldX, xStep);
+    const x = round9(snap(worldX, xStep));
     onPlaceRef.current(x, 0, beat);
   };
 
@@ -539,11 +666,46 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       return;
     }
 
+    // Marquee box-selection: update the rectangle (drawn by the render loop).
+    if (drag.isMarquee) {
+      marqueeRectRef.current = { x0: drag.mx0, y0: drag.my0, x1: px, y1: py };
+      drag.moved = true;
+      return;
+    }
+
+    // Multi-drag: move all selected notes by the same world-space delta.
+    // Live positions are kept in multiLiveRef (drawn by the render loop) and
+    // committed to React state ONCE on release with absolute positions — no
+    // incremental commits, so deltas can never accumulate.
+    if (drag.isMultiDrag && drag.multiSnapshot) {
+      const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
+      const grabBeat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
+      const grabX = round9(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1)));
+      // Delta from the grabbed note's original position.
+      const grabSnap = drag.multiSnapshot.find((s) => s.id === drag.multiGrabId);
+      if (!grabSnap) return;
+      const dBeat = grabBeat - grabSnap.beat;
+      const dx = grabX - grabSnap.x;
+      drag.moved = true;
+      // Update live positions for all selected notes (head + children).
+      const liveMap = new Map<string, { x: number; y: number; beat: number }>();
+      for (const s of drag.multiSnapshot) {
+        const nx = Math.max(-2.4, Math.min(2.4, s.x + dx));
+        liveMap.set(s.id, { x: nx, y: s.y, beat: s.beat + dBeat });
+      }
+      multiLiveRef.current = liveMap;
+      // Keep the side panel / external consumers in sync (dedup'd by the store).
+      for (const [id, p] of liveMap) {
+        liveDragStore.set({ id, x: p.x, y: p.y, beat: p.beat });
+      }
+      return;
+    }
+
     if (!drag.id) return;
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    let beat = snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current);
+    let beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
-    let x = snap(worldX - drag.offX, xStep);
+    let x = round9(snap(worldX - drag.offX, xStep));
     drag.moved = true;
     // Preserve the note's original y (2D ignores y, but keep it intact on drag).
     // Update the live-drag ref so the canvas draws the note in real time,
@@ -563,7 +725,69 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
   const onPointerUp = (e: React.PointerEvent) => {
     (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
-    // Commit the final dragged position once and clear the live override.
+    const drag = dragRef.current;
+
+    // Marquee: collect hit notes and apply via onMarqueeSelect.
+    if (drag && drag.isMarquee && marqueeRectRef.current) {
+      const r = marqueeRectRef.current;
+      const x0 = Math.min(r.x0, r.x1);
+      const x1 = Math.max(r.x0, r.x1);
+      const y0 = Math.min(r.y0, r.y1);
+      const y1 = Math.max(r.y0, r.y1);
+      if (drag.moved && x1 - x0 > 3 && y1 - y0 > 3) {
+        // Hit-test all notes against the rectangle.
+        const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
+        const chart = chartRef.current;
+        const { bpm, offset, bpmlist } = chart.metadata;
+        const wrap = wrapRef.current!;
+        const rect = wrap.getBoundingClientRect();
+        const cssW = rect.width;
+        const cssH = rect.height;
+        const hitIds: string[] = [];
+        for (const n of chart.notes) {
+          // 头节点 + 每个子节点分别参与框选命中（独立单位）。
+          const tb = beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist);
+          const { px: ix, py: iy } = worldToPixel(tb, n.x, cssW, cssH, curTime);
+          if (ix >= x0 && ix <= x1 && iy >= y0 && iy <= y1) hitIds.push(n.id);
+          if (n.nodes) {
+            n.nodes.forEach((nd, k) => {
+              const ctb = beatToSecondsMultiBpm(nd.beat, bpm, offset, bpmlist);
+              const { px: cx, py: cy } = worldToPixel(ctb, nd.x, cssW, cssH, curTime);
+              if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) hitIds.push(`${n.id}#${k + 1}`);
+            });
+          }
+        }
+        if (hitIds.length > 0) {
+          onMarqueeSelectRef.current(hitIds, marqueeModeRef.current);
+        }
+      }
+      marqueeRectRef.current = null;
+      dragRef.current = null;
+      return;
+    }
+
+    // Multi-drag: commit the final absolute positions ONCE and clear live overrides.
+    if (drag && drag.isMultiDrag && drag.multiSnapshot) {
+      if (drag.moved) {
+        const liveMap = multiLiveRef.current;
+        if (liveMap) {
+          const positions: Array<{ id: string; x: number; y: number; beat: number }> = [];
+          for (const [id, p] of liveMap) positions.push({ id, x: p.x, y: p.y, beat: p.beat });
+          if (positions.length > 0) onMoveNotesRef.current(positions);
+        }
+        multiLiveRef.current = null;
+        liveDragStore.clear();
+      } else {
+        // No move = it was a click on an already-selected note → toggle it off.
+        multiLiveRef.current = null;
+        liveDragStore.clear();
+        if (drag.multiGrabBaseId) onSelectRef.current(drag.multiGrabBaseId);
+      }
+      dragRef.current = null;
+      return;
+    }
+
+    // Single-note drag: commit the final dragged position once and clear live override.
     if (dragLiveRef.current) {
       commitMove();
       dragLiveRef.current = null;
