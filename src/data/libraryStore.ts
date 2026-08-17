@@ -105,6 +105,24 @@ export async function findSongById(songId: string): Promise<SongItem | null> {
   return null;
 }
 
+/**
+ * 返回包含该歌曲的专辑标题（用于“保存到 <专辑路径>”提示）；若歌曲位于库根
+ * 独立曲目（不属于任何专辑）则返回 null。
+ */
+export async function findAlbumTitleForSong(songId: string): Promise<string | null> {
+  const albums = await getLibrary();
+  const stack: BeatmapItem[] = [...albums];
+  while (stack.length) {
+    const it = stack.pop()!;
+    if (it.type === 'album') {
+      const hit = it.songs.find((s) => s.type === 'song' && s.id === songId);
+      if (hit) return it.title;
+      stack.push(...it.songs);
+    }
+  }
+  return null;
+}
+
 /** 递归把 id 匹配的歌曲应用 transform（兼容库根独立曲目与任意层级专辑内歌曲）。 */
 function updateSongInTree(nodes: BeatmapItem[], songId: string, transform: (s: SongItem) => SongItem): BeatmapItem[] {
   return nodes.map((n) => {

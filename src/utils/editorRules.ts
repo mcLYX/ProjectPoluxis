@@ -13,7 +13,7 @@ import { EASING_TYPES } from './easing';
  *   <条件表达式> : <赋值1>, <赋值2>, ...
  * 可用音符属性：beat, x, y, type, color, angle, easing
  * 运算符（类 JS 优先级）： || && == != < > <= >= + - * / %  ! -()   以及字符串字面量 "..." '...'
- * 内置函数：abs sign floor ceil round sqrt fract near min max clamp
+ * 内置函数：abs sign floor ceil round sqrt fract near min max clamp random
  *           sin cos tan asin acos atan atan2 sinh cosh tanh（弧度）
  *           rad(deg) deg(rad)（角度<->弧度互转，谱面 angle 单位为度）
  * 内置常量：PI(π) TAU(2π) E
@@ -307,6 +307,9 @@ const BUILTINS: Record<string, (args: unknown[]) => unknown> = {
   // 角度 <-> 弧度 互转，便于直接写角度量（谱面 angle 单位为度）。
   rad: (a) => (Number(a[0]) * Math.PI) / 180,
   deg: (a) => (Number(a[0]) * 180) / Math.PI,
+  // [0,1) 均匀随机数。规则仅在放置新音符时逐音符求值，故每个音符得到独立
+  // 随机值——适合 x = (random()*2-1)*1.8 这类随机落点/随机朝向排布。
+  random: () => Math.random(),
 };
 const BUILTIN_NAMES = Object.keys(BUILTINS);
 

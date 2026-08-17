@@ -573,15 +573,26 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   };
 
   // Mouse wheel scrubs the playhead: one notch = one snap subdivision.
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const dir = e.deltaY > 0 ? 1 : -1; // scroll down = forward through chart
-    const deltaBeats = dir * (snapRef.current || 0.25);
-    const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
-    const curBeat = timeToBeat(curTime, segsRef.current);
-    onSeekRef.current(curBeat + deltaBeats);
-  };
+  // Attached as a NATIVE non-passive listener: React (17+) binds synthetic wheel
+  // events passively, so e.preventDefault() there throws
+  // "Unable to preventDefault inside passive event listener invocation" — and
+  // worse, the page/container would still scroll. `{ passive: false }` lets us
+  // actually prevent default (blocks trackpad inertia / parent scrolling too).
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    const onWheelNative = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const dir = e.deltaY > 0 ? 1 : -1; // scroll down = forward through chart
+      const deltaBeats = dir * (snapRef.current || 0.25);
+      const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
+      const curBeat = timeToBeat(curTime, segsRef.current);
+      onSeekRef.current(curBeat + deltaBeats);
+    };
+    cv.addEventListener('wheel', onWheelNative, { passive: false });
+    return () => cv.removeEventListener('wheel', onWheelNative);
+  }, []);
 
   return (
     <div ref={wrapRef} className="absolute inset-0 overflow-hidden">
@@ -593,7 +604,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
-        onWheel={onWheel}
       />
     </div>
   );

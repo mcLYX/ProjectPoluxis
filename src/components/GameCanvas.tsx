@@ -281,9 +281,9 @@ function isSharedGeo(geo: THREE.BufferGeometry | undefined | null): boolean {
   return !!geo?.userData?.shared;
 }
 
-// Slide: filled plane for the *skin* texture path (rotated 45° at mesh level).
-// 默认皮肤的填充已改用软边纹理（见 makeSoftFillTexture），不再用硬边几何体。
-const _slideFillGeo = markShared(new THREE.PlaneGeometry(SLIDE_SIZE * 0.94, SLIDE_SIZE * 0.94));
+// Slide 皮肤的贴图平面现在与 tap 共用 TAP_SIZE 见方、不旋转（见 ensureSlideMeshes）：
+// 皮肤作者把图形画成"内接菱形"（顶点触四边中点）即可，对角线 = TAP_SIZE = 1.6，
+// 与默认描边菱形（SLIDE_RING_OUTER，对角线 = SLIDE_SIZE×√2 = 1.6）完全同尺寸。
 
 // Generic 1×1 plane: default-skin rings / fills attach a soft-edged CanvasTexture
 // and scale the MESH to the texture's world size (keeps a single shared geometry).
@@ -1647,13 +1647,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     return g;
   };
 
-  // 按 note 类型取投影贴图：优先专属键，缺失时回退共享 projection。
+  // 按 note 类型取投影贴图：仅取该类型的专属键，缺失时回退到全局共享的
+  // projection，再缺失则返回 undefined（走默认判定框渲染）。绝不跨类型借用
+  // 其他音符的专属贴图——否则只做了 projTap 的皮肤包会让 touch/slide 的投影
+  // 引导也变成同一张贴图。
   const pickProj = (nt: NoteType): THREE.Texture | undefined => {
     const s = skinTexturesRef.current;
     if (!s) return undefined;
-    if (nt === 'tap') return s.projTap ?? s.projTouch ?? s.projSlide ?? s.projection;
-    if (nt === 'touch') return s.projTouch ?? s.projTap ?? s.projSlide ?? s.projection;
-    return s.projSlide ?? s.projTap ?? s.projTouch ?? s.projection;
+    if (nt === 'tap') return s.projTap ?? s.projection;
+    if (nt === 'touch') return s.projTouch ?? s.projection;
+    return s.projSlide ?? s.projection;
   };
   const projSize = (nt: NoteType) => (nt === 'tap' ? TAP_SIZE : nt === 'touch' ? TOUCH_SIZE : SLIDE_SIZE);
 
@@ -2103,12 +2106,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       });
       let plane: THREE.Mesh;
       if (slideTex) {
-        // 皮肤：用灰度贴图替换 slide 节点纯色填充。
+        // 皮肤：用灰度贴图替换 slide 节点纯色填充。与 tap 一样整幅拉伸到
+        // TAP_SIZE 见方的平面、不旋转（旧版会 rotation.z = π/4）。这样贴图
+        // 直接画"内接菱形"（顶点触四边中点）即可获得与默认描边同尺寸的菱形。
         fill.map = slideTex;
         fill.alphaTest = 0.02;
-        plane = new THREE.Mesh(_slideFillGeo, fill);
+        plane = new THREE.Mesh(_tapSkinGeo, fill);
         plane.position.z = FILL_Z;
-        plane.rotation.z = Math.PI / 4;
       } else {
         // 默认皮肤：软边半透明填充（菱形），替代硬边几何填充以消除边缘闪烁。
         const rec = makeSoftFillTexture(SLIDE_RING_OUTER.map(([x, y]) => [x * 0.94, y * 0.94] as RingPt));
@@ -2983,14 +2987,33 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         if (!entry.group.visible) return;
         // Read current world position (group.position is local; group has no parent transform).
         const p = entry.group.position;
-        // Read fill mesh color (first Mesh child).
+        // Read the note's own color. The FIRST Mesh child is now the OUTER border
+        // (soft-texture ring) whose color is the customizable `defaultSkinOuterColor`
+        // — using it would light the walls with the outer-border color instead of
+        // the note color. Prefer the INNER border (color always tracks the note
+        // color every frame), then fall back to the fill mesh / skin texture.
         let color: THREE.Color | null = null;
-        entry.group.children.forEach((c) => {
-          if (color) return;
-          if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) {
-            color = c.material.color;
+        for (const c of entry.group.children) {
+          if (c.userData.isBorder === 'inner') {
+            if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) {
+              color = c.material.color;
+              break;
+            }
+            if (c instanceof THREE.Line && c.material instanceof THREE.LineBasicMaterial) {
+              color = c.material.color;
+              break;
+            }
           }
-        });
+        }
+        if (!color) {
+          entry.group.children.forEach((c) => {
+            if (color) return;
+            if (c.userData.isBorder === 'outer') return;
+            if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) {
+              color = c.material.color;
+            }
+          });
+        }
         if (color) candidates.push({ z: p.z, x: p.x, y: p.y, color });
       });
       // Slide nodes also contribute — iterate slideMeshesRef.

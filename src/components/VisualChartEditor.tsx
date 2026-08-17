@@ -28,6 +28,11 @@ import {
   AlertTriangle,
   CheckCircle,
   Wand2,
+  MousePointer2,
+  Settings2,
+  Clock,
+  BoxSelect,
+  FileDown,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { lintDsl } from '../utils/editorRules';
@@ -312,13 +317,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     { value: 1, label: '1x' },
     { value: 2, label: '2x' },
   ];
+  // 初次打开仅展开“视图”与“编辑模式/放置工具”，其余面板默认收起。
   const [sectionOpen, setSectionOpen] = useState({
     view: true,
     tools: true,
-    playtest: true,
+    playtest: false,
     events: false,
     rules: false,
-    metadata: true,
+    metadata: false,
     timing: false,
     batch: false,
     importExport: false,
@@ -505,28 +511,17 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     onUpdateChart({ ...chart, events: events.length > 0 ? events : undefined });
   };
 
+  // 起点/终点按谱师点击的顺序原样保留，不做数值调转（否则谱师先点终点再点起点时，
+  // 界面上的起/终点会被偷偷对调，容易困惑）。实际操作区间由 validBatchRange 用
+  // Math.min/max 归一化，所以 start>end 时仍按 [end,start] 执行。
   const handleSetBatchStart = () => {
     const newStart = Math.round(currentBeat * 100) / 100;
-    let newEnd = batchSelection.endBeat;
-    if (newEnd !== null && newStart > newEnd) {
-      const temp = newEnd;
-      newEnd = newStart;
-      onSetBatchSelection({ startBeat: temp, endBeat: newEnd });
-    } else {
-      onSetBatchSelection({ startBeat: newStart, endBeat: newEnd });
-    }
+    onSetBatchSelection({ startBeat: newStart, endBeat: batchSelection.endBeat });
   };
 
   const handleSetBatchEnd = () => {
     const newEnd = Math.round(currentBeat * 100) / 100;
-    let newStart = batchSelection.startBeat;
-    if (newStart !== null && newEnd < newStart) {
-      const temp = newStart;
-      newStart = newEnd;
-      onSetBatchSelection({ startBeat: newStart, endBeat: temp });
-    } else {
-      onSetBatchSelection({ startBeat: newStart, endBeat: newEnd });
-    }
+    onSetBatchSelection({ startBeat: batchSelection.startBeat, endBeat: newEnd });
   };
 
   const handleBatchClone = () => {
@@ -923,7 +918,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('tools')} className={sectionHeaderClass}>
-                <span>{t('editor.modeTools')}</span>
+                <span className="flex items-center gap-1.5"><MousePointer2 size={12} /> {t('editor.modeTools')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.tools ? '−' : '+'}</span>
               </button>
               {sectionOpen.tools && (
@@ -1072,7 +1067,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('metadata')} className={sectionHeaderClass}>
-                <span>{t('editor.metadata')}</span>
+                <span className="flex items-center gap-1.5"><Settings2 size={12} /> {t('editor.metadata')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.metadata ? '−' : '+'}</span>
               </button>
               {sectionOpen.metadata && (
@@ -1096,7 +1091,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('timing')} className={sectionHeaderClass}>
-                <span>{t('editor.timing')}</span>
+                <span className="flex items-center gap-1.5"><Clock size={12} /> {t('editor.timing')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.timing ? '−' : '+'}</span>
               </button>
               {sectionOpen.timing && (
@@ -1161,7 +1156,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('batch')} className={sectionHeaderClass}>
-                <span>{t('editor.batch')}</span>
+                <span className="flex items-center gap-1.5"><BoxSelect size={12} /> {t('editor.batch')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.batch ? '−' : '+'}</span>
               </button>
               {sectionOpen.batch && <div className="p-3 space-y-2.5 border-t border-white/10"><div className="flex justify-end">{validBatchRange && <span className="text-[10px] text-cyan-400 font-mono">{t('editor.batchNotes', { n: notesInBatch.length })}</span>}</div><div className="grid grid-cols-2 gap-2"><button onClick={handleSetBatchStart} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchStart')}: {batchSelection.startBeat !== null ? `B${batchSelection.startBeat}` : t('editor.batchUnset')}</button><button onClick={handleSetBatchEnd} className="py-1.5 px-2 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer text-center">{t('editor.batchEnd')}: {batchSelection.endBeat !== null ? `B${batchSelection.endBeat}` : t('editor.batchUnset')}</button></div>{validBatchRange && <div className="space-y-2 pt-1 border-t border-white/10"><div className="text-[10px] text-white/70 font-mono">{t('editor.batchRange')}: [{validBatchRange.start.toFixed(2)} ~ {validBatchRange.end.toFixed(2)}]</div><div className="grid grid-cols-2 gap-2"><button onClick={handleBatchClone} className="py-1.5 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-emerald-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Copy size={12} /> {t('editor.clone')}</button>{!confirmBatchDelete ? <button onClick={() => setConfirmBatchDelete(true)} className="py-1.5 rounded glass-btn border-red-400/40 text-red-300 hover:text-red-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><Trash2 size={12} /> {t('editor.delete')}</button> : <button onClick={handleBatchDelete} className="py-1.5 rounded bg-red-600 text-white font-bold animate-pulse text-center cursor-pointer">{t('editor.confirmQ')}</button>}</div><div className="grid grid-cols-2 gap-2 pt-1"><button onClick={handleBatchFlipX} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipHorizontal size={12} /> {t('editor.flipX')}</button><button onClick={handleBatchFlipY} className="py-1.5 rounded glass-btn border-fuchsia-400/40 text-fuchsia-300 hover:text-fuchsia-200 flex items-center justify-center gap-1 font-bold transition cursor-pointer"><FlipVertical size={12} /> {t('editor.flipY')}</button></div></div>}</div>}
@@ -1169,7 +1164,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
             <div className={sectionClass}>
               <button onClick={() => toggleSection('importExport')} className={sectionHeaderClass}>
-                <span>{t('editor.importExport')}</span>
+                <span className="flex items-center gap-1.5"><FileDown size={12} /> {t('editor.importExport')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.importExport ? '−' : '+'}</span>
               </button>
               {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button></div>}

@@ -10,7 +10,7 @@ import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSel
 import { TimingBar, TimingMarker } from './components/TimingBar';
 import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, getFile, generateId } from './data/idb';
-import { getAlbumById, createAlbum, addSong, findSongById, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
+import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
 import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet } from './types/game';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
@@ -737,6 +737,10 @@ export function App() {
         const songPatch: Partial<SongItem> = { audio: currentAudioRefRef.current || '' };
         if (currentChart.metadata.jacket) songPatch.cover = currentChart.metadata.jacket;
         await updateSongById(sid, songPatch);
+        // 难度名可能已在编辑中被改动；保存后以最新 name 刷新上下文，使下次保存
+        // 仍能定位到同一难度条目（而不是退化为新增难度）。mode 置为 'edit' 让
+        // 新建场景（mode:'new'）首次保存后也走覆盖分支。
+        setEditorTarget({ ...target, mode: 'edit', diffName: name });
       } else {
         // 非本地（内置/在线/自由编辑器）→ 创建并保存至本地 Editor 专辑。
         const EDITOR_ALBUM_ID = 'editor';
@@ -763,13 +767,37 @@ export function App() {
           source: 'local',
         };
         await addSong(EDITOR_ALBUM_ID, song);
+        // 记住刚创建的本地歌曲：此后再次“保存到本地”将回写该歌曲的难度原位，
+        // 而不是每次都新建一首 Editor 曲目。diffName 记录首次创建的难度名，
+        // 便于下次保存按名定位并覆盖同一难度。
+        setEditorTarget({
+          mode: 'edit',
+          songId: song.id,
+          songTitle: song.title,
+          songArtist: song.artist,
+          bpm: song.bpm,
+          accentColor: song.accentColor,
+          source: 'local',
+          selectedDiffIndex: 0,
+          difficultiesCount: 1,
+          diffName: name,
+        });
       }
       // 谱面已修改并保存：清掉该谱面（本地命名空间）的历史成绩，避免旧成绩误导。
       // 下载自在线的谱面 source 为 'local'，只会清掉本地副本成绩，不影响在线原曲。
       if (target && target.source === 'local' && target.songId) {
         clearHighScore(getScoreKey(target.songId, 'local'), target.diffName);
       }
-      showAppToast(t('fab.saved'));
+      // 提示保存位置：本地曲目 → 其所在专辑；否则（自由编辑器/内置/在线）→ Editor 专辑。
+      // 库根独立曲目不属于任何专辑 → 回退到通用“已保存”。
+      let savedPath: string | null = null;
+      if (isLocalSong && target) {
+        const albumTitle = await findAlbumTitleForSong(target.songId!);
+        if (albumTitle) savedPath = `/${albumTitle}`;
+      } else {
+        savedPath = '/Editor';
+      }
+      showAppToast(savedPath ? t('fab.savedTo', { path: savedPath }) : t('fab.saved'));
     } catch (err) {
       console.error(err);
       showAppToast(t('editor.saveFailed'));
