@@ -106,7 +106,7 @@ export const DocContent: React.FC = () => {
 
       {/* 底部：版本号 + GitHub 链接 */}
       <div className="flex items-center justify-between pt-2 border-t border-white/10">
-        <span className="text-[11px] text-white/40 font-mono">v0.0.4</span>
+        <span className="text-[11px] text-white/40 font-mono">v0.0.4.1</span>
         <a
           href={GITHUB_URL}
           target="_blank"
