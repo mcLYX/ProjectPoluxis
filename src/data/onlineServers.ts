@@ -13,14 +13,19 @@ const KEY_CURRENT = 'poluxis.currentServerId';
 export const CURRENT_SERVER_ID = 'current';
 
 /**
- * Normalize a beatmaps base URL: trim whitespace, strip the FQDN trailing dot
- * (some deployments expose the host as `host.:port`, i.e. a dot right before
- * `/` or the end of the URL) which makes `fetch` reject the URL, and strip
- * trailing slashes.
+ * Normalize a beatmaps base URL: trim whitespace, auto-prepend `http://` when the
+ * user typed a host without a protocol (e.g. `example.com` or `example.com:8080`),
+ * strip the FQDN trailing dot (some deployments expose the host as `host.:port`,
+ * i.e. a dot right before `/` or the end of the URL) which makes `fetch` reject
+ * the URL, and strip trailing slashes. Protocol-relative (`//host`) and already
+ * protocol-bearing URLs are left untouched.
  */
 function normalizeBaseUrl(url: string): string {
-  return url
-    .trim()
+  let u = url.trim();
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(u) && !u.startsWith('//')) {
+    u = `http://${u}`;
+  }
+  return u
     .replace(/\.+(?=\/|$)/g, '')
     .replace(/\/+$/, '');
 }

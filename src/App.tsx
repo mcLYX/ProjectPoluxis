@@ -197,6 +197,10 @@ export function App() {
   const [editorViewMode, setEditorViewMode] = useState<'3d' | '2d'>('3d');
   const [isPlayTestMode, setIsPlayTestMode] = useState(false);
   const playTestStartBeatRef = useRef(0);
+  // 试玩起点（秒 / 拍）与“是否从当前位置开始”，用于暂停后重试时回到
+  // 记录到的试玩起点，而不是整首曲子从头开始。
+  const playTestStartSecRef = useRef(0);
+  const playTestFromCurrentRef = useRef(false);
 
   // 编辑器“高级功能”：放置新音符时套用的规则（仅编辑器本地配置，存 localStorage）。
   const [editorDsl, setEditorDsl] = useState<string>(() => loadEditorDsl());
@@ -464,8 +468,13 @@ export function App() {
    * Start play-test mode from the editor.
    * @param fromCurrentBeat - if true, start at the current editor playhead position;
    *                         if false, start from the beginning (beat 0).
+   * @param restartFromRecorded - if true, ignore `fromCurrentBeat` and restart from
+   *                         the position where the CURRENT play-test began (recorded
+   *                         in playTestStart*Ref). Used by the pause→retry button so
+   *                         retrying a "play from current position" test returns to
+   *                         that recorded point rather than the song's very beginning.
    */
-  const handleStartPlayTest = useCallback((fromCurrentBeat: boolean) => {
+  const handleStartPlayTest = useCallback((fromCurrentBeat: boolean, restartFromRecorded = false) => {
     if (transitionTimerRef.current) {
       window.clearTimeout(transitionTimerRef.current);
       transitionTimerRef.current = null;
@@ -483,6 +492,19 @@ export function App() {
     // Restore 1x playback for actual playtest/gameplay.
     setEditorPlaybackRate(1);
     globalAudio.setPlaybackRate(1);
+
+    // Resolve the start position. On a recorded restart this is the point where
+    // the current play-test started; otherwise it's the live editor playhead (or 0).
+    const startBeat = restartFromRecorded
+      ? playTestStartBeatRef.current
+      : (fromCurrentBeat ? currentBeatRef.current : 0);
+    const startSec = restartFromRecorded
+      ? playTestStartSecRef.current
+      : (fromCurrentBeat ? gameTime : 0);
+    playTestStartBeatRef.current = startBeat;
+    playTestStartSecRef.current = startSec;
+    playTestFromCurrentRef.current = restartFromRecorded ? playTestFromCurrentRef.current : fromCurrentBeat;
+
     setTransitionPhase('fade-out');
     transitionTimerRef.current = window.setTimeout(() => {
       globalAudio.stop();
@@ -491,8 +513,7 @@ export function App() {
         globalAudio.setSynthesizedTrack(currentChart.metadata.bpm);
       }
 
-      const startTimeSec = fromCurrentBeat ? gameTime : 0;
-      playTestStartBeatRef.current = fromCurrentBeat ? currentBeatRef.current : 0;
+      const startTimeSec = startSec;
 
       setStats({
         score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
@@ -505,7 +526,9 @@ export function App() {
       setIsPlayTestMode(true);
       setGameState('playing');
 
-      const leadIn = fromCurrentBeat ? 0 : Math.max(0, 2 - getFirstNoteTime(currentChart));
+      // 重头试玩：给首音之前的 lead-in；从当前位置 / 记录起点重试：无 lead-in。
+      const noLeadIn = restartFromRecorded ? playTestFromCurrentRef.current : fromCurrentBeat;
+      const leadIn = noLeadIn ? 0 : Math.max(0, 2 - getFirstNoteTime(currentChart));
       globalAudio.play(startTimeSec, leadIn);
 
       setTransitionPhase('fade-in');
@@ -1348,12 +1371,13 @@ export function App() {
         />
       )}
 
-      {/* 3D Viewport — mounted only when visible. In 2D editor mode we fully
-          UNMOUNT it (instead of display:none) so its rAF render loop stops.
-          The hidden 3D loop was starving the 2D canvas of frame budget:
-          drag lag was worst near the chart start (full future render window)
-          and smoothest near the end (empty window). */}
-      {!(gameState === 'editor' && editorViewMode === '2d') && (
+      {/* 3D Viewport — always mounted. In 2D editor mode the viewport stays
+          mounted but GameCanvas pauses its rAF render loop via `viewportActive`
+          (zero background cost: no render, no window update, no per-frame work),
+          so switching back to 3D resumes instantly without rebuilding the WebGL
+          scene / re-creating every note mesh (that rebuild was a [Violation]
+          multi-hundred-ms hitch). The paused loop therefore no longer starves
+          the 2D canvas of frame budget either. */}
       <div
         className="absolute inset-0 z-0"
         data-viewport="3d"
@@ -1362,6 +1386,7 @@ export function App() {
         <Suspense fallback={null}>
         <GameCanvas
           chart={currentChart}
+          viewportActive={!(gameState === 'editor' && editorViewMode === '2d')}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}
           gameTime={gameTime}
@@ -1398,7 +1423,6 @@ export function App() {
         />
         </Suspense>
       </div>
-      )}
 
       {/* 2D top-down editor viewport (replaces 3D when in 2D mode) */}
       {gameState === 'editor' && editorViewMode === '2d' && (
@@ -1647,7 +1671,7 @@ export function App() {
 
                   {/* Restart/Retry button (subtle accent-tinted glass) */}
                   <button
-                    onClick={() => isPlayTestMode ? handleStartPlayTest(false) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.scoreKey, currentSongInfo?.diffName)}
+                    onClick={() => isPlayTestMode ? handleStartPlayTest(false, true) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.scoreKey, currentSongInfo?.diffName)}
                     className="w-14 h-14 rounded-full border flex items-center justify-center transition cursor-pointer group"
                     title={t('hud.retry')}
                     style={{

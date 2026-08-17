@@ -72,7 +72,9 @@ export const NetworkSettings: React.FC = () => {
         {servers.map((s) => (
           <div
             key={s.id}
-            className={`glass-sub rounded-xl p-3 ${current?.id === s.id ? 'ring-1 ring-cyan-400/60' : ''}`}
+            className={`glass-sub rounded-xl p-3 transition-shadow ${
+              current?.id === s.id ? 'ring-1 ring-cyan-400/70 shadow-[0_0_18px_rgba(34,211,238,0.45)]' : ''
+            }`}
           >
             {editingId === s.id ? (
               <div className="space-y-2">
@@ -128,11 +130,6 @@ export const NetworkSettings: React.FC = () => {
                     >
                       {t('common.delete')}
                     </button>
-                  )}
-                  {s.fixed && (
-                    <span className="text-[10px] text-amber-300 font-orbitron px-1">
-                      {t('settings.network.current')} · {t('settings.network.fixed')}
-                    </span>
                   )}
                 </div>
               </>

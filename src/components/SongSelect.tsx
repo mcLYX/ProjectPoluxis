@@ -7,6 +7,9 @@ import type { ClearBadge } from '../utils/scoreStore';
 import { getScoreKey } from '../utils/scoreStore';
 import {
   assembleManifest,
+  assembleLocalManifest,
+  assembleOnlineManifest,
+  hasOnlineManifestCache,
   invalidateManifestCache,
   loadChartForDifficulty,
   getFallbackChart,
@@ -14,6 +17,7 @@ import {
   resolveBeatmapUrl,
   findAlbumById
 } from '../data/beatmapLoader';
+import { getCurrentServer } from '../data/onlineServers';
 import {
   onLibraryChanged,
   createAlbum,
@@ -118,8 +122,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 }) => {
   const { t } = useI18n();
   const [manifest, setManifest] = useState<BeatmapsManifest | null>(null);
-  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 在线谱面异步同步中（非阻塞，仅显示小 spinner 提示）。
+  const [syncingOnline, setSyncingOnline] = useState(false);
   // In result mode, force-expand the played song's card (custom charts → none).
   const [expandedId, setExpandedId] = useState<string | null>(
     result ? result.songId : (initialState?.expandedId ?? null)
@@ -190,20 +195,41 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     notifyStateChange();
   }, [notifyStateChange]);
 
-  // Load manifest on mount
+  // Load manifest on mount — two phases, never blocking game entry:
+  // 1) local (builtin + library) renders immediately;
+  // 2) online chart list syncs in the background (bounded by its own timeout)
+  //    and is merged in when it arrives. A dead/unreachable chart server no
+  //    longer shows a full-screen "LOADING BEATMAPS" until the network timeout.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const m = await assembleManifest();
-        if (!cancelled) {
-          setManifest(m);
-          setLoading(false);
+        const base = await assembleLocalManifest();
+        if (cancelled) return;
+        setManifest(base);
+        const cur = getCurrentServer();
+        if (cur) {
+          // 会话内已同步过（缓存命中）则不重新 fetch、不显示“同步中”；仅
+          // 首次/切换服务器（缓存 key 变化）时才真正同步。
+          const cached = hasOnlineManifestCache(cur.id);
+          setSyncingOnline(!cached);
+          const online = await assembleOnlineManifest(cur);
+          if (!cancelled) {
+            // 在线谱面插入内置与本地之间（展示顺序：内置 → 在线 → 本地）。
+            setManifest((prev) => {
+              if (!prev) return prev;
+              const builtin = prev.items.filter((it) => it.source === 'builtin');
+              const local = prev.items.filter((it) => it.source !== 'builtin');
+              return { ...prev, items: [...builtin, ...online, ...local] };
+            });
+            setSyncingOnline(false);
+          }
         }
       } catch (e) {
         if (!cancelled) {
+          console.error('加载谱面清单失败', e);
           setLoadError(String(e));
-          setLoading(false);
+          setSyncingOnline(false);
         }
       }
     })();
@@ -480,17 +506,6 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       }
     }
   }, [expandedId, editId, handleCollapse, result, exitResultMode]);
-
-  if (loading) {
-    return (
-      <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/50 backdrop-blur-md">
-        <div className="flex flex-col items-center gap-3 text-cyan-300">
-          <Loader2 size={32} className="animate-spin" />
-          <span className="text-sm font-bold font-orbitron tracking-wider">LOADING BEATMAPS...</span>
-        </div>
-      </div>
-    );
-  }
 
   const items = getCurrentItems();
   const currentAlbum = viewDepth === 'album' && currentAlbumId
@@ -1070,6 +1085,12 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           >
             <Sliders size={14} /> {t('songselect.settings')}
           </button>
+          {syncingOnline && (
+            <span className="flex items-center gap-1.5 text-white/60 text-xs font-medium">
+              <Loader2 size={13} className="animate-spin text-cyan-300" />
+              {t('songselect.syncingOnline')}
+            </span>
+          )}
         </div>
 
         <div className="pointer-events-auto flex items-end gap-3">

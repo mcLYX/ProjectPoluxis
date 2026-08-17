@@ -29,6 +29,7 @@ export const translations: AllDicts = {
     'songselect.loadError': '加载失败: {err}',
     'songselect.empty': '暂无曲目',
     'songselect.collapseHint': '点击卡片外区域收起',
+    'songselect.syncingOnline': '同步中…',
     'songselect.loading': '加载中',
 
     // --- SongCard (result / album) ---
@@ -211,7 +212,7 @@ export const translations: AllDicts = {
     'hud.backToMenu': '返回主选单',
     'hud.continue': '继续游玩',
     'hud.retry': '重新开始',
-    'hud.backEditorStates': '返回编辑器 | 继续 | 从头重试',
+    'hud.backEditorStates': '返回编辑器 | 继续 | 重试',
     'hud.backMenuStates': '返回选曲 | 继续  | 重试',
     'hud.pause': '暂停',
     'hud.paused': '已暂停',
@@ -439,7 +440,7 @@ export const translations: AllDicts = {
     'songselect.albumEmpty': '该专辑暂无曲目',
     'songcard.artist': '艺术家',
     'settings.tab.network': '网络',
-    'settings.network.hint': '在此管理需要连接的在线服务器，浏览与下载在主界面完成。',
+    'settings.network.hint': '在此管理需要连接的谱面服务器，即在线谱面的数据来源。',
     'settings.network.servers': '服务器列表',
     'settings.network.current': '当前',
     'settings.network.serverLabel': '服务器名称',
@@ -472,6 +473,7 @@ export const translations: AllDicts = {
     'songselect.loadError': 'Load failed: {err}',
     'songselect.empty': 'No songs yet',
     'songselect.collapseHint': 'Click outside the card to collapse',
+    'songselect.syncingOnline': 'Syncing…',
     'songselect.loading': 'Loading',
 
     // --- SongCard (result / album) ---
@@ -654,7 +656,7 @@ export const translations: AllDicts = {
     'hud.backToMenu': 'Back to Menu',
     'hud.continue': 'Resume',
     'hud.retry': 'Restart',
-    'hud.backEditorStates': 'Back to Editor | Resume  | Restart',
+    'hud.backEditorStates': 'Back to Editor | Resume  | Retry',
     'hud.backMenuStates': 'Back to Select | Resume  | Retry',
     'hud.pause': 'Pause',
     'hud.paused': 'Paused',
@@ -882,7 +884,7 @@ export const translations: AllDicts = {
     'songselect.albumEmpty': 'This album is empty',
     'songcard.artist': 'Artist',
     'settings.tab.network': 'Network',
-    'settings.network.hint': 'Manage the online servers to connect to. Browsing and downloading happen from the main screen.',
+    'settings.network.hint': 'Manage the chart servers to connect to — the data source for online beatmaps.',
     'settings.network.servers': 'Servers',
     'settings.network.current': 'Current',
     'settings.network.serverLabel': 'Server name',
@@ -915,6 +917,7 @@ export const translations: AllDicts = {
     'songselect.loadError': '読み込み失敗: {err}',
     'songselect.empty': '楽曲がありません',
     'songselect.collapseHint': 'カード外をタップして折りたたむ',
+    'songselect.syncingOnline': '同期中…',
     'songselect.loading': '読み込み中',
 
     // --- SongCard (result / album) ---
@@ -1097,7 +1100,7 @@ export const translations: AllDicts = {
     'hud.backToMenu': 'メニューへ戻る',
     'hud.continue': '再開',
     'hud.retry': '最初から',
-    'hud.backEditorStates': 'エディタへ戻る | 再開  | 最初から',
+    'hud.backEditorStates': 'エディタへ戻る | 再開  | やり直し',
     'hud.backMenuStates': '選曲へ戻る | 再開  | やり直し',
     'hud.pause': '一時停止',
     'hud.paused': '停止中',
@@ -1325,7 +1328,7 @@ export const translations: AllDicts = {
     'songselect.albumEmpty': 'このアルバムは空です',
     'songcard.artist': 'アーティスト',
     'settings.tab.network': 'ネットワーク',
-    'settings.network.hint': '接続するオンラインサーバーを管理します。閲覧とダウンロードはメイン画面で行います。',
+    'settings.network.hint': '接続する譜面サーバーを管理します。オンライン譜面のデータソースです。',
     'settings.network.servers': 'サーバー一覧',
     'settings.network.current': '現在',
     'settings.network.serverLabel': 'サーバー名',

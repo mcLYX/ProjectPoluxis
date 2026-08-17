@@ -22,6 +22,11 @@ interface QuickCreateDelta {
 
 interface GameCanvasProps {
   chart: ChartData;
+  /** false → pause the render loop entirely (e.g. editor switched to 2D view):
+   *  no tick, no renderer.render, no window update — zero background cost while
+   *  keeping the WebGL scene + note meshes alive so switching back resumes
+   *  instantly without the heavy rebuild hitch. Defaults to true. */
+  viewportActive?: boolean;
   isPlaying: boolean;
   isPaused: boolean;
   gameTime: number;
@@ -458,7 +463,7 @@ function makeOutlineLine(geo: THREE.BufferGeometry, color: string | THREE.Color,
 // 填充仍用软边 Canvas 纹理（makeSoftRingTexture / makeSoftFillTexture）。
 // FILL_Z 让半透明填充面略微后移，保证描边稳定压在填充之上；
 // 所有透明材质均 depthWrite:false，避免写入深度而错误遮挡更远音符的描边。
-const FILL_Z = -0.012;
+const FILL_Z = -0.001;
 
 // Slide pipes no longer share a geometry: each builds its own curved,
 // angle-rotated tube (see buildSlideTubeGeometry) so easing/angle vary per segment.
@@ -551,6 +556,7 @@ function liveMoveResolvedNote(notes: ResolvedNote[], id: string, x: number, y: n
 
 const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   chart,
+  viewportActive = true,
   isPlaying,
   isPaused,
   gameTime,
@@ -586,6 +592,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   defaultSkinJudgeWidth = 0.05,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Renders only while the viewport is active (see viewportActive prop). Kept in
+  // refs so the mount-effect loop can read/restart it without re-running setup.
+  const viewportActiveRef = useRef(true);
+  const startLoopRef = useRef<() => void>(() => {});
   const pointersRef = useRef<Map<number, { x: number; y: number; down: boolean; active: boolean; type: string }>>(new Map());
   const dragPointerIdRef = useRef<number | null>(null);
   const pointerDownStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -854,12 +864,28 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         mat?.dispose?.();
       });
       entry.group?.removeFromParent();
+      // BUGFIX: 之前漏掉 tap/touch 的投影组（slide 分支有 nd.proj.removeFromParent，
+      // 这里没有）。贴图变更（每次进游戏皮肤引用都会重载）时旧投影变成场景中的
+      // 孤儿对象：它不在任何 ref 里，渲染循环不再更新它，会以最后一次游戏帧的
+      // visible 状态 + 皮肤投影材质透明度(0.5) 残留在屏幕上——所以只有自定义皮肤
+      // 时可见，且退出/重试都清不掉。
+      entry.projectionGroup?.traverse((o) => {
+        const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+        mat?.dispose?.();
+      });
+      entry.projectionGroup?.removeFromParent();
     });
     noteMeshesRef.current.clear();
     slideMeshesRef.current.forEach((sm) => {
       sm.nodes.forEach((nd) => {
         nd.group.removeFromParent();
-        if (nd.proj) nd.proj.removeFromParent();
+        if (nd.proj) {
+          nd.proj.traverse((o) => {
+            const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+            mat?.dispose?.();
+          });
+          nd.proj.removeFromParent();
+        }
       });
       sm.pipes.forEach((p) => p.mesh.removeFromParent());
     });
@@ -1090,6 +1116,15 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
   }, [isPlaying, isPaused, isEditorMode]);
 
+  // Pause/resume the render loop when the editor switches between 3D and 2D
+  // view. While inactive the loop self-stops (see `loop` in the setup effect);
+  // flipping back to active re-arms it. The WebGL scene + meshes are preserved
+  // so the switch-back is instant instead of rebuilding everything.
+  useEffect(() => {
+    viewportActiveRef.current = viewportActive;
+    if (viewportActive) startLoopRef.current();
+  }, [viewportActive]);
+
   // `vpKey` is bumped when the 3D viewport becomes visible again (see the
   // ResizeObserver below) so the heavy setup effect re-runs with correct
   // dimensions and the metadata edited while hidden.
@@ -1284,23 +1319,28 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     //
     // Distribution follows the user's "note render distance" setting so the
     // particle cloud density scales with the visible tunnel length.
+    // Build the shared soft-circle sprite texture unconditionally: it is used by
+    // BOTH the ambient particle field AND the ultra-mode shatter bursts. If it
+    // were only created when ambient particles are enabled, disabling background
+    // particles would null it out and shatter bursts would fall back to THREE's
+    // default square point sprites (visible as square instead of soft glow).
+    // (This is a pure canvas draw — creating it even with particles off costs
+    // nothing measurable.)
+    const sc = document.createElement('canvas');
+    sc.width = 32; sc.height = 32;
+    const sctx = sc.getContext('2d')!;
+    const sgrad = sctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    sgrad.addColorStop(0,    'rgba(255,255,255,1.0)');
+    sgrad.addColorStop(0.4,  'rgba(255,255,255,0.55)');
+    sgrad.addColorStop(1,    'rgba(255,255,255,0.0)');
+    sctx.fillStyle = sgrad;
+    sctx.fillRect(0, 0, 32, 32);
+    const spriteTex = new THREE.CanvasTexture(sc);
+    spriteTex.colorSpace = THREE.SRGBColorSpace;
+    particleSpriteRef.current = spriteTex;
+
     const useParticles = allowParticlesRef.current && toggles.particles !== false;
     if (useParticles) {
-      // Build shared soft-circle sprite texture once (32×32 radial gradient).
-      // Used by both ambient particles and ultra-mode shatter bursts.
-      const sc = document.createElement('canvas');
-      sc.width = 32; sc.height = 32;
-      const sctx = sc.getContext('2d')!;
-      const sgrad = sctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-      sgrad.addColorStop(0,    'rgba(255,255,255,1.0)');
-      sgrad.addColorStop(0.4,  'rgba(255,255,255,0.55)');
-      sgrad.addColorStop(1,    'rgba(255,255,255,0.0)');
-      sctx.fillStyle = sgrad;
-      sctx.fillRect(0, 0, 32, 32);
-      const spriteTex = new THREE.CanvasTexture(sc);
-      spriteTex.colorSpace = THREE.SRGBColorSpace;
-      particleSpriteRef.current = spriteTex;
-
       const renderDist = noteRenderDistance; // mirrors "渲染距离" setting
       // Density: ~1.6 particles per unit of tunnel length, capped to keep perf sane.
       const PCOUNT = Math.min(180, Math.max(40, Math.round(renderDist * 1.6)));
@@ -1337,7 +1377,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     } else {
       particleFieldRef.current = null;
       particleVelRef.current = null;
-      particleSpriteRef.current = null;
+      // Note: do NOT null particleSpriteRef.current here — the soft-circle sprite
+      // is still needed by ultra-mode shatter bursts, even with background
+      // particles disabled.
     }
 
     // === Ultra mode: invisible walls that catch light from note PointLights ===
@@ -1412,7 +1454,18 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     };
     window.addEventListener('resize', onResize);
     let animId = 0;
-    const loop = () => { animId = requestAnimationFrame(loop); tick(); };
+    // Self-scheduling render loop. When the viewport is inactive (editor in 2D
+    // view) the loop stops scheduling itself entirely — the WebGL scene, note
+    // meshes and all refs stay alive, just no tick/render runs. The
+    // `startLoopRef` closure re-arms it when the viewport becomes active again.
+    const loop = () => {
+      if (!viewportActiveRef.current) return;
+      animId = requestAnimationFrame(loop);
+      tick();
+    };
+    startLoopRef.current = () => {
+      if (viewportActiveRef.current) animId = requestAnimationFrame(loop);
+    };
     animId = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(animId);
@@ -1740,6 +1793,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const noteSpeed = 36 * speedRef.current;
       const zSpeedBase = 9 + noteSpeed * 0.1;
       const zSpeedRange = noteSpeed * 0.06;
+      // Note rotation. `angle` is ALREADY in radians (resolved by resolveChart:
+      // degrees*π/180). Same convention as the note visuals
+      // (group.rotation.z = -angle) so the shatter cloud matches the note's
+      // preset shape orientation: negate because Three's +rotation.z is
+      // counterclockwise, but we want +angle = clockwise (2D-editor convention).
+      // NOTE: do NOT multiply by π/180 again — that would shrink the rotation
+      // ~π/180× and leave the cloud effectively axis-aligned.
+      const rot = -(angle ?? 0);
+      const cosR = Math.cos(rot);
+      const sinR = Math.sin(rot);
       for (let i = 0; i < PCOUNT; i++) {
         // Sample a point inside the note's shape (already scaled by vScale).
         let lx: number, ly: number;
@@ -1757,14 +1820,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           lx = (sx - sy) * Math.SQRT1_2;
           ly = (sx + sy) * Math.SQRT1_2;
         }
-        pos[i * 3]     = x + lx;
-        pos[i * 3 + 1] = y + ly;
+        // Rotate the sampled local position by the note's angle so particles
+        // emerge from the note's ACTUAL (rotated) silhouette, not its unrotated
+        // axis-aligned shape.
+        const rx = lx * cosR - ly * sinR;
+        const ry = lx * sinR + ly * cosR;
+        pos[i * 3]     = x + rx;
+        pos[i * 3 + 1] = y + ry;
         pos[i * 3 + 2] = z;
-        // Slow outward drift from note center (small magnitude).
-        const dlen = Math.hypot(lx, ly) || 1;
+        // Slow outward drift from note center (small magnitude). Direction also
+        // follows the rotated silhouette so the burst fans outward from the
+        // rotated shape.
+        const dlen = Math.hypot(rx, ry) || 1;
         const driftSpeed = 0.4 + Math.random() * 0.5;
-        vel[i * 3]     = (lx / dlen) * driftSpeed + (Math.random() - 0.5) * 0.15;
-        vel[i * 3 + 1] = (ly / dlen) * driftSpeed + (Math.random() - 0.5) * 0.15;
+        vel[i * 3]     = (rx / dlen) * driftSpeed + (Math.random() - 0.5) * 0.15;
+        vel[i * 3 + 1] = (ry / dlen) * driftSpeed + (Math.random() - 0.5) * 0.15;
         // Z velocity: base 9 u/s + small note-speed-scaled variation (10% of
         // note speed as base offset, 6% as random spread). Decoupled from note
         // speed so particles don't streak; z-damping in the update loop slows
@@ -2556,7 +2626,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         if (playing && !isEditorModeRef.current) {
           processSlide(note, curTime);
         }
-        const sm = ensureSlideMeshes(note, noteEffectiveColor);
+        // 非激活态（已退出菜单/结算，非 播放/暂停/编辑器）时绝不重建 slide 网格：
+        // resetPlayState 已移除旧网格，这里若再次 ensure 会每帧 scene.add 新对象，
+        // 既泄漏又让投影在 tick 残帧中被重新点亮（皮肤投影尤其明显）。
+        const sm = (playing || isPausedRef.current || isEditorModeRef.current)
+          ? ensureSlideMeshes(note, noteEffectiveColor)
+          : slideMeshesRef.current.get(note.id) ?? null;
         if (!sm) continue;
         const rt = playing && !isEditorModeRef.current ? getSlideRt(note.id, allNodes.length) : slideStateRef.current.get(note.id);
 
@@ -2613,10 +2688,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             const po = !projEnabled || leadMs <= 0 || timeToHitMs < 0 || judged
               ? 0
               : THREE.MathUtils.clamp(1 - timeToHitMs / leadMs, 0, 0.95);
-            nm.proj.visible = po > 0;
+            // `vis` 守卫：节点不可见（出窗口/退出菜单/已判定）时投影也必须隐藏。
+            // 皮肤 proj 材质初始 opacity=0.5，这里再统一按 po 覆盖——否则无 vis
+            // 守卫时，退出菜单后 tick 残帧会把皮肤投影以 0.5 透明度重新点亮残留。
+            nm.proj.visible = vis && po > 0;
             nm.proj.position.set(allNodes[i].x, allNodes[i].y, JUDGE_Z + 0.01);
             nm.proj.scale.set(vScale, vScale, 1);
             nm.projMat.color.set(noteEffectiveColor);
+            nm.projMat.opacity = po;
             nm.projMat.opacity = po;
           }
         }

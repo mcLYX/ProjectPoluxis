@@ -15,7 +15,7 @@ import {
   resolveIdbUrl,
 } from './idb';
 import { getLibraryVersion } from './libraryStore';
-import { getCurrentServer } from './onlineServers';
+import { getCurrentServer, type OnlineServer } from './onlineServers';
 
 // Local fallbacks (previously imported from removed modules)
 const BACKUP_BG_SCHEME = { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' };
@@ -235,20 +235,34 @@ function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
   return { version: typeof ver === 'number' ? ver : 1, items };
 }
 
-export async function loadOnlineManifest(baseUrl: string): Promise<BeatmapsManifest | null> {
+export async function loadOnlineManifest(baseUrl: string, timeoutMs = 8000): Promise<BeatmapsManifest | null> {
   // Strip FQDN trailing dot (host.:port) and trailing slashes defensively.
   const base = baseUrl.trim().replace(/\.+(?=\/|$)/g, '').replace(/\/+$/, '');
   // A "server" is a beatmaps directory; its index is <dir>/beatmaps.json and all
   // paths inside it are relative to <dir>. Also accept a full manifest.json URL.
   const candidates = [`${base}/beatmaps.json`, `${base}/manifest.json`, base];
+  // 所有候选共享同一超时预算（而非各自独立 8s）：服务器连不上（连接被挂起、
+  // 路由丢弃）时 fetch 可能数分钟不返回，在线清单是异步同步项，不应让本地谱面
+  // 等待，且同步提示也不应长时间悬挂。
+  const deadline = Date.now() + timeoutMs;
   for (const url of candidates) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const ctrl = new AbortController();
+    const timer = globalThis.setTimeout(() => ctrl.abort(), remaining);
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: ctrl.signal });
       if (!res.ok) continue;
       const data = await res.json();
       return normalizeManifest(data, base);
     } catch (e) {
-      console.error('加载在线清单失败', url, e);
+      if ((e as Error)?.name === 'AbortError') {
+        console.error(`加载在线清单超时（>${timeoutMs}ms）: ${url}`);
+      } else {
+        console.error('加载在线清单失败', url, e);
+      }
+    } finally {
+      globalThis.clearTimeout(timer);
     }
   }
   return null;
@@ -345,8 +359,48 @@ export function findItemById(nodes: BeatmapItem[], id: string): BeatmapItem | nu
 
 let manifestCache: { key: string; value: BeatmapsManifest } | null = null;
 
+// 在线清单会话级缓存：避免每次从游戏/编辑器返回选曲界面时都重新 fetch 在线谱面
+// （服务器连不上时还会白等一个超时周期）。仅刷新网页（模块重载）或切换服务器
+// （id 变化）才会重新同步；invalidateManifestCache 亦清空它。
+let onlineManifestCache: { key: string; items: BeatmapItem[] } | null = null;
+
 export function invalidateManifestCache() {
   manifestCache = null;
+  onlineManifestCache = null;
+}
+
+/** 当前服务器是否有可复用的在线清单缓存（避免无谓的重新同步与“同步中”提示）。 */
+export function hasOnlineManifestCache(serverId: string | null | undefined): boolean {
+  return !!serverId && onlineManifestCache !== null && onlineManifestCache.key === serverId;
+}
+
+/**
+ * 本地清单（内置谱面 + 本地库）：不依赖网络，毫秒级完成。选曲界面先以它渲染，
+ * 让游戏进入不被"加载在线谱面"阻塞；在线段随后异步合并（见 assembleOnlineManifest）。
+ */
+export async function assembleLocalManifest(): Promise<BeatmapsManifest> {
+  const builtin = buildBuiltinAlbum();
+  const builtinItems: BeatmapItem[] = stampSource([{ ...builtin }], 'builtin');
+
+  const localRaw = (await getLibrary()) as AlbumItem[];
+  const refs = collectLocalRefs(localRaw);
+  await preloadIdbUrls(refs);
+  const localItems: BeatmapItem[] = localRaw.map((a) => stampSource([resolveAlbum(a)], 'local')[0]);
+
+  return { version: 1, items: [...builtinItems, ...localItems] };
+}
+
+/**
+ * 在线谱面清单：异步同步项，内部带超时（loadOnlineManifest 默认 8s）。
+ * 服务器连不上时返回空数组——绝不让选曲主界面等待。
+ */
+export async function assembleOnlineManifest(cur: OnlineServer | null): Promise<BeatmapItem[]> {
+  if (!cur) return [];
+  if (onlineManifestCache && onlineManifestCache.key === cur.id) return onlineManifestCache.items;
+  const m = await loadOnlineManifest(cur.baseUrl);
+  const items = m ? stampSource(m.items, 'online') : [];
+  onlineManifestCache = { key: cur.id, items };
+  return items;
 }
 
 export async function assembleManifest(): Promise<BeatmapsManifest> {
@@ -354,24 +408,12 @@ export async function assembleManifest(): Promise<BeatmapsManifest> {
   const key = `${cur?.id ?? 'none'}@${getLibraryVersion()}`;
   if (manifestCache && manifestCache.key === key) return manifestCache.value;
 
-  const builtin = buildBuiltinAlbum();
-  const builtinItems: BeatmapItem[] = stampSource([{ ...builtin }], 'builtin');
-
-  let onlineItems: BeatmapItem[] = [];
-  if (cur) {
-    const m = await loadOnlineManifest(cur.baseUrl);
-    if (m) onlineItems = stampSource(m.items, 'online');
-  }
-
-  const localRaw = (await getLibrary()) as AlbumItem[];
-  const refs = collectLocalRefs(localRaw);
-  await preloadIdbUrls(refs);
-  const localItems: BeatmapItem[] = localRaw.map((a) => stampSource([resolveAlbum(a)], 'local')[0]);
-
-  const value: BeatmapsManifest = {
-    version: 1,
-    items: [...builtinItems, ...onlineItems, ...localItems],
-  };
+  // 展示顺序：内置 → 在线 → 本地。
+  const local = await assembleLocalManifest();
+  const onlineItems = await assembleOnlineManifest(cur);
+  const builtinItems = local.items.filter((it) => it.source === 'builtin');
+  const localItems = local.items.filter((it) => it.source !== 'builtin');
+  const value: BeatmapsManifest = { version: 1, items: [...builtinItems, ...onlineItems, ...localItems] };
   manifestCache = { key, value };
   return value;
 }
