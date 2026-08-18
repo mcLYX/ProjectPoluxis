@@ -757,9 +757,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
     if (!drag.id) return;
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    let beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
+    const beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
-    let x = round9(snap(worldX - drag.offX, xStep));
+    const x = round9(snap(worldX - drag.offX, xStep));
     drag.moved = true;
     // Preserve the note's original y (2D ignores y, but keep it intact on drag).
     // Update the live-drag ref so the canvas draws the note in real time,

@@ -1,4 +1,5 @@
 import type { NoteData, NoteType } from '../types/game';
+import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { EASING_TYPES } from './easing';
 
 /**
@@ -557,18 +558,18 @@ function sanitizeDslResult(note: NoteData, ctx: Ctx): NoteData {
   // x：±2.4。
   let x = 0;
   if (typeof ctx.x === 'number') {
-    if (Number.isFinite(ctx.x)) x = Math.max(-2.4, Math.min(2.4, ctx.x as number));
-    else if (ctx.x > 0) x = 2.4; // +Inf
-    else if (ctx.x < 0) x = -2.4; // -Inf
+    if (Number.isFinite(ctx.x)) x = Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, ctx.x as number));
+    else if (ctx.x > 0) x = NOTE_X_RANGE; // +Inf
+    else if (ctx.x < 0) x = -NOTE_X_RANGE; // -Inf
     // NaN → 0（>0 与 <0 均 false）
   }
 
   // y：±1.5。
   let y = 0;
   if (typeof ctx.y === 'number') {
-    if (Number.isFinite(ctx.y)) y = Math.max(-1.5, Math.min(1.5, ctx.y as number));
-    else if (ctx.y > 0) y = 1.5;
-    else if (ctx.y < 0) y = -1.5;
+    if (Number.isFinite(ctx.y)) y = Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, ctx.y as number));
+    else if (ctx.y > 0) y = NOTE_Y_RANGE;
+    else if (ctx.y < 0) y = -NOTE_Y_RANGE;
   }
 
   // type：非法时回退原类型。

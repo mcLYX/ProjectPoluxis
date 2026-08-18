@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData } from '../types/game';
+import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { exportChartJson, parseAndValidateChart } from '../utils/chartParser';
 import { countPlayableNotes, getMaxBeat, beatToSecondsMultiBpm } from '../utils/beatTime';
 import { EASING_TYPES, EASING_FNS } from '../utils/easing';
@@ -503,7 +503,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     targetId?: string;
     isEvent?: boolean;
   }
-  const X_MIN = -2.4, X_MAX = 2.4, Y_MIN = -1.5, Y_MAX = 1.5;
+  const X_MIN = -NOTE_X_RANGE, X_MAX = NOTE_X_RANGE, Y_MIN = -NOTE_Y_RANGE, Y_MAX = NOTE_Y_RANGE;
   const [checkIssues, setCheckIssues] = useState<CheckIssue[]>([]);
   const [showCheck, setShowCheck] = useState(false);
   const [checkRan, setCheckRan] = useState(false);
@@ -772,8 +772,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         );
         const out: SlideNodeData = {
           beat: tmp.beat,
-          x: Math.max(-2.4, Math.min(2.4, tmp.x)),
-          y: Math.max(-1.5, Math.min(1.5, tmp.y)),
+          x: Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, tmp.x)),
+          y: Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, tmp.y)),
         };
         if (tmp.angle != null) out.angle = tmp.angle;
         if (tmp.easing != null) out.easing = tmp.easing;

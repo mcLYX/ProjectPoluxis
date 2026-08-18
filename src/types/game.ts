@@ -1,5 +1,11 @@
 export type NoteType = 'tap' | 'touch' | 'slide';
 
+/** 判定面 X 轴半宽：合法落点/放置范围 [-NOTE_X_RANGE, NOTE_X_RANGE]。
+ *  编辑、游戏、DSL 三处坐标边界的唯一权威源（消除 ±2.4 字面量漂移）。 */
+export const NOTE_X_RANGE = 2.4;
+/** 判定面 Y 轴半宽：合法落点/放置范围 [-NOTE_Y_RANGE, NOTE_Y_RANGE]。 */
+export const NOTE_Y_RANGE = 1.5;
+
 /** A skin maps each note type to a grayscale (white/transparent) texture stored
  *  as an `idb://` file reference. The game tints these textures with the note's
  *  judgement colour at runtime (map × colour), so the images themselves should

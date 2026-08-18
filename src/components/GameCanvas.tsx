@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType, SkinTextureSet } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { evaluateJudgement, calculateNoteScore, JUDGEMENT_COLORS } from '../utils/scoring';
 import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
@@ -653,6 +653,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const onApplyQuickCreateDeltaRef = useRef(onApplyQuickCreateDelta);
   const judgedNotesRef = useRef<Set<string>>(new Set());
   const songEndedRef = useRef(false);
+  const songEndTimerRef = useRef<number | null>(null);
   /** 本局开始时的时间（秒）。从谱面中间试玩时>0，用于把起点之前的音符预先
    *  标记为已判定，避免开局瞬间刷出一排先前音符的 Miss 框。 */
   const playStartTimeRef = useRef(0);
@@ -1536,7 +1537,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         particleSpriteRef.current.dispose();
         particleSpriteRef.current = null;
       }
-      renderer.dispose(); scene.clear();
+      if (songEndTimerRef.current !== null) { window.clearTimeout(songEndTimerRef.current); songEndTimerRef.current = null; }
+      renderer.dispose();
+      // 释放底层 WebGL context，避免反复切歌/卸载累积 GPU context（浏览器上限约 16 个）。
+      renderer.forceContextLoss();
+      scene.clear();
       cv.removeEventListener('touchstart', onCanvasTouchStart);
       sceneRef.current = null; cameraRef.current = null; rendererRef.current = null;
       ultraWallsRef.current = null;
@@ -2280,8 +2285,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (isEditorModeRef.current) {
       const tool = activeToolRef.current;
       if (tool === 'place-tap' || tool === 'place-touch' || tool === 'place-slide') {
-        const clampedX = Math.round(THREE.MathUtils.clamp(px, -2.4, 2.4) * 10) / 10;
-        const clampedY = Math.round(THREE.MathUtils.clamp(py, -1.5, 1.5) * 10) / 10;
+        const clampedX = Math.round(THREE.MathUtils.clamp(px, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
+        const clampedY = Math.round(THREE.MathUtils.clamp(py, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
         onPlaceEditorNoteRef.current?.(clampedX, clampedY);
         return;
       }
@@ -2487,8 +2492,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         const dDragY = dragPointer.y - pointerDownStartRef.current.y;
         if (Math.sqrt(dDragX * dDragX + dDragY * dDragY) > 0.05) {
           isDraggingRef.current = true;
-          const clampedX = Math.round(THREE.MathUtils.clamp(dragPointer.x, -2.4, 2.4) * 10) / 10;
-          const clampedY = Math.round(THREE.MathUtils.clamp(dragPointer.y, -1.5, 1.5) * 10) / 10;
+          const clampedX = Math.round(THREE.MathUtils.clamp(dragPointer.x, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
+          const clampedY = Math.round(THREE.MathUtils.clamp(dragPointer.y, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
           // Live-follow: mutate the dragged note's resolved position directly so
           // the windowed render loop below places its mesh correctly THIS frame.
           // The authoritative React commit happens ONLY on pointer release (the
@@ -3307,7 +3312,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         : curTime > 2;
       if (ended) {
         songEndedRef.current = true;
-        setTimeout(() => onSongEndRef.current?.(), 800);
+        songEndTimerRef.current = window.setTimeout(() => { onSongEndRef.current?.(); songEndTimerRef.current = null; }, 800);
       }
     }
 
