@@ -93,31 +93,32 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
     // Migrate legacy `lowQualityMode: boolean` → `qualityMode: 'low'|'standard'`.
     if (parsed && typeof parsed.lowQualityMode === 'boolean' && parsed.qualityMode === undefined) {
       result.qualityMode = parsed.lowQualityMode ? 'low' : 'standard';
-      delete (parsed as any).lowQualityMode;
+      delete parsed.lowQualityMode;
     }
     // Migrate legacy `defaultSkinInnerWidth/OuterWidth` (number) → enabled booleans.
     if (parsed && typeof parsed.defaultSkinInnerWidth === 'number') {
       result.defaultSkinInnerEnabled = parsed.defaultSkinInnerWidth > 0;
-      delete (parsed as any).defaultSkinInnerWidth;
+      delete parsed.defaultSkinInnerWidth;
     }
     if (parsed && typeof parsed.defaultSkinOuterWidth === 'number') {
       result.defaultSkinOuterEnabled = parsed.defaultSkinOuterWidth > 0;
       if (parsed.defaultSkinOuterWidth > 0) result.defaultSkinOuterWidth = parsed.defaultSkinOuterWidth;
-      delete (parsed as any).defaultSkinOuterWidth;
+      delete parsed.defaultSkinOuterWidth;
     }
+    const r = result as Record<keyof typeof DEFAULT_SETTINGS, unknown>;
     for (const k of Object.keys(result) as Array<keyof typeof DEFAULT_SETTINGS>) {
       const val = parsed[k];
       if (typeof val === 'undefined') continue;
-      const def = (result as any)[k];
+      const def = r[k];
       // A setting whose default is `null` (e.g. selectedSkinId) has type
       // 'object', while the saved value is a string — the naive
       // `typeof val === typeof def` check would reject it and silently reset
       // the selection to default on every refresh. Accept any loaded value
       // for null-typed settings instead.
       if (def === null) {
-        (result as any)[k] = val;
+        r[k] = val;
       } else if (typeof val === typeof def) {
-        (result as any)[k] = val;
+        r[k] = val;
       }
     }
     return result;
@@ -1499,12 +1500,13 @@ export function App() {
   // then reference those vars via arbitrary-value syntax, so hover /
   // transition modifiers keep working.
   // =========================================================================
-  const rawBgScheme = (currentChart.metadata as any)?.bgScheme;
+  type HudCssVars = React.CSSProperties & { [k: `--${string}`]: string };
+  const rawBgScheme = currentChart.metadata.bgScheme;
   const bgScheme = rawBgScheme && typeof rawBgScheme === 'object'
     ? { ...FALLBACK_BG, ...rawBgScheme }
     : FALLBACK_BG;
   const accent = bgScheme.accentColor;
-  const hudCssVars: React.CSSProperties = {
+  const hudCssVars: HudCssVars = {
     // solid variants
     '--hud-accent': accent,
     '--hud-accent-20': withAlpha(accent, 0.2),
@@ -1528,7 +1530,7 @@ export function App() {
       0.9,
     ),
     // glow drop-shadow for countdown (we'll use inline style for precision)
-  } as any;
+  };
   // Computed inline glow variants for combo-burst / countdown drop-shadows
   // (drop-shadow doesn't take CSS var colors in all browsers, so pass directly)
   const comboBurstStroke = withAlpha(accent, 0.6);

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { cssVars } from '../utils/style';
 import { BeatmapItem, SongItem, AlbumItem, DifficultyEntry } from '../types/beatmap';
 
 // 编辑态输入框：压暗背景并模糊底层专辑图，提升在彩色封面上的可读性。
@@ -246,7 +247,7 @@ export const SongCard: React.FC<SongCardProps> = ({
         flex-shrink-0
         border backdrop-blur-md
       `}
-      style={{
+      style={cssVars({
         background: showCover
           ? undefined
           : `linear-gradient(160deg, ${rgba(accent, 0.16)} 0%, rgba(10, 13, 18, 0.86) 100%)`,
@@ -256,8 +257,8 @@ export const SongCard: React.FC<SongCardProps> = ({
             ? `0 0 80px ${rgba(accent, 0.42)}, inset 0 1px 0 rgba(255,255,255,0.14)`
             : `0 0 60px ${rgba(accent, 0.32)}, inset 0 1px 0 rgba(255,255,255,0.14)`
           : 'inset 0 1px 0 rgba(255,255,255,0.08)',
-        ['--song-card-hover-glow' as any]: `0 0 30px ${rgba(accent, 0.28)}, inset 0 1px 0 rgba(255,255,255,0.12)`,
-      }}
+        '--song-card-hover-glow': `0 0 30px ${rgba(accent, 0.28)}, inset 0 1px 0 rgba(255,255,255,0.12)`,
+      })}
     >
       {/* Cover Image */}
       {showCover && (
@@ -513,7 +514,7 @@ export const SongCard: React.FC<SongCardProps> = ({
               onSave?.();
             }}
             className="px-5 py-2.5 rounded-xl glass-btn-primary font-bold text-sm hover:scale-105 active:scale-95 transition flex items-center gap-1.5"
-            style={{ ['--hud-accent' as any]: '#22d3ee' }}
+            style={cssVars({ '--hud-accent': '#22d3ee' })}
           >
             <Save size={14} />
             {t('fab.save')}
@@ -523,7 +524,7 @@ export const SongCard: React.FC<SongCardProps> = ({
             data-action="enter"
             onClick={handleEnterAlbum}
             className="px-5 py-2.5 rounded-xl glass-btn-primary font-bold text-sm hover:scale-105 active:scale-95 transition flex items-center gap-1.5"
-            style={{ ['--hud-accent' as any]: '#10b981' }}
+            style={cssVars({ '--hud-accent': '#10b981' })}
           >
             {t('songcard.enter')}
             <ChevronRight size={16} />

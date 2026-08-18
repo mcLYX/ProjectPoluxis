@@ -526,7 +526,7 @@ function assignProp(ctx: Ctx, name: string, raw: unknown): void {
     }
     ctx.type = str as NoteType;
   } else if (name === 'easing') {
-    if (!EASING_TYPES.includes(str as any)) {
+    if (!(EASING_TYPES as readonly string[]).includes(str)) {
       throw new DslError(`easing 必须为 ${EASING_TYPES.join('/')}，得到 "${str}"`);
     }
     ctx.easing = str;

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { cssVars } from '../utils/style';
 import { createPortal } from 'react-dom';
 import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { exportChartJson, parseAndValidateChart } from '../utils/chartParser';
@@ -1769,7 +1770,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                     <button
                       onClick={() => onStartPlayTest(true)}
                       className="py-2 px-2 rounded glass-btn-primary text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
-                      style={{ ['--hud-accent' as any]: '#f59e0b' }}
+                      style={cssVars({ '--hud-accent': '#f59e0b' })}
                     >
                       <Play size={12} /> {t('editor.startHere')}
                     </button>

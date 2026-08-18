@@ -93,6 +93,13 @@ const HIT_WINDOW_MS = 160;
 const SLIDE_RED = '#ff0000';
 
 const CAMERA_VFOV = 52;
+// --- 渲染 / HUD 调参常量（P2-2：消除魔法数字）---
+const WORLD_UNITS_PER_SECOND = 36; // 每 1x 秒对应的世界单位数（note 滚动速度缩放因子）
+const DEFAULT_HUD_FONT_PX = 36;    // HUD 文本默认字号（像素）
+const HUD_ANCHOR_PERCENT = 50;     // HUD 居中锚点（百分比）
+const HUD_SPREAD_PERCENT = 40;     // 归一化坐标 [-1,1] → 百分比的横向拉伸
+const DRAG_START_THRESHOLD = 0.05; // 编辑器拖拽启动阈值（世界单位）
+const PARTICLE_DUST_SIZE = 0.12;   // 环境粒子尺寸（更似浮尘而非大雪）
 const FIT_HALF = 2.42;
 const CAMERA_AXIS_Y = 0;
 function fitCameraDistance(aspect: number): number {
@@ -554,21 +561,21 @@ interface SlideMeshSet {
  * throttled separately, so a long drag no longer re-resolves 2000 notes every
  * frame — that was the source of per-frame jank on lower-end Android WebViews.
  */
-function liveMoveResolvedNote(notes: ResolvedNote[], id: string, x: number, y: number): void {
+function liveMoveResolvedNote(noteIndex: Map<string, ResolvedNote>, id: string, x: number, y: number): void {
   const hashIdx = id.indexOf('#');
   if (hashIdx < 0) {
-    const n = notes.find((nn) => nn.id === id);
+    const n = noteIndex.get(id);
     if (n) { n.x = x; n.y = y; }
     return;
   }
   // tap/touch chains are expanded into standalone resolved notes whose id
   // already carries the "#i" suffix — prefer an exact match (same convention
   // as the selection gizmo and handleMoveEditorNote).
-  const exact = notes.find((nn) => nn.id === id);
+  const exact = noteIndex.get(id);
   if (exact) { exact.x = x; exact.y = y; return; }
   const base = id.slice(0, hashIdx);
   const childIdx = parseInt(id.slice(hashIdx + 1), 10) - 1;
-  const n = notes.find((nn) => nn.id === base);
+  const n = noteIndex.get(base);
   if (n && n.resolvedNodes && childIdx >= 0 && childIdx < n.resolvedNodes.length) {
     n.resolvedNodes[childIdx].x = x;
     n.resolvedNodes[childIdx].y = y;
@@ -769,7 +776,15 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
   const resolvedNotes = useMemo(() => resolveChart(chart), [chart]);
   const resolvedRef = useRef(resolvedNotes);
-  useEffect(() => { resolvedRef.current = resolvedNotes; }, [resolvedNotes]);
+  // id → ResolvedNote 索引（P2-6）：把编辑器 gizmo 每帧的 O(N) notes.find 改为 O(1) 查表。
+  // 仅在 resolvedNotes 变化时重建；in-place 编辑改的是同一 note 对象引用，Map 取到的是最新值。
+  const noteIndexRef = useRef<Map<string, ResolvedNote>>(new Map());
+  useEffect(() => {
+    resolvedRef.current = resolvedNotes;
+    const idx = new Map<string, ResolvedNote>();
+    for (const n of resolvedNotes) idx.set(n.id, n);
+    noteIndexRef.current = idx;
+  }, [resolvedNotes]);
 
   const resolvedEvents = useMemo(() => resolveEvents(chart), [chart]);
   const eventsRef = useRef(resolvedEvents);
@@ -1168,10 +1183,17 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const el = containerRef.current;
     if (!el) return;
     let wasVisible = el.clientWidth > 0 && el.clientHeight > 0;
+    let scheduled = false;
     const ro = new ResizeObserver(() => {
-      const visible = el.clientWidth > 0 && el.clientHeight > 0;
-      if (visible && !wasVisible) setVpKey((k) => k + 1);
-      wasVisible = visible;
+      if (scheduled) return;
+      scheduled = true;
+      // 合并高频 RO 回调到每帧一次，避免持续 resize 时反复读取 layout（P2-10）。
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const visible = el.clientWidth > 0 && el.clientHeight > 0;
+        if (visible && !wasVisible) setVpKey((k) => k + 1);
+        wasVisible = visible;
+      });
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -1224,8 +1246,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const cv = renderer.domElement;
     cv.style.touchAction = 'none';
     cv.style.userSelect = 'none';
-    (cv.style as any).webkitUserSelect = 'none';
-    (cv.style as any).webkitTouchCallout = 'none';
+    cv.style.webkitUserSelect = 'none';
+    (cv.style as CSSStyleDeclaration & { webkitTouchCallout?: string }).webkitTouchCallout = 'none';
     const onCanvasTouchStart = (e: TouchEvent) => { e.preventDefault(); };
     cv.addEventListener('touchstart', onCanvasTouchStart, { passive: false });
 
@@ -1404,7 +1426,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       pGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       const pMat = new THREE.PointsMaterial({
         color: new THREE.Color(chart.metadata.bgScheme.accentColor || '#00f0ff'),
-        size: 0.12, // smaller — feels like floating dust, not big snowflakes
+        size: PARTICLE_DUST_SIZE, // smaller — feels like floating dust, not big snowflakes
         map: particleSpriteRef.current,
         transparent: true,
         opacity: 0.5,
@@ -1642,9 +1664,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // consumer that hasn't wired the new prop.
     const place = (type: 'tap' | 'touch', x: number, y: number) => {
       const oldTool = activeToolRef.current;
-      (activeToolRef as any).current = type === 'tap' ? 'place-tap' : 'place-touch';
+      activeToolRef.current = type === 'tap' ? 'place-tap' : 'place-touch';
       onPlaceEditorNoteRef.current?.(x, y);
-      (activeToolRef as any).current = oldTool;
+      activeToolRef.current = oldTool;
       onSelectEditorNoteRef.current?.(null);
     };
     for (const t of delta.taps ?? []) place('tap', t.x, t.y);
@@ -2460,7 +2482,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // even before a speed change is reached (no teleportation).
     const curScrollDist = getScrollDistance(curTime, speedPointsRef.current);
     const globalSpeed = speedRef.current;
-    const unitPerSecond = 36 * globalSpeed; // scale: 1 "1x-second" = 36 world units * globalSpeed
+    const unitPerSecond = WORLD_UNITS_PER_SECOND * globalSpeed; // scale: 1 "1x-second" = 36 world units * globalSpeed
     const notes = resolvedRef.current;
     const colorHex = currentNoteColorRef.current || chartRef.current.metadata.noteColor || '#00f0ff';
 
@@ -2476,9 +2498,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         // Position: normalized [-1, 1] → percentage. Default: center (0, 0) → top-1/3 centered.
         const normX = txt.x ?? 0;
         const normY = txt.y ?? -0.33; // default: slightly above center (top 1/3-ish)
-        const left = `${50 + normX * 40}%`;
-        const top = `${50 + normY * 40}%`;
-        const fs = `${txt.fontSize ?? 36}px`;
+        const left = `${HUD_ANCHOR_PERCENT + normX * HUD_SPREAD_PERCENT}%`;
+        const top = `${HUD_ANCHOR_PERCENT + normY * HUD_SPREAD_PERCENT}%`;
+        const fs = `${txt.fontSize ?? DEFAULT_HUD_FONT_PX}px`;
         const color = txt.color || chartRef.current.metadata.bgScheme?.accentColor || '#00f0ff';
         if (ls.left !== left) { textEl.style.left = left; ls.left = left; }
         if (ls.top !== top) { textEl.style.top = top; ls.top = top; }
@@ -2509,7 +2531,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       if (dragPointer && dragPointer.down) {
         const dDragX = dragPointer.x - pointerDownStartRef.current.x;
         const dDragY = dragPointer.y - pointerDownStartRef.current.y;
-        if (Math.sqrt(dDragX * dDragX + dDragY * dDragY) > 0.05) {
+        if (Math.sqrt(dDragX * dDragX + dDragY * dDragY) > DRAG_START_THRESHOLD) {
           isDraggingRef.current = true;
           const clampedX = Math.round(THREE.MathUtils.clamp(dragPointer.x, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
           const clampedY = Math.round(THREE.MathUtils.clamp(dragPointer.y, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
@@ -2521,7 +2543,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // the main thread (single-digit FPS during fast drags, even on flagship
           // Android). The mesh still follows the pointer perfectly every frame via
           // this live override, so the drag looks smooth.
-          liveMoveResolvedNote(notes, selectedNoteIdRef.current, clampedX, clampedY);
+          liveMoveResolvedNote(noteIndexRef.current, selectedNoteIdRef.current, clampedX, clampedY);
           dragLiveXRef.current = clampedX;
           dragLiveYRef.current = clampedY;
           // Push the live position to the editor side panel so its x/y inputs
@@ -2558,8 +2580,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         const childIdx = hashIdx >= 0 ? parseInt(selId.slice(hashIdx + 1)) : 0;
         // tap/touch chains are expanded into standalone resolved notes whose id
         // already carries the "#i" suffix — prefer an exact match.
-        const exact = hashIdx >= 0 ? notes.find((nn) => nn.id === selId) : undefined;
-        const n = exact ?? notes.find((nn) => nn.id === base);
+        const exact = hashIdx >= 0 ? noteIndexRef.current.get(selId) : undefined;
+        const n = exact ?? noteIndexRef.current.get(base);
         if (n) {
           let px = n.x, py = n.y, pt = n.timeSec;
           if (!exact && childIdx >= 1 && n.resolvedNodes && n.resolvedNodes[childIdx - 1]) {
@@ -2590,14 +2612,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         const hashIdx = selId.indexOf('#');
         const base = hashIdx >= 0 ? selId.slice(0, hashIdx) : selId;
         const childIdx = hashIdx >= 0 ? parseInt(selId.slice(hashIdx + 1)) : 0;
-        const n = notes.find((nn) => nn.id === base);
+        const n = noteIndexRef.current.get(base);
         if (!n) continue;
         // 精确定位选中的单位坐标（头节点或指定子节点）。
         let px = n.x, py = n.y, pt = n.timeSec;
         if (childIdx >= 1) {
           // slide 链：子节点在 resolvedNodes；tap/touch 链：子节点是独立 "#i" 条目。
           const resolved = n.resolvedNodes ?? [];
-          const c = resolved[childIdx - 1] ?? notes.find((nn) => nn.id === selId);
+          const c = resolved[childIdx - 1] ?? noteIndexRef.current.get(selId);
           if (c) { px = c.x; py = c.y; pt = c.timeSec; }
         }
         const noteScrollDist = getScrollDistance(pt, speedPointsRef.current);
