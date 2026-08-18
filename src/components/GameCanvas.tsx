@@ -3,9 +3,14 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
-import { evaluateJudgement, calculateNoteScore, JUDGEMENT_COLORS } from '../utils/scoring';
+import { evaluateJudgement, calculateNoteScore } from '../utils/scoring';
 import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
+import { WORLD_UNITS_PER_SECOND, isWithinBox, noteHitZ, withinHitWindow } from '../systems/judge';
+import { deriveBurstConfig, deriveShatterParticles } from '../systems/effects';
+import { expandRing, type RingPt } from '../systems/geometry';
+import { createSceneGroups, disposeSceneGroups, type SceneGroups } from '../scenes/sceneGroups';
+import { usePropRefs } from '../hooks/usePropRefs';
 
 import { globalAudio } from '../audio/AudioManager';
 import { liveDragStore } from '../liveDragStore';
@@ -94,7 +99,6 @@ const SLIDE_RED = '#ff0000';
 
 const CAMERA_VFOV = 52;
 // --- 渲染 / HUD 调参常量（P2-2：消除魔法数字）---
-const WORLD_UNITS_PER_SECOND = 36; // 每 1x 秒对应的世界单位数（note 滚动速度缩放因子）
 const DEFAULT_HUD_FONT_PX = 36;    // HUD 文本默认字号（像素）
 const HUD_ANCHOR_PERCENT = 50;     // HUD 居中锚点（百分比）
 const HUD_SPREAD_PERCENT = 40;     // 归一化坐标 [-1,1] → 百分比的横向拉伸
@@ -318,7 +322,6 @@ const _touchSkinGeo = markShared(new THREE.PlaneGeometry(TOUCH_SIZE, TOUCH_SIZE)
 // 用 canvas 绘制抗锯齿的环形/填充形，作为纹理贴到 _unitGeo 平面上，使默认皮肤
 // 与皮肤包一样平滑。环的径向厚度由 defaultSkinInnerWidth / defaultSkinOuterWidth
 // （世界单位）控制。
-type RingPt = [number, number];
 interface SoftShapeTex { texture: THREE.CanvasTexture; size: number; }
 const softShapeTexCache = new Map<string, SoftShapeTex>();
 // 软边纹理按几何 key 缓存复用；上限防止长会话/多谱面累积（P2-4）。
@@ -716,6 +719,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  // 命名场景图分组句柄（setup 内创建并写入，运行时 ensure*/spawnBurst 经此挂载）。
+  const groupsRef = useRef<SceneGroups | null>(null);
   /** Post-processing composer — only created when qualityMode >= 'high' AND
    *  chart.metadata.effectToggles.bloom is true. Otherwise null and the renderer
    *  falls back to a direct `renderer.render(scene, camera)` call. */
@@ -795,7 +800,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // reaches the judge line (no teleportation artifacts).
   const speedPoints = useMemo(() => extractSpeedPoints(chart), [chart]);
   const speedPointsRef = useRef(speedPoints);
-  useEffect(() => { speedPointsRef.current = speedPoints; }, [speedPoints]);
 
   const chartRef = useRef(chart);
   const isPlayingRef = useRef(isPlaying);
@@ -843,8 +847,26 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const onJudgementRef = useRef(onJudgement);
   const onSongEndRef = useRef(onSongEnd);
 
-  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
-  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+  // R4-3：批量同步纯 prop→ref 镜像（带副作用的 skinTextures/defaultSkin/effectToggles 仍保留独立 effect）。
+  usePropRefs(
+    {
+      isPlaying, isPaused, gameTime, speedMultiplier, projectionLeadMs, noteRenderDistance, noteSizeScale,
+      lowQuality: qualityMode === 'low', antialias, renderScale, allowBloom, allowParticles,
+      allowDynamicLighting, allowHitEffects, autoPlay, isEditorMode, activeEditorTool, snapSubdivision,
+      selectedNoteId, chart, speedPoints,
+      onSelectEditorNote, onMoveEditorNote, onPlaceEditorNote, onApplyQuickCreateDelta, onJudgement, onSongEnd,
+    },
+    {
+      isPlaying: isPlayingRef, isPaused: isPausedRef, gameTime: gameTimeRef, speedMultiplier: speedRef,
+      projectionLeadMs: projectionLeadRef, noteRenderDistance: renderDistRef, noteSizeScale: sizeScaleRef,
+      lowQuality: lowQualityModeRef, antialias: antialiasRef, renderScale: renderScaleRef, allowBloom: allowBloomRef,
+      allowParticles: allowParticlesRef, allowDynamicLighting: allowDynamicLightingRef, allowHitEffects: allowHitEffectsRef,
+      autoPlay: autoPlayRef, isEditorMode: isEditorModeRef, activeEditorTool: activeToolRef, snapSubdivision: snapSubdivisionRef,
+      selectedNoteId: selectedNoteIdRef, chart: chartRef, speedPoints: speedPointsRef,
+      onSelectEditorNote: onSelectEditorNoteRef, onMoveEditorNote: onMoveEditorNoteRef, onPlaceEditorNote: onPlaceEditorNoteRef,
+      onApplyQuickCreateDelta: onApplyQuickCreateDeltaRef, onJudgement: onJudgementRef, onSongEnd: onSongEndRef,
+    },
+  );
   /**
    * Rebuild event state from scratch up to the given time.
    * Used when seeking/scrubbing to ensure event state is consistent.
@@ -890,11 +912,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
   };
 
-  useEffect(() => { gameTimeRef.current = gameTime; }, [gameTime]);
-  useEffect(() => { speedRef.current = speedMultiplier; }, [speedMultiplier]);
-  useEffect(() => { projectionLeadRef.current = projectionLeadMs; }, [projectionLeadMs]);
-  useEffect(() => { renderDistRef.current = noteRenderDistance; }, [noteRenderDistance]);
-  useEffect(() => { sizeScaleRef.current = noteSizeScale; }, [noteSizeScale]);
   useEffect(() => {
     const prev = skinTexturesRef.current;
     skinTexturesRef.current = skinTextures ?? null;
@@ -964,27 +981,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       slideMeshesRef.current.clear();
     }
   }, [defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth, skinTextures]);
-  useEffect(() => {
-    lowQualityModeRef.current = qualityMode === 'low';
-  }, [qualityMode]);
-  useEffect(() => { antialiasRef.current = antialias; }, [antialias]);
-  useEffect(() => { renderScaleRef.current = renderScale; }, [renderScale]);
-  useEffect(() => { allowBloomRef.current = allowBloom; }, [allowBloom]);
-  useEffect(() => { allowParticlesRef.current = allowParticles; }, [allowParticles]);
-  useEffect(() => { allowDynamicLightingRef.current = allowDynamicLighting; }, [allowDynamicLighting]);
-  useEffect(() => { allowHitEffectsRef.current = allowHitEffects; }, [allowHitEffects]);
-  useEffect(() => { autoPlayRef.current = autoPlay; }, [autoPlay]);
-  useEffect(() => { isEditorModeRef.current = isEditorMode; }, [isEditorMode]);
-  useEffect(() => { activeToolRef.current = activeEditorTool; }, [activeEditorTool]);
-  useEffect(() => { snapSubdivisionRef.current = snapSubdivision; }, [snapSubdivision]);
-  useEffect(() => { selectedNoteIdRef.current = selectedNoteId; }, [selectedNoteId]);
-  useEffect(() => { chartRef.current = chart; }, [chart]);
-  useEffect(() => { onSelectEditorNoteRef.current = onSelectEditorNote; }, [onSelectEditorNote]);
-  useEffect(() => { onMoveEditorNoteRef.current = onMoveEditorNote; }, [onMoveEditorNote]);
-  useEffect(() => { onPlaceEditorNoteRef.current = onPlaceEditorNote; }, [onPlaceEditorNote]);
-  useEffect(() => { onApplyQuickCreateDeltaRef.current = onApplyQuickCreateDelta; }, [onApplyQuickCreateDelta]);
-  useEffect(() => { onJudgementRef.current = onJudgement; }, [onJudgement]);
-  useEffect(() => { onSongEndRef.current = onSongEnd; }, [onSongEnd]);
 
   const disposeGroup = (g: THREE.Object3D) => {
     g.traverse((o) => {
@@ -1024,31 +1020,29 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   };
 
   const resetPlayState = () => {
-    const scene = sceneRef.current;
     noteMeshesRef.current.forEach((entry) => {
-      if (scene) { scene.remove(entry.group); scene.remove(entry.projectionGroup); }
+      entry.group.removeFromParent();
+      entry.projectionGroup.removeFromParent();
       disposeGroup(entry.group);
       disposeGroup(entry.projectionGroup);
     });
     noteMeshesRef.current.clear();
     slideMeshesRef.current.forEach((sm) => {
       sm.nodes.forEach((nd) => {
-        if (scene) {
-          scene.remove(nd.group);
-          if (nd.proj) scene.remove(nd.proj);
-        }
+        nd.group.removeFromParent();
+        if (nd.proj) nd.proj.removeFromParent();
         disposeGroup(nd.group);
         if (nd.proj) disposeGroup(nd.proj);
       });
       sm.pipes.forEach((p) => {
-        if (scene) scene.remove(p.mesh);
+        p.mesh.removeFromParent();
         // Each pipe owns its geometry; dispose it (shared geos are tagged and skipped).
         if (!isSharedGeo(p.geo)) p.geo.dispose();
         p.mat.dispose();
       });
     });
     slideMeshesRef.current.clear();
-    activeBurstsRef.current.forEach((b) => { if (scene) scene.remove(b.group); });
+    activeBurstsRef.current.forEach((b) => { b.group.removeFromParent(); });
     activeBurstsRef.current = [];
     judgedNotesRef.current.clear();
     songEndedRef.current = false;
@@ -1213,6 +1207,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // metadata was edited while hidden.
     if (w <= 0 || h <= 0) return;
     const scene = new THREE.Scene(); sceneRef.current = scene;
+    // 命名场景图分组：一次性静态对象与运行时动态对象按职责挂载到对应 Group，
+    // 分组按"首个对象原应插入 scene 的位置"逐个 add 到 scene，确保渲染顺序不变。
+    const groups = createSceneGroups();
+    groupsRef.current = groups;
     const camera = new THREE.PerspectiveCamera(CAMERA_VFOV, w / h, 0.1, 1000);
     const dist0 = fitCameraDistance(w / h);
     camera.position.set(0, CAMERA_AXIS_Y, dist0); camera.lookAt(0, CAMERA_AXIS_Y, 0); cameraRef.current = camera;
@@ -1278,7 +1276,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const gizmoMat = new THREE.LineBasicMaterial({ color: 0xffd700, linewidth: 3, transparent: true, opacity: 0 });
     const gizmo = new THREE.Line(gizmoGeo, gizmoMat);
     gizmo.visible = false;
-    scene.add(gizmo);
+    scene.add(groups.editor);
+    groups.editor.add(gizmo);
     selectionGizmoRef.current = gizmo;
 
     // Multi-select gizmo pool: one gold outline per selected note (lazily grown).
@@ -1288,14 +1287,20 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       while (pool.length < n) {
         const g = new THREE.Line(gizmoGeo, multiMat);
         g.visible = false;
-        scene.add(g);
+        groups.editor.add(g);
         pool.push(g);
       }
     };
     ensurePool(32);
     multiGizmosRef.current = pool;
 
-    scene.add(tunnel);
+    scene.add(groups.gameplay);
+    // fx 与 lighting 分组始终挂载到 scene：其运行时内容（打击 burst / 碎裂粒子 /
+    // 点光源）在 useParticles / allowDynamicLighting 关闭时也可能存在，必须保证
+    // 分组本身在场景图中，否则特效会因父组未挂载而不可见。
+    scene.add(groups.fx);
+    scene.add(groups.lighting);
+    groups.gameplay.add(tunnel);
 
     // === SelectiveBloom for 'high' / 'ultra' quality (if chart enables it) ===
     // SelectiveBloom = bloom applied ONLY to note meshes (tagged with
@@ -1437,7 +1442,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const field = new THREE.Points(pGeo, pMat);
       // Particles also bloom in SelectiveBloom mode — they're "light dust".
       field.layers.enable(BLOOM_LAYER);
-      scene.add(field);
+      groups.fx.add(field);
       particleFieldRef.current = field;
       particleVelRef.current = vel;
     } else {
@@ -1476,11 +1481,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const room = new THREE.Mesh(roomGeo, wallMat);
       room.position.set(0, 0, -tunnelLen / 2 + 2);
       walls.add(room);
-      scene.add(walls);
+      groups.gameplay.add(walls);
       ultraWallsRef.current = walls;
 
       // Ambient light so unlit walls are not pure black.
-      scene.add(new THREE.AmbientLight(0x3a4870, 0.6));
+      groups.lighting.add(new THREE.AmbientLight(0x3a4870, 0.6));
+      // lighting 分组已在 setup 顶部无条件 scene.add，此处仅填充内容。
 
       // Pool of 8 PointLights — repositioned each frame to follow the
       // closest notes. More than 8 hurts perf on mid-range GPUs.
@@ -1488,7 +1494,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       for (let i = 0; i < 8; i++) {
         const pl = new THREE.PointLight(0xffffff, 0, 1800, 1.6);
         pl.position.set(0, 0, -100); // parked far away when unused
-        scene.add(pl);
+        groups.lighting.add(pl);
         lightPool.push(pl);
       }
       ultraLightPoolRef.current = lightPool;
@@ -1551,20 +1557,20 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         bloomComposerRef.current = null;
       }
       if (particleFieldRef.current) {
-        scene.remove(particleFieldRef.current);
+        particleFieldRef.current.removeFromParent();
         particleFieldRef.current.geometry.dispose();
         (particleFieldRef.current.material as THREE.Material).dispose();
         particleFieldRef.current = null;
         particleVelRef.current = null;
       }
       shatterSystemsRef.current.forEach((s) => {
-        scene.remove(s.points);
+        s.points.removeFromParent();
         s.points.geometry.dispose();
         (s.points.material as THREE.Material).dispose();
       });
       shatterSystemsRef.current.length = 0;
       // Dispose ultra light pool
-      ultraLightPoolRef.current.forEach((pl) => { scene.remove(pl); });
+      ultraLightPoolRef.current.forEach((pl) => { pl.removeFromParent(); });
       ultraLightPoolRef.current = [];
       // Dispose scene background texture (bloom mode created it)
       if (scene.background instanceof THREE.Texture) {
@@ -1580,6 +1586,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       // 释放底层 WebGL context，避免反复切歌/卸载累积 GPU context（浏览器上限约 16 个）。
       renderer.forceContextLoss();
       scene.clear();
+      // 解除命名分组内子对象挂载（共享几何/材质/纹理由既有收口处理，避免重复释放）。
+      disposeSceneGroups(groups);
       // 释放缓存的软边纹理——引用它们的网格已随 scene.clear() 移除（P2-4）。
       softShapeTexCache.forEach((rec) => rec.texture.dispose());
       softShapeTexCache.clear();
@@ -1808,14 +1816,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   };
 
   const spawnBurst = (x: number, y: number, j: JudgementType, nt: NoteType, noteColorHex?: string, z: number = JUDGE_Z + 0.05, angle: number = 0) => {
-    if (!sceneRef.current) return;
-    const scene = sceneRef.current;
-    const cfg = JUDGEMENT_COLORS[j]; const g = new THREE.Group(); g.position.set(x, y, JUDGE_Z + 0.05);
+    if (!sceneRef.current || !groupsRef.current) return;
+    const fx = groupsRef.current.fx;
+    const burst = deriveBurstConfig(j, nt, sizeScaleRef.current);
+    const g = new THREE.Group();
+    g.position.set(x, y, JUDGE_Z + 0.05);
     // Rotate the burst outline to match the note's own angle (so directional
     // notes leave a directionally-oriented hit effect). Same convention as the
     // note visuals: negate because Three's +rotation.z is counterclockwise.
     g.rotation.z = -(angle ?? 0);
-    const col = new THREE.Color(cfg.hex);
+    const col = new THREE.Color(burst.colorHex);
     // 打击特效框复用同类型投影贴图，但按"判定等级"染色（而非 note 颜色）。
     const projTex = pickProj(nt);
     if (projTex) {
@@ -1833,14 +1843,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
     const visualScale = sizeScaleRef.current;
     g.scale.set(visualScale, visualScale, 1);
-    scene.add(g);
+    fx.add(g);
     activeBurstsRef.current.push({
       group: g,
       startTime: performance.now(),
-      duration: 300,
-      // cfg.scale is a relative animation multiplier (1.2 / 1.1 / 1.05).
-      scaleTarget: cfg.scale,
-      baseScale: visualScale,
+      duration: burst.duration,
+      // burst.scaleTarget is a relative animation multiplier (1.2 / 1.1 / 1.05).
+      scaleTarget: burst.scaleTarget,
+      baseScale: burst.baseScale,
     });
 
     // Ultra mode: shatter the note into many fine particles that drift apart
@@ -1849,75 +1859,22 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // slide) so it looks like the note literally broke apart. Color = note
     // color (not judgement color) so the burst matches the note's identity.
     if (allowHitEffectsRef.current && j !== 'Miss') {
-      const noteCol = new THREE.Color(noteColorHex || cfg.hex);
-      const PCOUNT = 90;
-      const pos = new Float32Array(PCOUNT * 3);
-      const vel = new Float32Array(PCOUNT * 3);
-      // Visual scale (noteSizeScale 0.6~1.0) — shatter particles must match
-      // the actual on-screen note size, otherwise the burst looks mismatched.
-      const vScale = sizeScaleRef.current;
-      // Note visual half-size, scaled by vScale to match the rendered note.
-      const baseHalf = (nt === 'touch' ? (TOUCH_SIZE / 2) : (TAP_SIZE / 2)) * vScale;
-      const slideHalf = SLIDE_HALF * vScale; // diamond half-diagonal
-      // Note z-flow speed = 36 * speedMultiplier units/sec. Shatter particles
-      // use a near-constant base speed (≈9 u/s + small note-speed fraction)
-      // and decelerate via z-damping in the update loop — gives a "burst then
-      // drift" feel rather than streaking at note speed.
-      const noteSpeed = 36 * speedRef.current;
-      const zSpeedBase = 9 + noteSpeed * 0.1;
-      const zSpeedRange = noteSpeed * 0.06;
-      // Note rotation. `angle` is ALREADY in radians (resolved by resolveChart:
-      // degrees*π/180). Same convention as the note visuals
-      // (group.rotation.z = -angle) so the shatter cloud matches the note's
-      // preset shape orientation: negate because Three's +rotation.z is
-      // counterclockwise, but we want +angle = clockwise (2D-editor convention).
-      // NOTE: do NOT multiply by π/180 again — that would shrink the rotation
-      // ~π/180× and leave the cloud effectively axis-aligned.
-      const rot = -(angle ?? 0);
-      const cosR = Math.cos(rot);
-      const sinR = Math.sin(rot);
-      for (let i = 0; i < PCOUNT; i++) {
-        // Sample a point inside the note's shape (already scaled by vScale).
-        let lx: number, ly: number;
-        if (nt === 'tap') {
-          lx = (Math.random() * 2 - 1) * baseHalf;
-          ly = (Math.random() * 2 - 1) * baseHalf;
-        } else if (nt === 'touch') {
-          const r = Math.sqrt(Math.random()) * baseHalf;
-          const a = Math.random() * Math.PI * 2;
-          lx = Math.cos(a) * r;
-          ly = Math.sin(a) * r;
-        } else {
-          const sx = (Math.random() * 2 - 1) * (slideHalf / Math.SQRT2);
-          const sy = (Math.random() * 2 - 1) * (slideHalf / Math.SQRT2);
-          lx = (sx - sy) * Math.SQRT1_2;
-          ly = (sx + sy) * Math.SQRT1_2;
-        }
-        // Rotate the sampled local position by the note's angle so particles
-        // emerge from the note's ACTUAL (rotated) silhouette, not its unrotated
-        // axis-aligned shape.
-        const rx = lx * cosR - ly * sinR;
-        const ry = lx * sinR + ly * cosR;
-        pos[i * 3]     = x + rx;
-        pos[i * 3 + 1] = y + ry;
-        pos[i * 3 + 2] = z;
-        // Slow outward drift from note center (small magnitude). Direction also
-        // follows the rotated silhouette so the burst fans outward from the
-        // rotated shape.
-        const dlen = Math.hypot(rx, ry) || 1;
-        const driftSpeed = 0.4 + Math.random() * 0.5;
-        vel[i * 3]     = (rx / dlen) * driftSpeed + (Math.random() - 0.5) * 0.15;
-        vel[i * 3 + 1] = (ry / dlen) * driftSpeed + (Math.random() - 0.5) * 0.15;
-        // Z velocity: base 9 u/s + small note-speed-scaled variation (10% of
-        // note speed as base offset, 6% as random spread). Decoupled from note
-        // speed so particles don't streak; z-damping in the update loop slows
-        // them further over their 500ms life.
-        vel[i * 3 + 2] = zSpeedBase + Math.random() * zSpeedRange;
-      }
+      const noteColHex = noteColorHex || burst.colorHex;
+      const res = deriveShatterParticles({
+        nt,
+        angle,
+        x,
+        y,
+        z,
+        visualScale,
+        speed: speedRef.current,
+        noteColorHex: noteColHex,
+        rng: Math.random,
+      });
       const sGeo = new THREE.BufferGeometry();
-      sGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      sGeo.setAttribute('position', new THREE.BufferAttribute(res.positions, 3));
       const sMat = new THREE.PointsMaterial({
-        color: noteCol,
+        color: new THREE.Color(res.colorHex),
         size: 0.16,
         map: particleSpriteRef.current,
         transparent: true,
@@ -1930,13 +1887,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const pts = new THREE.Points(sGeo, sMat);
       // Shatter particles also bloom — they're flying light shrapnel.
       pts.layers.enable(BLOOM_LAYER);
-      scene.add(pts);
+      fx.add(pts);
       shatterSystemsRef.current.push({
         points: pts,
-        velocities: vel,
+        velocities: res.velocities,
         startMs: performance.now(),
-        duration: 500, // shorter — fast brightness decay
-        color: noteCol,
+        duration: res.duration, // shorter — fast brightness decay
+        color: new THREE.Color(res.colorHex),
       });
     }
   };
@@ -1955,8 +1912,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // (dtMs<0) place the burst behind the plane (note still approaching);
     // late hits (dtMs>0) place it in front (note has passed). +0.05 keeps
     // particles just in front of the note mesh to avoid z-fighting.
-    const hitSpeed = 36 * speedRef.current;
-    const noteZ = JUDGE_Z + (dtMs / 1000) * hitSpeed + 0.05;
+    const noteZ = noteHitZ(dtMs, speedRef.current);
     spawnBurst(note.x, note.y, j, note.type, noteColor, noteZ, note.angle ?? 0);
     onJudgementRef.current?.({ id: note.id, type: j, x: note.x, y: note.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: note.type });
   };
@@ -1971,8 +1927,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (j !== 'Miss') globalAudio.playHitSound('slide');
     const noteColor = slide.color || chartRef.current.metadata.noteColor;
     // Spawn at the slide node's actual z position (see commitJudgement).
-    const hitSpeed = 36 * speedRef.current;
-    const noteZ = JUDGE_Z + (dtMs / 1000) * hitSpeed + 0.05;
+    const noteZ = noteHitZ(dtMs, speedRef.current);
     const nodeAngle = idx === 0 ? (slide.angle ?? 0) : (slide.resolvedNodes?.[idx - 1]?.angle ?? 0);
     spawnBurst(nx, ny, j, 'slide', noteColor, noteZ, nodeAngle);
     onJudgementRef.current?.({ id: key, type: j, x: nx, y: ny, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: 'slide' });
@@ -2142,21 +2097,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       for (const pid of rt.boundPointerIds) {
         const p = pointersRef.current.get(pid);
         if (p && p.down &&
-            Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) {
+            isWithinBox(p.x, p.y, nd.x, nd.y, SLIDE_HIT_HALF)) {
           onNodePids.push(pid);
         }
       }
     } else {
       for (const [pid, p] of pointersRef.current) {
         if (!p.down) continue;
-        if (Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
+        if (isWithinBox(p.x, p.y, nd.x, nd.y, SLIDE_HIT_HALF)) onNodePids.push(pid);
       }
     }
 
     // Track "has passed the zone while held" for release-judging (no time restriction).
     if (rt.boundPointerIds.size > 0 && onNodePids.length > 0) ns.everInZone = true;
 
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
+    if (withinHitWindow(dt, HIT_WINDOW_MS) && onNodePids.length > 0) {
       ns.lastInsideTime = curTime;
       ns.lastInsidePointerId = onNodePids[0];
     }
@@ -2195,10 +2150,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     //    NONE of the bound pointers are on the node,
     //    but some other held pointer IS on it → move the correct finger back to recover.
     ns.redWarn = false;
-    if (!ns.judged && rt.boundPointerIds.size > 0 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
+    if (!ns.judged && rt.boundPointerIds.size > 0 && onNodePids.length === 0 && withinHitWindow(dt, HIT_WINDOW_MS)) {
       for (const [pid, p] of pointersRef.current) {
         if (rt.boundPointerIds.has(pid) || !p.down) continue;
-        if (Math.abs(p.x - nd.x) < SLIDE_HIT_HALF && Math.abs(p.y - nd.y) < SLIDE_HIT_HALF) { ns.redWarn = true; break; }
+        if (isWithinBox(p.x, p.y, nd.x, nd.y, SLIDE_HIT_HALF)) { ns.redWarn = true; break; }
       }
     }
   };
@@ -2211,12 +2166,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (sm && sm.nodes.length === count) return sm;
     if (sm) {
       sm.nodes.forEach((nd) => {
-        scene.remove(nd.group);
-        if (nd.proj) scene.remove(nd.proj);
+        nd.group.removeFromParent();
+        if (nd.proj) nd.proj.removeFromParent();
         disposeGroup(nd.group);
         if (nd.proj) disposeGroup(nd.proj);
       });
-      sm.pipes.forEach((p) => { scene.remove(p.mesh); if (!isSharedGeo(p.geo)) p.geo.dispose(); p.mat.dispose(); });
+      sm.pipes.forEach((p) => { p.mesh.removeFromParent(); if (!isSharedGeo(p.geo)) p.geo.dispose(); p.mat.dispose(); });
     }
     const nodes: SlideMeshSet['nodes'] = [];
     for (let i = 0; i < count; i++) {
@@ -2232,9 +2187,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         group.add(innerRing);
         innerWire = innerRing.material as THREE.LineBasicMaterial;
         // 外框：软边纹理环，内径 = 内框外径（附着在内框上）。
-        const maxR = (() => { let m = 0; for (const [x, y] of SLIDE_RING_OUTER) m = Math.max(m, Math.hypot(x, y)); return m; })();
         const w = Math.max(0.001, defaultSkinOuterWidthRef.current);
-        const outerPts = SLIDE_RING_OUTER.map(([x, y]) => [x * ((maxR + w) / maxR), y * ((maxR + w) / maxR)] as RingPt);
+        const outerPts = expandRing(SLIDE_RING_OUTER, w);
         const outerRing = makeRingMesh(outerPts, w, defaultSkinOuterColorRef.current, 0, 'outer');
         group.add(outerRing);
         outerWire = outerRing.material as THREE.MeshBasicMaterial;
@@ -2268,7 +2222,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       plane.layers.enable(BLOOM_LAYER);
       group.add(plane);
       group.visible = false;
-      scene.add(group);
+      groupsRef.current?.gameplay.add(group);
 
       // Only the head node displays the judgement projection guide.
       let proj: THREE.Group | undefined;
@@ -2277,7 +2231,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         proj = mkProj('slide', colorHex);
         projMat = (proj.children[0] as THREE.Line).material as THREE.LineBasicMaterial;
         proj.visible = false;
-        scene.add(proj);
+        groupsRef.current?.gameplay.add(proj);
       }
       nodes.push({ group, innerWire, outerWire, fill, proj, projMat });
     }
@@ -2303,7 +2257,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const judgePlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), JUDGE_Z);
       const farPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), Number.NEGATIVE_INFINITY);
       mat.clippingPlanes = [judgePlane, farPlane];
-      scene.add(mesh);
+      groupsRef.current?.gameplay.add(mesh);
       pipes.push({
         mesh,
         mat,
@@ -2393,7 +2347,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       if (judgedNotesRef.current.has(n.id) || n.type !== 'tap') continue;
       const dt = Math.abs((curTime - n.timeSec) * 1000);
       if (dt >= HIT_WINDOW_MS) continue;
-      const inOwn = Math.abs(px - n.x) < TAP_HIT_HALF && Math.abs(py - n.y) < TAP_HIT_HALF;
+      const inOwn = isWithinBox(px, py, n.x, n.y, TAP_HIT_HALF);
       const inExtra = (n.extraHitRegions ?? []).some(
         (r) => Math.abs(px - r.x) < r.half && Math.abs(py - r.y) < r.half
       );
@@ -3059,7 +3013,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         if (!entry) {
           const ng = note.type === 'tap' ? mkTap(noteEffectiveColor) : mkTouch(noteEffectiveColor);
           const pg = mkProj(note.type, noteEffectiveColor); pg.position.set(note.x, note.y, JUDGE_Z + 0.01);
-          scene.add(ng); scene.add(pg);
+          groupsRef.current?.gameplay.add(ng); groupsRef.current?.gameplay.add(pg);
           entry = { group: ng, projectionGroup: pg }; noteMeshesRef.current.set(note.id, entry);
           // (Ultra note-light handled by ultraLightPoolRef — see render loop)
         }
@@ -3133,7 +3087,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const inside = isAnyPointerInside(note.x, note.y, TOUCH_HIT_HALF);
           let track = touchTrackRef.current.get(note.id);
           if (!track) { track = { lastInsideTime: null, arrivalChecked: false }; touchTrackRef.current.set(note.id, track); }
-          if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && inside) track.lastInsideTime = curTime;
+          if (withinHitWindow(dt, HIT_WINDOW_MS) && inside) track.lastInsideTime = curTime;
           // AutoPlay: judge as soon as note has passed the plane (dt >= 0). The narrow
           // 20ms window used previously would miss entirely on lower-framerate devices.
           if (autoPlayRef.current && dt >= 0) { commitJudgement(note, 'S-Perfect', dt); continue; }
@@ -3244,7 +3198,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const b = bursts[readIdx];
       const p = (now - b.startTime) / b.duration;
       if (p >= 1) {
-        scene.remove(b.group);
+        b.group.removeFromParent();
         // Skip copying → effectively removed.
         continue;
       }
@@ -3311,7 +3265,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const s = shatters[i];
       const p = (now - s.startMs) / s.duration;
       if (p >= 1) {
-        scene.remove(s.points);
+        s.points.removeFromParent();
         s.points.geometry.dispose();
         (s.points.material as THREE.Material).dispose();
         continue;
