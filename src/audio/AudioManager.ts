@@ -1,4 +1,5 @@
 import { NoteType } from '../types/game';
+import { clamp } from '../utils/math';
 
 /** Frequency response of the A-weighting curve (ANSI S1.4), expressed as a
  *  dB gain relative to 1 kHz. Input: frequency in Hz, Output: amplitude gain
@@ -688,7 +689,7 @@ export class AudioManager {
    *  across the speed change. When not playing, the rate is just stored and
    *  applied on the next play(). */
   public setPlaybackRate(rate: number): void {
-    const clamped = Math.max(0.05, Math.min(4, rate));
+    const clamped = clamp(rate, 0.05, 4);
     if (!this.isPlaying || !this.ctx) {
       this.playbackRate = clamped;
       return;

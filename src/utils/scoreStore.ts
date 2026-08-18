@@ -1,4 +1,5 @@
 import { GameStats } from '../types/game';
+import { safeStorage } from './storage';
 
 const STORAGE_KEY = 'poluxis_highscores_v1';
 
@@ -25,7 +26,7 @@ export interface HighScoreMap {
 
 function loadFromStorage(): HighScoreMap {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = safeStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     return JSON.parse(raw) as HighScoreMap;
   } catch (e) {
@@ -36,7 +37,7 @@ function loadFromStorage(): HighScoreMap {
 
 function saveToStorage(data: HighScoreMap) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    safeStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (e) {
     console.warn('Failed to save high scores:', e);
   }
@@ -147,7 +148,7 @@ export function getAllHighScores(): HighScoreMap {
 
 /** 清除所有最高分记录（慎用）。 */
 export function clearAllHighScores() {
-  localStorage.removeItem(STORAGE_KEY);
+  safeStorage.removeItem(STORAGE_KEY);
 }
 
 /**

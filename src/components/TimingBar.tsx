@@ -1,6 +1,7 @@
 import React from 'react';
 import { JudgementType } from '../types/game';
 import { JUDGEMENT_COLORS } from '../utils/scoring';
+import { clamp } from '../utils/math';
 
 export interface TimingMarker {
   id: string;
@@ -28,7 +29,7 @@ const BAR_GRADIENT = `linear-gradient(90deg,
 
 function markerPercent(m: TimingMarker): number {
   if (m.type === 'Miss') return 100; // miss appears at the far right end
-  const clamped = Math.max(-RANGE_MS, Math.min(RANGE_MS, m.dt));
+  const clamped = clamp(m.dt, -RANGE_MS, RANGE_MS);
   return ((clamped + RANGE_MS) / (RANGE_MS * 2)) * 100;
 }
 

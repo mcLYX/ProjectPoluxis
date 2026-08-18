@@ -7,6 +7,8 @@ export interface OnlineServer {
   fixed?: boolean;
 }
 
+import { safeStorage } from '../utils/storage';
+
 const KEY_USER_SERVERS = 'poluxis.userServers';
 const KEY_CURRENT = 'poluxis.currentServerId';
 
@@ -67,7 +69,7 @@ export function makeCurrentServer(): OnlineServer {
 
 function readUserServers(): OnlineServer[] {
   try {
-    const raw = localStorage.getItem(KEY_USER_SERVERS);
+    const raw = safeStorage.getItem(KEY_USER_SERVERS);
     if (raw) {
       const parsed = JSON.parse(raw) as OnlineServer[];
       if (Array.isArray(parsed)) {
@@ -83,7 +85,7 @@ function readUserServers(): OnlineServer[] {
 }
 
 function writeUserServers(servers: OnlineServer[]): void {
-  localStorage.setItem(KEY_USER_SERVERS, JSON.stringify(servers));
+  safeStorage.setItem(KEY_USER_SERVERS, JSON.stringify(servers));
 }
 
 const listeners = new Set<() => void>();
@@ -145,18 +147,18 @@ export function removeServer(id: string): void {
   const all = readUserServers().filter((s) => s.id !== id);
   writeUserServers(all);
   if (getCurrentServer()?.id === id) {
-    localStorage.setItem(KEY_CURRENT, CURRENT_SERVER_ID);
+    safeStorage.setItem(KEY_CURRENT, CURRENT_SERVER_ID);
   }
   notify();
 }
 
 export function getCurrentServer(): OnlineServer {
   const all = getServers();
-  const current = localStorage.getItem(KEY_CURRENT);
+  const current = safeStorage.getItem(KEY_CURRENT);
   return all.find((s) => s.id === current) ?? all[0];
 }
 
 export function setCurrentServer(id: string): void {
-  localStorage.setItem(KEY_CURRENT, id);
+  safeStorage.setItem(KEY_CURRENT, id);
   notify();
 }

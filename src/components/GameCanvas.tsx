@@ -314,6 +314,20 @@ const _touchSkinGeo = markShared(new THREE.PlaneGeometry(TOUCH_SIZE, TOUCH_SIZE)
 type RingPt = [number, number];
 interface SoftShapeTex { texture: THREE.CanvasTexture; size: number; }
 const softShapeTexCache = new Map<string, SoftShapeTex>();
+// 软边纹理按几何 key 缓存复用；上限防止长会话/多谱面累积（P2-4）。
+// 真实谱面内不同几何数量远小于上限，故淘汰最旧项时几乎不会命中「仍被活动网格引用」的纹理。
+const SOFT_SHAPE_TEX_CACHE_MAX = 128;
+
+function evictSoftShapeTexCache(): void {
+  while (softShapeTexCache.size > SOFT_SHAPE_TEX_CACHE_MAX) {
+    const oldestKey = softShapeTexCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const rec = softShapeTexCache.get(oldestKey);
+    if (!rec) { softShapeTexCache.delete(oldestKey); continue; }
+    rec.texture.dispose();
+    softShapeTexCache.delete(oldestKey);
+  }
+}
 
 function softShapeBBox(pts: RingPt[]) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -357,6 +371,7 @@ function makeSoftRingTexture(outer: RingPt[], thickness: number): SoftShapeTex {
   texture.anisotropy = 4;
   const record: SoftShapeTex = { texture, size };
   softShapeTexCache.set(key, record);
+  evictSoftShapeTexCache();
   return record;
 }
 
@@ -386,6 +401,7 @@ function makeSoftFillTexture(pts: RingPt[]): SoftShapeTex {
   texture.anisotropy = 4;
   const record: SoftShapeTex = { texture, size };
   softShapeTexCache.set(key, record);
+  evictSoftShapeTexCache();
   return record;
 }
 
@@ -1369,7 +1385,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
     const useParticles = allowParticlesRef.current && toggles.particles !== false;
     if (useParticles) {
-      const renderDist = noteRenderDistance; // mirrors "渲染距离" setting
+      const renderDist = renderDistRef.current; // mirrors "渲染距离" setting（经 ref 读，避免重建 renderer）
       // Density: ~1.6 particles per unit of tunnel length, capped to keep perf sane.
       const PCOUNT = Math.min(180, Math.max(40, Math.round(renderDist * 1.6)));
       const pos = new Float32Array(PCOUNT * 3);
@@ -1433,7 +1449,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         depthWrite: false,
       });
       // Single box covers the entire visible tunnel (z: +2 → -renderDist-5).
-      const tunnelLen = noteRenderDistance + 10;
+      const tunnelLen = renderDistRef.current + 10;
       const roomGeo = new THREE.BoxGeometry(8, 5.5, tunnelLen);
       const room = new THREE.Mesh(roomGeo, wallMat);
       room.position.set(0, 0, -tunnelLen / 2 + 2);
@@ -1542,6 +1558,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       // 释放底层 WebGL context，避免反复切歌/卸载累积 GPU context（浏览器上限约 16 个）。
       renderer.forceContextLoss();
       scene.clear();
+      // 释放缓存的软边纹理——引用它们的网格已随 scene.clear() 移除（P2-4）。
+      softShapeTexCache.forEach((rec) => rec.texture.dispose());
+      softShapeTexCache.clear();
       cv.removeEventListener('touchstart', onCanvasTouchStart);
       sceneRef.current = null; cameraRef.current = null; rendererRef.current = null;
       ultraWallsRef.current = null;
@@ -1550,7 +1569,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       liveDragStore.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, antialias, renderScale, allowBloom, allowParticles, allowDynamicLighting, allowHitEffects, noteRenderDistance, vpKey]);
+  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, antialias, renderScale, allowBloom, allowParticles, allowDynamicLighting, allowHitEffects, vpKey]);
 
   // ====== Quick-Create time/beat helpers =========================================
   /** Chart-clock timestamp -> beat, via the shared inverse in beatTime.ts.

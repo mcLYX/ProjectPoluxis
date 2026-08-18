@@ -17,6 +17,8 @@ import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game'
 import { getSkin, loadSkinTextures } from './data/skinStore';
 import type { EditorLaunchInfo, SongItem } from './types/beatmap';
 import { calculateNoteScore, calculateRank } from './utils/scoring';
+import { clampInt } from './utils/math';
+import { safeStorage } from './utils/storage';
 import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
 import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
 import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats } from './utils/scoreStore';
@@ -47,8 +49,7 @@ function withAlpha(hex: string, a: number): string {
 }
 function adjustBrightness(hex: string, factor: number): string {
   const { r, g, b } = hexToRgb(hex);
-  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-  return `rgb(${clamp(r * factor)}, ${clamp(g * factor)}, ${clamp(b * factor)})`;
+  return `rgb(${clampInt(r * factor, 0, 255)}, ${clampInt(g * factor, 0, 255)}, ${clampInt(b * factor, 0, 255)})`;
 }
 
 // Fallback palette (matches the previous cyan look) used when a chart doesn't
@@ -85,7 +86,7 @@ const DEFAULT_SETTINGS = {
 
 function loadSettings(): typeof DEFAULT_SETTINGS {
   try {
-    const saved = window.localStorage.getItem('poluxis-settings');
+    const saved = safeStorage.getItem('poluxis-settings');
     if (!saved) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(saved);
     const result: typeof DEFAULT_SETTINGS = { ...DEFAULT_SETTINGS };
@@ -127,13 +128,16 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
 
 function saveSettings(settings: typeof DEFAULT_SETTINGS) {
   try {
-    window.localStorage.setItem('poluxis-settings', JSON.stringify(settings));
+    safeStorage.setItem('poluxis-settings', JSON.stringify(settings));
   } catch (e) { /* ignore quota / private mode errors */ }
 }
 
 export function App() {
   const { t } = useI18n();
   const initialSettings = loadSettings();
+  // 当前正在进行的谱面加载请求（用于防快速切歌覆盖 / 卸载取消，P2-9）。
+  const loadChartAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => loadChartAbortRef.current?.abort(), []);
 
   const [currentChart, setCurrentChart] = useState<ChartData>(DEMO_CHARTS['neon-cyberspace']);
   /** 由卡片发起谱面编辑/新建时的上下文；为 null 表示自由编辑器（保存至 Editor 专辑）。 */
@@ -643,7 +647,7 @@ export function App() {
   }, []);
 
   // 依据谱面引用（idb:// 或 URL 路径）加载 ChartData；失败返回 null。
-  const loadChartFromRef = async (chartFile: string): Promise<ChartData | null> => {
+  const loadChartFromRef = async (chartFile: string, signal?: AbortSignal): Promise<ChartData | null> => {
     let text: string | null = null;
     if (chartFile.startsWith('idb://')) {
       const blob = await getFile(chartFile.slice('idb://'.length));
@@ -651,7 +655,7 @@ export function App() {
     } else {
       const url = resolveBeatmapUrl(chartFile);
       if (url) {
-        const res = await fetch(url);
+        const res = await fetch(url, signal ? { signal } : undefined);
         if (res.ok) text = await res.text();
       }
     }
@@ -692,11 +696,18 @@ export function App() {
     setSelectedNoteId(null);
     setEditorPreviewPlaying(false);
 
+    // 取消上一次可能仍在飞行的谱面加载，避免快速重入时旧请求后到覆盖新谱面（P2-9）。
+    loadChartAbortRef.current?.abort();
+    const chartLoadCtrl = new AbortController();
+    loadChartAbortRef.current = chartLoadCtrl;
+
     let chart: ChartData | null = null;
     if (info.mode === 'edit' && info.chartFile) {
       try {
-        chart = await loadChartFromRef(info.chartFile);
-      } catch {
+        chart = await loadChartFromRef(info.chartFile, chartLoadCtrl.signal);
+      } catch (e) {
+        // 被更新的加载或卸载取消：放弃本次后续状态写入，保留既有状态。
+        if (chartLoadCtrl.signal.aborted) return;
         chart = null;
       }
       if (!chart) chart = buildLaunchChart(info, false);

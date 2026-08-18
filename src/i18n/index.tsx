@@ -1,10 +1,11 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { translations, type Lang, type TranslationKey } from './translations';
+import { safeStorage } from '../utils/storage';
 
 const STORAGE_KEY = 'poluxis-lang';
 
 function detectLang(): Lang {
-  const saved = (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY)) as Lang | null;
+  const saved = safeStorage.getItem(STORAGE_KEY) as Lang | null;
   if (saved === 'zh' || saved === 'en' || saved === 'ja') return saved;
   const nav = typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : 'zh';
   if (nav.startsWith('ja')) return 'ja';
@@ -24,7 +25,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [lang, setLangState] = useState<Lang>(detectLang);
 
   useEffect(() => {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(STORAGE_KEY, lang);
+    safeStorage.setItem(STORAGE_KEY, lang);
     document.documentElement.lang = lang;
   }, [lang]);
 

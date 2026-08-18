@@ -1,6 +1,7 @@
 import type { NoteData, NoteType } from '../types/game';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { EASING_TYPES } from './easing';
+import { safeStorage } from './storage';
 
 /**
  * 编辑器“高级功能”：放置新音符时自动套用的规则（DSL 版）。
@@ -646,7 +647,7 @@ function defaultDsl(): string {
 
 export function loadEditorDsl(): string {
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
+    const raw = safeStorage.getItem(STORAGE_KEY);
     if (raw == null) return defaultDsl();
     return raw;
   } catch {
@@ -656,9 +657,7 @@ export function loadEditorDsl(): string {
 
 export function saveEditorDsl(dsl: string): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY, dsl);
-    }
+    safeStorage.setItem(STORAGE_KEY, dsl);
   } catch {
     /* localStorage 不可用时静默忽略 */
   }
