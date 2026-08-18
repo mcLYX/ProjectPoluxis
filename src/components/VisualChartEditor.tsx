@@ -322,7 +322,7 @@ function GlassDropdown<T extends string>({
             <div
               ref={popRef}
               className="fixed z-[61] glass-panel-strong rounded-xl border-white/15 p-1 space-y-0.5 max-h-52 overflow-y-auto"
-              style={{ left: rect.left, top: rect.bottom + 4, minWidth: Math.max(rect.width, 120) }}
+              style={{ left: rect.left, top: rect.bottom + 4, width: rect.width, minWidth: 120, maxWidth: 260 }}
             >
               {options.map((o) => (
                 <button
@@ -335,7 +335,7 @@ function GlassDropdown<T extends string>({
                       : 'text-white/70 hover:bg-white/10 hover:text-white'
                   }`}
                 >
-                  {o.label}
+                  <span className="block truncate">{o.label}</span>
                 </button>
               ))}
             </div>
@@ -346,29 +346,33 @@ function GlassDropdown<T extends string>({
   );
 }
 
-/** Batch-edit function selector + execute button. Holds the selected op in
- *  local state and fires onExecute when the execute button is pressed. */
+/** Batch-edit function selector + execute button. The selected op lives in
+ *  the parent's persistent state (not local), so it survives re-mounts of the
+ *  batch panel when the selection changes. */
 function BatchOpStateful<T extends string>({
+  value,
   options,
+  onSelect,
   onExecute,
   executeLabel,
 }: {
+  value: T;
   options: Array<{ value: T; label: string }>;
+  onSelect: (op: T) => void;
   onExecute: (op: T) => void;
   executeLabel: string;
 }) {
-  const [op, setOp] = useState<T>(options[0].value);
   return (
     <>
       <GlassDropdown<T>
-        value={op}
+        value={value}
         options={options}
-        onChange={(v) => setOp(v)}
+        onChange={(v) => onSelect(v)}
         className="flex-1"
         accent="amber"
       />
       <button
-        onClick={() => onExecute(op)}
+        onClick={() => onExecute(value)}
         className="shrink-0 px-3 py-1 rounded-lg border border-amber-400/40 bg-amber-500/20 text-amber-200 font-bold text-[11px] hover:bg-amber-500/35 transition cursor-pointer"
       >
         {executeLabel}
@@ -576,6 +580,10 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const [deleteArmed, setDeleteArmed] = useState(false);
   // 选中变化时自动解除删除确认状态。
   useEffect(() => { setDeleteArmed(false); }, [selectedNoteIds, isMultiSelect]);
+
+  // 批量编辑“功能”下拉当前项：持久 state，多选集合变化（面板重新挂载）
+  // 时仍保留上一次选择，不必每次重新设置。
+  const [batchOp, setBatchOp] = useState<BatchOp>('ToTap');
 
   // 手动双击检测（iOS Safari 的 onDoubleClick 不可靠）：两次 click 间隔
   // <300ms 视为双击，用于切换多选模式。
@@ -2265,7 +2273,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             <div className="flex items-center gap-2 mb-2">
               <span className="text-[10px] text-white/60 font-mono shrink-0">{t('editor.batchOp')}</span>
               <BatchOpStateful
+                value={batchOp}
                 options={batchOpOptions}
+                onSelect={(op) => setBatchOp(op)}
                 onExecute={(op) => applyBatchOp(op)}
                 executeLabel={t('editor.execute')}
               />
