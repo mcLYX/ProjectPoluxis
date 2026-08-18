@@ -60,6 +60,11 @@ export class AudioManager {
   private forceSynth: boolean = false;
   /** 单调递增的加载令牌，用于丢弃过期的音频加载结果（避免切到合成器后旧缓冲仍被应用） */
   private loadToken: number = 0;
+  /** 已解码 AudioBuffer 的 URL 缓存（P1-3）。解码结果体积大，复用避免同一谱面往返重复解码；
+   *  仅按 URL 作键，文件上传走一次性路径不进缓存。上限防止长会话/多谱面累积。
+   *  注意：AudioBuffer 无 close() 方法，淘汰时只需从 Map 移除引用交由 GC 回收。 */
+  private bufferCache = new Map<string, AudioBuffer>();
+  private static readonly BUFFER_CACHE_MAX = 8;
 
   /** Hit sound buffers keyed by note type — tap/touch/slide.ogg are loaded
    *  from /sounds/ (build-packaged) in loadBuiltinSounds() during init().
@@ -388,6 +393,16 @@ export class AudioManager {
   public async loadAudioURL(url: string, setActive = true): Promise<void> {
     this.init();
     if (!this.ctx) throw new Error('AudioContext failed to initialize');
+    // 命中 URL 缓存：直接复用已解码缓冲，避免重复 fetch + decodeAudioData。
+    const cached = this.bufferCache.get(url);
+    if (cached) {
+      if (setActive) {
+        this.bgmBuffer = cached;
+        this.hasUploadedAudio = true;
+        this.forceSynth = false;
+      }
+      return;
+    }
     const token = ++this.loadToken;
     const res = await fetch(url);
     if (token !== this.loadToken) return;
@@ -405,12 +420,52 @@ export class AudioManager {
       throw new Error(`无法解码音频: ${url}${hint}`);
     }
     if (token !== this.loadToken) return;
+    // 解码成功后入缓存（即便 setActive=false 也值得缓存，供后续 setActive 复用）。
+    this.bufferCache.set(url, audioBuffer);
+    this.evictBuffers();
     if (setActive) {
       this.bgmBuffer = audioBuffer;
       this.hasUploadedAudio = true;
       this.forceSynth = false;
     }
   }
+
+  /** 淘汰最旧的 URL 缓存项（仅移除引用，AudioBuffer 由 GC 回收，无 close()）。 */
+  private evictBuffers(): void {
+    while (this.bufferCache.size > AudioManager.BUFFER_CACHE_MAX) {
+      const oldest = this.bufferCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.bufferCache.delete(oldest);
+    }
+  }
+
+  /** 主动丢弃最旧的已解码缓冲，供内存压力场景（如长会话、移动端）调用。 */
+  public pruneBuffers(): void {
+    this.evictBuffers();
+  }
+
+  /** 进程级 / HMR 卸载时销毁：关闭 AudioContext、清空缓存与活动缓冲。
+   *  注意：本类为全局单例，组件卸载不得调用（会误伤仍依赖它的 UI 音效 / analyser）；
+   *  仅可由 import.meta.hot.dispose 或页面卸载等真正进程级卸载点调用（P1-3）。 */
+  public dispose(): void {
+    try {
+      this.stop();
+    } catch {
+      /* ignore */
+    }
+    if (this.ctx) {
+      try {
+        void this.ctx.close();
+      } catch {
+        /* ignore */
+      }
+      this.ctx = null;
+    }
+    this.bgmBuffer = null;
+    this.bufferCache.clear();
+    this.loadToken++;
+  }
+
 
   /** Mark this session as using the procedural synth (demo tracks). */
   public setSynthesizedTrack(bpm: number) {
@@ -1050,3 +1105,11 @@ export class AudioManager {
 }
 
 export const globalAudio = new AudioManager();
+
+// HMR 进程级卸载：销毁单例持有的 AudioContext，避免模块重挂时旧 ctx 累积（P1-3 / R2-2）。
+// 仅模块被热替换时触发；生产构建中 import.meta.hot 为 undefined，此分支不执行。
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    globalAudio.dispose();
+  });
+}
