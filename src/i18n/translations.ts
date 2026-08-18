@@ -619,7 +619,7 @@ export const translations: AllDicts = {
     'editor.opToTap': 'To Tap',
     'editor.opToTouch': 'To Touch',
     'editor.opToSlide': 'To Slide',
-    'editor.opMkChain': 'MkChain',
+    'editor.opMkChain': 'Make Chain',
     'editor.opSplitChain': 'Split Chain',
     'editor.opFillL': 'Fill (Linear)',
     'editor.opFillSI': 'Fill (Sine-in)',

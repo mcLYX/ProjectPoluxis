@@ -38,8 +38,10 @@ interface Editor2DCanvasProps {
   vlineCount: number;
   /** Vertical pixels between adjacent integer beats (横向 zoom for the time axis). */
   pxPerBeat: number;
-  /** Place a note. y is forced to 0 in 2D (top-down, y-axis ignored). */
-  onPlaceNote: (x: number, y: number, beat: number) => void;
+  /** Place a note. Returns the placed note/child id and its actual x/y/beat
+   *  (after DSL) — or null on failure. y defaults to 0 in 2D but can be
+   *  adjusted by dragging vertically immediately after placing. */
+  onPlaceNote: (x: number, y: number, beat: number) => { id: string; x: number; y: number; beat: number } | null;
   /** Move/resize a note or slide child node. beat may be undefined to keep it. */
   onMoveNote: (id: string, x: number, y: number, beat: number) => void;
   onSelectNote: (id: string | null) => void;
@@ -178,6 +180,17 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     multiGrabId?: string;
     /** Multi-drag: base (head) id of the grabbed note — used to toggle selection off. */
     multiGrabBaseId?: string;
+    /** Placing mode: the just-placed note can be vertically dragged to adjust Y
+     *  before releasing. */
+    isPlacing?: boolean;
+    /** Y-adjust: pointer Y at placement start (pixels). */
+    placeStartPy?: number;
+    /** Y-adjust: current applied Y value (world units). */
+    placeY?: number;
+    /** Y-adjust: original X (world units) of the placed note — kept constant. */
+    placeX?: number;
+    /** Y-adjust: original beat of the placed note — kept constant. */
+    placeBeat?: number;
   } | null>(null);
 
   /** Current marquee rectangle in CSS pixels (for drawing during drag). */
@@ -644,7 +657,18 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const beat = round9(snap(timeToBeat(t, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     const x = round9(snap(worldX, xStep));
-    onPlaceRef.current(x, 0, beat);
+    // 放置音符；返回新 note/子节点 id，以便按住不放上下拖动调整 Y 值。
+    const placed = onPlaceRef.current(x, 0, beat);
+    if (placed) {
+      // 进入 Y 调整模式：垂直拖动超过死区后按 0.1 步进调整 y。
+      // 基准为 DSL 处理后的实际 x/y/beat（placed.*）——规则可能改写 x/beat，
+      // 拖动调 Y 时保持规则结果不变，仅调整 y。
+      dragRef.current = {
+        id: placed.id, isNew: true, isScrub: false, isMarquee: false, isMultiDrag: false,
+        offBeat: 0, offX: 0, y0: placed.y, lastPy: py, moved: false, mx0: 0, my0: 0,
+        isPlacing: true, placeStartPy: py, placeY: placed.y, placeX: placed.x, placeBeat: placed.beat,
+      };
+    }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -663,6 +687,36 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       const curBeat = timeToBeat(curTime, segsRef.current);
       onSeekRef.current(curBeat + dBeat);
       drag.moved = true;
+      return;
+    }
+
+    // Placing mode: dragging vertically after placing adjusts the note's Y.
+    // A dead zone must be exceeded before any change takes effect; Y steps by 0.1.
+    // Placement rules (DSL) are unaffected — they already ran when the note was
+    // placed; this only nudges the resulting note's y.
+    if (drag.isPlacing && drag.id) {
+      const dy = py - (drag.placeStartPy ?? py);
+      const DEAD_ZONE = 15; // px before Y adjustment kicks in
+      const PX_PER_STEP = 20; // px of travel per 0.1 Y step
+      // 方向：向下拖（dy>0）减小 y，向上拖（dy<0）增大 y（下减上增）。
+      const effDy = dy > 0 ? Math.max(0, dy - DEAD_ZONE) : Math.min(0, dy + DEAD_ZONE);
+      const steps = -Math.trunc(effDy / PX_PER_STEP);
+      // 基准固定为放置时 DSL 处理后的实际 y（drag.y0），每次 move 计算绝对目标值，
+      // 而非基于已更新的 placeY 累加（否则会犯与批量拖动相同的增量累积错误）。
+      const y = round9(Math.max(-1.5, Math.min(1.5, (drag.y0 ?? 0) + steps * 0.1)));
+      if (y !== drag.placeY) {
+        drag.placeY = y;
+        drag.moved = true;
+        // Live-update visual + commit (throttled, same cadence as normal drag).
+        // x / beat are kept at their placed values; only y changes.
+        dragLiveRef.current = { id: drag.id, x: drag.placeX ?? 0, y, beat: drag.placeBeat ?? 0 };
+        liveDragStore.set({ id: drag.id, x: drag.placeX ?? 0, y, beat: drag.placeBeat ?? 0 });
+        const now = performance.now();
+        if (now - lastCommitRef.current > 90) {
+          lastCommitRef.current = now;
+          commitMove();
+        }
+      }
       return;
     }
 

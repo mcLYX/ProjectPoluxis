@@ -187,6 +187,9 @@ export function App() {
 
   // Editor State
   const [editorTool, setEditorTool] = useState<EditorTool>('select');
+  // ref 镜像当前工具：R 键等事件闭包中读取最新值。
+  const editorToolRef = useRef<EditorTool>('select');
+  useEffect(() => { editorToolRef.current = editorTool; }, [editorTool]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [batchSelection, setBatchSelection] = useState<BatchSelection>({ startBeat: null, endBeat: null });
   // 多选模式：双击“选择/移动”工具、双击 R 键、或按住 Ctrl 临时进入。
@@ -199,11 +202,21 @@ export function App() {
   useEffect(() => { selectedNoteIdsRef.current = selectedNoteIds; }, [selectedNoteIds]);
   // 2D 框选合并方式（仅多选 + 2D 生效）。
   const [marqueeMode, setMarqueeMode] = useState<MarqueeMode>('normal');
-  // Ctrl 临时多选：按住时生效，松开恢复。与 isMultiSelect 取或为“当前是否多选”。
-  // 用 state 而非 ref，以在按住/松开时触发 re-render，让子组件及时感知多选状态。
+  // Ctrl 临时切换：按住时生效，松开恢复。用 state 而非 ref，以在按住/松开时
+  // 触发 re-render，让子组件及时感知多选状态。
   const [ctrlHeld, setCtrlHeld] = useState(false);
-  /** 当前是否处于多选模式（含 Ctrl 临时多选）。供子组件判断交互分支。 */
-  const effectiveMultiSelect = isMultiSelect || ctrlHeld;
+  /** 当前是否处于多选模式（含 Ctrl 临时切换）。供子组件判断交互分支。
+   *  规则：Ctrl 按住时对持久多选状态取反——
+   *    - 非多选（含其他工具）下按 Ctrl → 临时多选；
+   *    - 多选模式下按 Ctrl → 临时变回单选；
+   *  松开 Ctrl 恢复持久状态（isMultiSelect）。 */
+  const effectiveMultiSelect = ctrlHeld ? !isMultiSelect : isMultiSelect;
+
+  /** 实际生效的工具：任何工具下按 Ctrl → 临时变为多选工具（select）。
+   *  多选模式下按 Ctrl（effectiveMultiSelect=false）时工具仍为 select，
+   *  无需切换；其余情况沿用当前工具。 */
+  const effectiveEditorTool: EditorTool =
+    ctrlHeld && !isMultiSelect ? 'select' : editorTool;
   const [snapSubdivision, setSnapSubdivision] = useState<number>(0.25);
   const [editorPreviewPlaying, setEditorPreviewPlaying] = useState(false);
   const [editorPlaybackRate, setEditorPlaybackRate] = useState<number>(1);
@@ -1080,6 +1093,8 @@ export function App() {
             return;
           }
           lastRTime = now;
+          // 单击 R 从放置工具切回 select → 退出多选（双击 R 才保留多选）。
+          if (editorToolRef.current !== 'select') setIsMultiSelect(false);
           next = 'select';
           break;
         }
@@ -1180,7 +1195,7 @@ export function App() {
   }, [gameState, editorPreviewPlaying, qualityMode]);
 
   // Visual Editor Callbacks
-  const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number) => {
+  const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number): { id: string; x: number; y: number; beat: number } | null => {
     const exactBeat = Math.round((beat ?? currentBeatRef.current) * 1000) / 1000;
 
     const noteType: NoteData['type'] =
@@ -1198,13 +1213,18 @@ export function App() {
       const newBeat = exactBeat > lastBeat + 0.001
         ? exactBeat
         : Math.round((lastBeat + step) * 1000) / 1000;
+      const childIndex = (sel.nodes ?? []).length;
       setCurrentChart((prev) => {
         const updatedNotes = prev.notes.map((n) =>
           n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x, y }] } : n
         );
         return { ...prev, notes: updatedNotes };
       });
-      return;
+      // 保持选中在链头上：多选集合同步为头节点，避免 Ctrl 切到多选后集合为空。
+      setSelectedNoteId(sel.id);
+      setSelectedNoteIds([sel.id]);
+      // 返回新子节点的 id 与 x/y/beat（slide 子节点不受 DSL 影响，即传入值）。
+      return { id: `${sel.id}#${childIndex + 1}`, x, y, beat: newBeat };
     }
 
     // Short, collision-resistant id: a 7-char base36 random (~78e9 combos).
@@ -1213,8 +1233,14 @@ export function App() {
       { id: newNoteId, beat: exactBeat, x, y, type: noteType, nodes: [] },
       editorDslRef.current
     );
+    // 统一选中数据源：单选焦点与多选集合都指向新音符，避免 Ctrl 切到多选后
+    // 该音符不被视为已选中（多选集合为空）。
     setSelectedNoteId(newNoteId);
+    setSelectedNoteIds([newNoteId]);
     setCurrentChart((prev) => ({ ...prev, notes: [...prev.notes, newNote].sort((a, b) => a.beat - b.beat) }));
+    // 返回新音符 id 与 DSL 处理后的实际 x/y/beat，供 2D 放置后仅调整 y、
+    // x/beat 使用规则结果（不再拉回拖动前的原值）。
+    return { id: newNoteId, x: newNote.x, y: newNote.y, beat: newNote.beat };
   }, [editorTool, selectedNoteId, snapSubdivision]);
 
   const handleMoveEditorNote = useCallback((id: string, x: number, y: number, beat?: number) => {
@@ -1270,6 +1296,17 @@ export function App() {
   /** 切换多选模式（双击 select 工具 / 双击 R 触发）。 */
   const handleToggleMultiSelect = useCallback(() => {
     setIsMultiSelect((v) => !v);
+  }, []);
+
+  /** 工具切换统一入口：从其他工具（放置工具）单击切回 select 时退出多选，
+   *  保证双击工具图标 / 双击 R 切回时才是多选工具；在 select 上单击不退出。 */
+  const handleSetEditorTool = useCallback((tool: EditorTool) => {
+    const prev = editorToolRef.current;
+    setEditorTool(tool);
+    // 切换到 select 且之前不是 select（发生了工具切换）→ 退出多选。
+    if (tool === 'select' && prev !== 'select') {
+      setIsMultiSelect(false);
+    }
   }, []);
 
   /** 覆盖式设置多选集合（null = 清空）。同时清空单选焦点以避免两者不一致，
@@ -1433,6 +1470,7 @@ export function App() {
     // Per spec: suppressSelection → never auto-select notes or show panel.
     // In quick-create we always suppress, so just clear any stale selection.
     setSelectedNoteId(null);
+    setSelectedNoteIds([]);
   }, []);
 
   const chartDuration = getChartDuration(currentChart);
@@ -1561,7 +1599,7 @@ export function App() {
           autoPlay={autoPlay}
           playSession={playSession}
           isEditorMode={gameState === 'editor'}
-          activeEditorTool={editorTool}
+          activeEditorTool={effectiveEditorTool}
           selectedNoteId={selectedNoteId}
           selectedNoteIds={selectedNoteIds}
           isMultiSelect={effectiveMultiSelect}
@@ -1592,7 +1630,7 @@ export function App() {
             gameTime={gameTime}
             isPlaying={editorPreviewPlaying}
             snapSubdivision={snapSubdivision}
-            activeTool={editorTool}
+            activeTool={effectiveEditorTool}
             selectedNoteId={selectedNoteId}
             isMultiSelect={effectiveMultiSelect}
             selectedNoteIds={selectedNoteIds}
@@ -1630,7 +1668,7 @@ export function App() {
           currentBeat={currentBeat}
           currentTimeSec={gameTime}
           isPlaying={editorPreviewPlaying}
-          activeTool={editorTool}
+          activeTool={effectiveEditorTool}
           selectedNoteId={selectedNoteId}
           batchSelection={batchSelection}
           isMultiSelect={effectiveMultiSelect}
@@ -1651,7 +1689,7 @@ export function App() {
           onSeekBeat={handleSeekBeat}
           onTogglePlay={handleEditorTogglePlay}
           onSetActiveTool={(tool) => {
-            setEditorTool(tool);
+            handleSetEditorTool(tool);
             if (tool === 'quick-create') {
               // Quick-create mode must not show the floating edit panel, even
               // for a note that a prior "select" tool left highlighted.

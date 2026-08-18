@@ -538,6 +538,62 @@ function assignProp(ctx: Ctx, name: string, raw: unknown): void {
 // 对外 API
 // ---------------------------------------------------------------------------
 
+/** 将 DSL 计算结果修正为合法值（统一在 applyDslToNote 出口处执行，所有
+ *  使用放置规则脚本的地方（放置、快速创建、区间规则、UseRule、子节点）都受益）。
+ *
+ *  通用：inf / NaN / null / undefined、类型不对、值不合法 → 缺省值。
+ *  - beat：允许所有非 inf 数字；值不合法时回退为未经脚本处理的原数据。
+ *  - x：范围 ±2.4。小于 -2.4（含 -inf）→ -2.4；大于 2.4（含 inf）→ 2.4；非数 → 0。
+ *  - y：范围 ±1.5，规则同 x。
+ *  - type：非法时回退原类型。
+ *  - color / easing / angle：非必需参数，出问题（类型不对/值不合法）时结果中不放该键。 */
+function sanitizeDslResult(note: NoteData, ctx: Ctx): NoteData {
+  // beat：范围 21 亿，否则回退原数据。之前只写inf会崩。
+  const beat =
+    typeof ctx.beat === 'number' && Number.isFinite(ctx.beat) && Math.abs(ctx.beat) < 2147483648
+      ? (ctx.beat as number)
+      : note.beat;
+
+  // x：±2.4。
+  let x = 0;
+  if (typeof ctx.x === 'number') {
+    if (Number.isFinite(ctx.x)) x = Math.max(-2.4, Math.min(2.4, ctx.x as number));
+    else if (ctx.x > 0) x = 2.4; // +Inf
+    else if (ctx.x < 0) x = -2.4; // -Inf
+    // NaN → 0（>0 与 <0 均 false）
+  }
+
+  // y：±1.5。
+  let y = 0;
+  if (typeof ctx.y === 'number') {
+    if (Number.isFinite(ctx.y)) y = Math.max(-1.5, Math.min(1.5, ctx.y as number));
+    else if (ctx.y > 0) y = 1.5;
+    else if (ctx.y < 0) y = -1.5;
+  }
+
+  // type：非法时回退原类型。
+  const type: NoteType =
+    ctx.type === 'tap' || ctx.type === 'touch' || ctx.type === 'slide'
+      ? (ctx.type as NoteType)
+      : note.type;
+
+  // color / angle / easing 校验。
+  const colorOk = typeof ctx.color === 'string' && (ctx.color as string).trim() !== '';
+  const angleOk = typeof ctx.angle === 'number' && Number.isFinite(ctx.angle);
+  const easingOk =
+    typeof ctx.easing === 'string' && (EASING_TYPES as readonly string[]).includes(ctx.easing);
+
+  // 从原 note 复制，逐字段替换/删除。
+  const out: NoteData = { ...note, beat, x, y, type };
+  if (colorOk) out.color = ctx.color as string;
+  else delete out.color;
+  if (angleOk) out.angle = ctx.angle as number;
+  else delete out.angle;
+  if (easingOk) out.easing = ctx.easing as NoteData['easing'];
+  else delete out.easing;
+  return out;
+}
+
 /** 对单个“新放置”的音符依次套用 DSL 全部规则（出错行静默跳过）。 */
 export function applyDslToNote(note: NoteData, dsl: string): NoteData {
   const ctx: Ctx = {
@@ -564,16 +620,7 @@ export function applyDslToNote(note: NoteData, dsl: string): NoteData {
       // 放置时不打断流程：非法行直接跳过（错误会在 lintDsl 中提示）
     }
   }
-  return {
-    ...note,
-    beat: ctx.beat as number,
-    x: ctx.x as number,
-    y: ctx.y as number,
-    type: ctx.type as NoteType,
-    color: ctx.color as string | undefined,
-    angle: ctx.angle as number | undefined,
-    easing: ctx.easing as NoteData['easing'],
-  };
+  return sanitizeDslResult(note, ctx);
 }
 
 /** 校验整段 DSL，返回带行号的语法/语义错误（用于 UI 提示）。 */
