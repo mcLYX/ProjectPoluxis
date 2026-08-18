@@ -2,15 +2,19 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementType, JudgementFeedback, NoteType, QualityMode, HitRegion, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
-import { evaluateJudgement, calculateNoteScore } from '../utils/scoring';
-import { resolveChart, resolveEvents, countPlayableNotes, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, QualityMode, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { evaluateJudgement } from '../utils/scoring';
+import { resolveChart, resolveEvents, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
-import { WORLD_UNITS_PER_SECOND, isWithinBox, noteHitZ, withinHitWindow } from '../systems/judge';
-import { deriveBurstConfig, deriveShatterParticles } from '../systems/effects';
+import { WORLD_UNITS_PER_SECOND, withinHitWindow } from '../systems/judge';
 import { expandRing, type RingPt } from '../systems/geometry';
+import { TAP_SIZE, TOUCH_SIZE, SLIDE_SIZE, SLIDE_HALF, BLOOM_LAYER, JUDGE_Z, SLIDE_HIT_HALF, HIT_WINDOW_MS, TAP_RING_OUTER, TOUCH_RING_OUTER, SLIDE_RING_OUTER } from '../gameplayConstants';
 import { createSceneGroups, disposeSceneGroups, type SceneGroups } from '../scenes/sceneGroups';
 import { usePropRefs } from '../hooks/usePropRefs';
+import type { JudgeSystemContext } from '../hooks/judgeContext';
+import { useJudgeSystem } from '../hooks/useJudgeSystem';
+import { useNoteEffects } from '../hooks/useNoteEffects';
+import { useEditorGestures } from '../hooks/useEditorGestures';
 
 import { globalAudio } from '../audio/AudioManager';
 import { liveDragStore } from '../liveDragStore';
@@ -80,21 +84,11 @@ interface GameCanvasProps {
   defaultSkinJudgeWidth?: number;
 }
 
-const TAP_SIZE = 1.6;
-const TOUCH_SIZE = TAP_SIZE * 0.707;
-const SLIDE_SIZE = TAP_SIZE * 0.707; // slide diamond edge = 0.707x tap
-const SLIDE_HALF = (SLIDE_SIZE * Math.SQRT2) / 2; // half-diagonal of the 45°-rotated square
+// 共享游戏常数（TAP_SIZE/SLIDE_HALF/BLOOM_LAYER/JUDGE_Z/判定窗口/ring 外观等）
+// 已统一收敛到 ../gameplayConstants，此处仅保留本地派生项。
 // Pipe cross-section is a diamond slightly smaller than the slide node itself.
 const SLIDE_PIPE_HALF = SLIDE_HALF * 0.82;
-/** Layer index used by SelectiveBloom — note meshes are added to this layer
- *  so the bloom camera (which only sees this layer) renders ONLY notes,
- *  not tunnel lines, projections, or burst outlines. */
-const BLOOM_LAYER = 1;
-const JUDGE_Z = 0;
-const TAP_HIT_HALF = 1.2;
 const TOUCH_HIT_HALF = 1.0;
-const SLIDE_HIT_HALF = 1.2;
-const HIT_WINDOW_MS = 160;
 const SLIDE_RED = '#ff0000';
 
 const CAMERA_VFOV = 52;
@@ -441,28 +435,6 @@ function makeSoftFillMesh(pts: RingPt[], color: string | THREE.Color, opacity: n
   mesh.layers.enable(BLOOM_LAYER);
   return mesh;
 }
-const TAP_RING_OUTER: RingPt[] = [
-  [-TAP_SIZE / 2, -TAP_SIZE / 2],
-  [TAP_SIZE / 2, -TAP_SIZE / 2],
-  [TAP_SIZE / 2, TAP_SIZE / 2],
-  [-TAP_SIZE / 2, TAP_SIZE / 2],
-];
-const TOUCH_RING_OUTER: RingPt[] = (() => {
-  const rad = TOUCH_SIZE / 2;
-  const pts: RingPt[] = [];
-  for (let i = 0; i < 40; i++) {
-    const a = (i / 40) * Math.PI * 2;
-    pts.push([Math.cos(a) * rad, Math.sin(a) * rad]);
-  }
-  return pts;
-})();
-const SLIDE_RING_OUTER: RingPt[] = [
-  [0, -SLIDE_HALF],
-  [SLIDE_HALF, 0],
-  [0, SLIDE_HALF],
-  [-SLIDE_HALF, 0],
-];
-
 // ---------------------------------------------------------------------------
 // 音符描边改用 THREE.Line（旧版渲染）：WebGL 中 LineBasicMaterial.linewidth 在
 // 几乎所有平台都被忽略，描边恒为 ~1px 屏幕像素 —— 粗细不随音符距离变化，远处
@@ -522,7 +494,7 @@ interface SlideNodeRt {
 }
 
 /** Runtime state per slide chain */
-interface SlideRt {
+export interface SlideRt {
   boundPointerIds: Set<number>;
   nodes: SlideNodeRt[];
 }
@@ -1815,348 +1787,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     return g;
   };
 
-  const spawnBurst = (x: number, y: number, j: JudgementType, nt: NoteType, noteColorHex?: string, z: number = JUDGE_Z + 0.05, angle: number = 0) => {
-    if (!sceneRef.current || !groupsRef.current) return;
-    const fx = groupsRef.current.fx;
-    const burst = deriveBurstConfig(j, nt, sizeScaleRef.current);
-    const g = new THREE.Group();
-    g.position.set(x, y, JUDGE_Z + 0.05);
-    // Rotate the burst outline to match the note's own angle (so directional
-    // notes leave a directionally-oriented hit effect). Same convention as the
-    // note visuals: negate because Three's +rotation.z is counterclockwise.
-    g.rotation.z = -(angle ?? 0);
-    const col = new THREE.Color(burst.colorHex);
-    // 打击特效框复用同类型投影贴图，但按"判定等级"染色（而非 note 颜色）。
-    const projTex = pickProj(nt);
-    if (projTex) {
-      const size = projSize(nt);
-      const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(size, size),
-        new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.95, map: projTex, alphaTest: 0.02, depthWrite: false, side: THREE.DoubleSide }),
-      );
-      mesh.layers.enable(BLOOM_LAYER);
-      g.add(mesh);
-    } else {
-      // 默认外观：用软边环形当作打击框，粗细使用判定框宽度。
-      const outer = nt === 'tap' ? TAP_RING_OUTER : nt === 'touch' ? TOUCH_RING_OUTER : SLIDE_RING_OUTER;
-      g.add(makeRingMesh(outer, defaultSkinJudgeWidthRef.current, col, 0.95));
-    }
-    const visualScale = sizeScaleRef.current;
-    g.scale.set(visualScale, visualScale, 1);
-    fx.add(g);
-    activeBurstsRef.current.push({
-      group: g,
-      startTime: performance.now(),
-      duration: burst.duration,
-      // burst.scaleTarget is a relative animation multiplier (1.2 / 1.1 / 1.05).
-      scaleTarget: burst.scaleTarget,
-      baseScale: burst.baseScale,
-    });
-
-    // Ultra mode: shatter the note into many fine particles that drift apart
-    // slowly with fast brightness decay. Particle INITIAL positions sample
-    // the note's own shape (square for tap, circle for touch, diamond for
-    // slide) so it looks like the note literally broke apart. Color = note
-    // color (not judgement color) so the burst matches the note's identity.
-    if (allowHitEffectsRef.current && j !== 'Miss') {
-      const noteColHex = noteColorHex || burst.colorHex;
-      const res = deriveShatterParticles({
-        nt,
-        angle,
-        x,
-        y,
-        z,
-        visualScale,
-        speed: speedRef.current,
-        noteColorHex: noteColHex,
-        rng: Math.random,
-      });
-      const sGeo = new THREE.BufferGeometry();
-      sGeo.setAttribute('position', new THREE.BufferAttribute(res.positions, 3));
-      const sMat = new THREE.PointsMaterial({
-        color: new THREE.Color(res.colorHex),
-        size: 0.16,
-        map: particleSpriteRef.current,
-        transparent: true,
-        opacity: 1.0,
-        sizeAttenuation: true,
-        alphaTest: 0.0,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      });
-      const pts = new THREE.Points(sGeo, sMat);
-      // Shatter particles also bloom — they're flying light shrapnel.
-      pts.layers.enable(BLOOM_LAYER);
-      fx.add(pts);
-      shatterSystemsRef.current.push({
-        points: pts,
-        velocities: res.velocities,
-        startMs: performance.now(),
-        duration: res.duration, // shorter — fast brightness decay
-        color: new THREE.Color(res.colorHex),
-      });
-    }
+  // R4-2: 判定/特效/编辑器手势逻辑已迁出为独立 hook（useJudgeSystem / useNoteEffects /
+  // useEditorGestures）。此处构造强类型 JudgeSystemContext 聚合全部依赖 ref 与 helper，
+  // 再实例化 hook；返回的闭包签名与迁移前完全一致，行为零变化。
+  const judgeCtx: JudgeSystemContext = {
+    sceneRef, groupsRef, sizeScaleRef, defaultSkinJudgeWidthRef, activeBurstsRef,
+    allowHitEffectsRef, speedRef, particleSpriteRef, shatterSystemsRef,
+    isEditorModeRef, judgedNotesRef, judgedCountRef, chartRef, currentNoteColorRef,
+    onJudgementRef, slideStateRef, playStartTimeRef, pointersRef, autoPlayRef,
+    resolvedRef, isPlayingRef, isPausedRef, gameTimeRef, activeToolRef,
+    onPlaceEditorNoteRef, onSelectEditorNoteRef, isDraggingRef,
+    getAllNodes, makeRingMesh, pickProj, projSize, chartTimeToBeat,
   };
-
-  const commitJudgement = (note: ResolvedNote, j: JudgementType, dtMs: number) => {
-    if (isEditorModeRef.current) return;
-    if (judgedNotesRef.current.has(note.id)) return;
-    judgedNotesRef.current.add(note.id);
-    judgedCountRef.current++;
-    const sc = calculateNoteScore(j, countPlayableNotes(chartRef.current));
-    if (j !== 'Miss') globalAudio.playHitSound(note.type);
-    // Note color = per-note override, then event-driven current color, then chart default.
-    const noteColor = note.color || currentNoteColorRef.current || chartRef.current.metadata.noteColor;
-    // Spawn the burst at the note's ACTUAL z position when hit, not at the
-    // judgement plane. noteZ = JUDGE_Z + (dtMs/1000)*speed: early hits
-    // (dtMs<0) place the burst behind the plane (note still approaching);
-    // late hits (dtMs>0) place it in front (note has passed). +0.05 keeps
-    // particles just in front of the note mesh to avoid z-fighting.
-    const noteZ = noteHitZ(dtMs, speedRef.current);
-    spawnBurst(note.x, note.y, j, note.type, noteColor, noteZ, note.angle ?? 0);
-    onJudgementRef.current?.({ id: note.id, type: j, x: note.x, y: note.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: note.type });
-  };
-
-  const commitSlideNode = (slide: ResolvedNote, idx: number, nx: number, ny: number, j: JudgementType, dtMs: number) => {
-    if (isEditorModeRef.current) return;
-    const key = `${slide.id}#${idx}`;
-    if (judgedNotesRef.current.has(key)) return;
-    judgedNotesRef.current.add(key);
-    judgedCountRef.current++;
-    const sc = calculateNoteScore(j, countPlayableNotes(chartRef.current));
-    if (j !== 'Miss') globalAudio.playHitSound('slide');
-    const noteColor = slide.color || chartRef.current.metadata.noteColor;
-    // Spawn at the slide node's actual z position (see commitJudgement).
-    const noteZ = noteHitZ(dtMs, speedRef.current);
-    const nodeAngle = idx === 0 ? (slide.angle ?? 0) : (slide.resolvedNodes?.[idx - 1]?.angle ?? 0);
-    spawnBurst(nx, ny, j, 'slide', noteColor, noteZ, nodeAngle);
-    onJudgementRef.current?.({ id: key, type: j, x: nx, y: ny, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: 'slide' });
-  };
-
-  const getSlideRt = (id: string, nodeCount: number): SlideRt => {
-    let rt = slideStateRef.current.get(id);
-    if (!rt || rt.nodes.length !== nodeCount) {
-      rt = {
-        boundPointerIds: new Set(),
-        nodes: Array.from({ length: nodeCount }, () => ({
-          judged: false,
-          missLocked: false,
-          everInZone: false,
-          lastInsideTime: null,
-          lastInsidePointerId: null,
-          arrivalChecked: false,
-          redWarn: false,
-          tailLockedSPerfect: false,
-        })),
-      };
-      slideStateRef.current.set(id, rt);
-    }
-    return rt;
-  };
-
-  /**
-   * Simplified Slide chain judgement (per latest spec):
-   * - Nodes behave like Touch but require the pointer to be HELD.
-   * - Once a node is judged, EVERY finger currently on that node becomes bound; any of the
-   *   bound fingers can judge later nodes (multi-finger support, solves overlapping-node cases).
-   * - A bound finger that lifts (released) is removed. A bound finger still down but off the
-   *   current node is dropped ONLY when at least one other bound finger is already on that node;
-   *   if no bound finger is on the node yet (e.g. fingers still at a shared start, or travelling
-   *   between nodes) all bindings are kept, so the chain never loses the finger that will service
-   *   the next node (this is what makes split slides from a shared start work).
-   * - On release of the LAST remaining bound pointer, the *next unjudged node* is immediately
-   *   locked red and will be judged as Late Miss after +160ms, regardless of position.
-   * - No Early Miss on release. A normal Miss does NOT clear the binding.
-   */
-  const processSlide = (note: ResolvedNote, curTime: number) => {
-    // Cached: avoids rebuilding [head, ...resolvedNodes] every frame.
-    const allNodes = getAllNodes(note);
-    const rt = getSlideRt(note.id, allNodes.length);
-
-    // 1) Late-miss every unjudged node past +160ms (incl. missLocked ones)
-    for (let i = 0; i < allNodes.length; i++) {
-      const ns = rt.nodes[i];
-      if (ns.judged) continue;
-      // 从谱面中间试玩：起点之前（且未被 resetPlayState 预标记）的节点直接标记
-      // 已判定、不产生 Miss 框——它们是开局前就已越过的音符。
-      if (allNodes[i].timeSec < playStartTimeRef.current) {
-        ns.judged = true;
-        ns.redWarn = false;
-        continue;
-      }
-      const dtI = (curTime - allNodes[i].timeSec) * 1000;
-      if (dtI > HIT_WINDOW_MS) {
-        ns.judged = true;
-        ns.redWarn = false;
-        commitSlideNode(note, i, allNodes[i].x, allNodes[i].y, 'Miss', dtI);
-        // A miss does not change the binding of subsequent nodes.
-      }
-    }
-
-    // 2) Simplified release detection (per new spec):
-    // Once ALL bound pointers are released, the *next unjudged node* is immediately
-    // locked red and will be judged as Late Miss after +160ms, regardless of position.
-    // No more "judge at release time" or Early Miss on release.
-    // EXCEPTION: If the next node is a tail node already locked for S-Perfect
-    // (tailLockedSPerfect), skip missLocked — the player held through the end.
-    // nextIdx / current node are needed both here (move-away removal) and in step 3.
-    const nextIdx = rt.nodes.findIndex((n) => !n.judged);
-    const ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
-
-    if (rt.boundPointerIds.size > 0) {
-      // Remove released pointers from the bound set
-      let allReleased = true;
-      for (const pid of rt.boundPointerIds) {
-        const bp = pointersRef.current.get(pid);
-        if (bp && bp.down) {
-          allReleased = false;
-        } else {
-          rt.boundPointerIds.delete(pid);
-        }
-      }
-      // Multi-finger binding: a bound finger that is still down but has slid off the
-      // current node is a candidate to be dropped. HOWEVER we must NOT prune during the
-      // moment two chains share a start node and the fingers haven't diverged yet (e.g. a
-      // split slide where both fingers are still sitting on the shared head, so neither is
-      // on either chain's NEXT node). Pruning then would keep, by insertion order, the
-      // finger heading the WRONG way and permanently drop the correct one.
-      // Fix: only drop off-node fingers when at least ONE bound finger is already on the
-      // current node. If none are on it yet (all still travelling / at a shared start),
-      // keep every binding so the correct finger is retained until it arrives.
-      if (ndForCheck && rt.boundPointerIds.size > 0) {
-        const onNodeBound: number[] = [];
-        const offNodeBound: number[] = [];
-        for (const pid of rt.boundPointerIds) {
-          const bp = pointersRef.current.get(pid);
-          const onNode = !!bp && bp.down &&
-            Math.abs(bp.x - ndForCheck.x) < SLIDE_HIT_HALF &&
-            Math.abs(bp.y - ndForCheck.y) < SLIDE_HIT_HALF;
-          (onNode ? onNodeBound : offNodeBound).push(pid);
-        }
-        if (onNodeBound.length > 0) {
-          for (const pid of offNodeBound) rt.boundPointerIds.delete(pid);
-        }
-      }
-      if (allReleased && rt.boundPointerIds.size === 0 && nextIdx >= 0) {
-        const ns = rt.nodes[nextIdx];
-        if (!ns.judged && !ns.tailLockedSPerfect) {
-          ns.missLocked = true;
-          ns.redWarn = false;
-        }
-      }
-    }
-
-    // 3) Interact with the current next node (nextIdx / ndForCheck hoisted above)
-    if (nextIdx < 0) return;
-    const ns = rt.nodes[nextIdx];
-    const nd = allNodes[nextIdx];
-    const dt = (curTime - nd.timeSec) * 1000;
-
-    if (autoPlayRef.current) {
-      // AutoPlay: judge as soon as the slide node has passed the plane (dt >= 0).
-      if (dt >= 0 && !ns.judged) {
-        ns.judged = true;
-        commitSlideNode(note, nextIdx, nd.x, nd.y, 'S-Perfect', dt);
-      }
-      ns.redWarn = false;
-      return;
-    }
-
-    if (ns.missLocked) { ns.redWarn = false; return; }
-
-    // --- Tail-node special rule ---
-    // The last slide node has a relaxed judgement: if ANY bound pointer is still
-    // on screen (anywhere) when the node enters the hit window (-160ms), lock it
-    // as S-Perfect. The player just needs to hold through the end without lifting.
-    const isTail = nextIdx === allNodes.length - 1;
-    if (isTail && !ns.tailLockedSPerfect && dt >= -HIT_WINDOW_MS) {
-      // Check if ANY bound pointer is still on screen (down === true).
-      // Free chain (no binding yet) → any held pointer counts.
-      if (rt.boundPointerIds.size > 0) {
-        for (const pid of rt.boundPointerIds) {
-          const bp = pointersRef.current.get(pid);
-          if (bp && bp.down) {
-            ns.tailLockedSPerfect = true;
-            break;
-          }
-        }
-      } else {
-        // No binding yet: if any pointer is held, lock it.
-        for (const [, p] of pointersRef.current) {
-          if (p.down) { ns.tailLockedSPerfect = true; break; }
-        }
-      }
-    }
-
-    // Which pointers may judge this node? Bound chain → any bound pointer; free chain → any held pointer.
-    // Collect EVERY finger currently on the node (multi-finger binding): each eligible finger inside the
-    // hit box is a candidate, not just the first one. Overlapping nodes are then each serviced by
-    // whatever finger covers them.
-    const onNodePids: number[] = [];
-    if (rt.boundPointerIds.size > 0) {
-      for (const pid of rt.boundPointerIds) {
-        const p = pointersRef.current.get(pid);
-        if (p && p.down &&
-            isWithinBox(p.x, p.y, nd.x, nd.y, SLIDE_HIT_HALF)) {
-          onNodePids.push(pid);
-        }
-      }
-    } else {
-      for (const [pid, p] of pointersRef.current) {
-        if (!p.down) continue;
-        if (isWithinBox(p.x, p.y, nd.x, nd.y, SLIDE_HIT_HALF)) onNodePids.push(pid);
-      }
-    }
-
-    // Track "has passed the zone while held" for release-judging (no time restriction).
-    if (rt.boundPointerIds.size > 0 && onNodePids.length > 0) ns.everInZone = true;
-
-    if (withinHitWindow(dt, HIT_WINDOW_MS) && onNodePids.length > 0) {
-      ns.lastInsideTime = curTime;
-      ns.lastInsidePointerId = onNodePids[0];
-    }
-
-    if (dt >= 0 && !ns.judged) {
-      // Tail-node locked S-Perfect: any bound pointer is on screen → instant S-Perfect.
-      // Doesn't require being in the spatial zone, just holding through the end.
-      if (isTail && ns.tailLockedSPerfect) {
-        ns.judged = true;
-        // If no binding yet, bind all currently held pointers.
-        if (rt.boundPointerIds.size === 0) {
-          for (const [pid, p] of pointersRef.current) {
-            if (p.down) rt.boundPointerIds.add(pid);
-          }
-        }
-        commitSlideNode(note, nextIdx, nd.x, nd.y, 'S-Perfect', dt);
-      } else if (!ns.arrivalChecked) {
-        ns.arrivalChecked = true;
-        if (onNodePids.length > 0) {
-          ns.judged = true;
-          // Bind EVERY finger on the node (multi-finger).
-          for (const pid of onNodePids) rt.boundPointerIds.add(pid);
-          commitSlideNode(note, nextIdx, nd.x, nd.y, 'S-Perfect', dt);
-        }
-      } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
-        const j = evaluateJudgement(dt);
-        if (j) {
-          ns.judged = true;
-          for (const pid of onNodePids) rt.boundPointerIds.add(pid);
-          commitSlideNode(note, nextIdx, nd.x, nd.y, j, dt);
-        }
-      }
-    }
-
-    // 4) Red warning (recoverable): in time window, chain has bindings,
-    //    NONE of the bound pointers are on the node,
-    //    but some other held pointer IS on it → move the correct finger back to recover.
-    ns.redWarn = false;
-    if (!ns.judged && rt.boundPointerIds.size > 0 && onNodePids.length === 0 && withinHitWindow(dt, HIT_WINDOW_MS)) {
-      for (const [pid, p] of pointersRef.current) {
-        if (rt.boundPointerIds.has(pid) || !p.down) continue;
-        if (isWithinBox(p.x, p.y, nd.x, nd.y, SLIDE_HIT_HALF)) { ns.redWarn = true; break; }
-      }
-    }
-  };
+  const spawnBurst = useNoteEffects(judgeCtx);
+  const { commitJudgement, getSlideRt, processSlide } = useJudgeSystem(judgeCtx, spawnBurst);
+  const handlePointerInteraction = useEditorGestures(judgeCtx, commitJudgement);
 
   const ensureSlideMeshes = (note: ResolvedNote, colorHex: string): SlideMeshSet | null => {
     const scene = sceneRef.current;
@@ -2274,128 +1919,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     sm = { nodes, pipes };
     slideMeshesRef.current.set(note.id, sm);
     return sm;
-  };
-
-  const handlePointerInteraction = (px: number, py: number) => {
-    if (isEditorModeRef.current) {
-      const tool = activeToolRef.current;
-      if (tool === 'place-tap' || tool === 'place-touch' || tool === 'place-slide') {
-        const clampedX = Math.round(THREE.MathUtils.clamp(px, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
-        const clampedY = Math.round(THREE.MathUtils.clamp(py, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
-        onPlaceEditorNoteRef.current?.(clampedX, clampedY);
-        return;
-      }
-
-      // Select / Move tool — heads and slide child nodes are all selectable near current time.
-      const notes = resolvedRef.current;
-      let clickedId: string | null = null;
-      let bestDist = Number.POSITIVE_INFINITY;
-      // Read time from the audio clock when playing (same source as tick),
-      // fall back to gameTimeRef when paused/editor scrubbing. Must NOT rely
-      // solely on gameTimeRef because React.memo skips gameTime prop updates
-      // during playback → ref stays stale → selection would target wrong beat.
-      const curTime = (isPlayingRef.current && !isPausedRef.current)
-        ? globalAudio.getCurrentTime()
-        : gameTimeRef.current;
-      const curBeat = chartTimeToBeat(curTime);
-
-      for (const n of notes) {
-        const candidates: Array<{ id: string; x: number; y: number; beat: number; r: number }> =
-          n.type === 'slide'
-            ? [
-                { id: n.id, x: n.x, y: n.y, beat: n.beat, r: 0.7 },
-                ...(n.resolvedNodes ?? []).map((sn, i) => ({
-                  id: `${n.id}#${i + 1}`, x: sn.x, y: sn.y, beat: sn.beat, r: 0.7,
-                })),
-              ]
-            : [{ id: n.id, x: n.x, y: n.y, beat: n.beat, r: n.type === 'tap' ? 0.85 : 0.65 }];
-        for (const c of candidates) {
-          // Changed: only allow selecting notes in the range of [curBeat - 0.1, curBeat + 0.5]
-          // so the user cannot accidentally select overdue past notes that are already gone.
-          if (c.beat < curBeat - 0.1 || c.beat > curBeat + 0.5) continue;
-          const d = Math.hypot(px - c.x, py - c.y);
-          if (d < c.r && d < bestDist) { clickedId = c.id; bestDist = d; }
-        }
-      }
-
-      if (clickedId) {
-        onSelectEditorNoteRef.current?.(clickedId);
-        isDraggingRef.current = false;
-      } else {
-        onSelectEditorNoteRef.current?.(null);
-      }
-      return;
-    }
-
-    // Normal Gameplay: tap hit — earliest note wins when windows overlap
-    if (!isPlayingRef.current || isPausedRef.current) return;
-    // Read audio time directly from the audio clock. Must NOT use gameTimeRef
-    // here because React.memo skips gameTime prop updates during playback →
-    // ref stays at initial value → all notes appear outside the hit window →
-    // taps never register. The tick() function uses the same source for motion,
-    // so judgement and visuals are perfectly synchronized.
-    const curTime = globalAudio.getCurrentTime();
-    const notes = resolvedRef.current;
-    // 方案二: overlap-aware tap judgment.
-    // A tap is "hittable" if the touch point falls inside its own box OR any of
-    // its merged extra hit regions. Among all hittable same-time taps, pick the
-    // one closest to the touch point (tie-break by id) and consume it; then merge
-    // the consumed tap's own box into every other hittable tap the point overlapped,
-    // so subsequent presses on the overlap can still reach them.
-    const overlapSet: ResolvedNote[] = [];
-    for (const n of notes) {
-      if (judgedNotesRef.current.has(n.id) || n.type !== 'tap') continue;
-      const dt = Math.abs((curTime - n.timeSec) * 1000);
-      if (dt >= HIT_WINDOW_MS) continue;
-      const inOwn = isWithinBox(px, py, n.x, n.y, TAP_HIT_HALF);
-      const inExtra = (n.extraHitRegions ?? []).some(
-        (r) => Math.abs(px - r.x) < r.half && Math.abs(py - r.y) < r.half
-      );
-      if (inOwn || inExtra) overlapSet.push(n);
-    }
-    let best: ResolvedNote | null = null;
-    let bestDist = Infinity;
-    // Selection rule (fixes late-tap swallow bug): when the touch point lands
-    // inside the hitbox of taps at DIFFERENT times (neighbouring close taps with
-    // overlapping TAP_HIT_HALF boxes), prefer the MOST LATE one — the tap closest
-    // to its miss deadline is the one the player is racing to rescue. Judging the
-    // nearer-but-later tap first would swallow the earlier late tap (e.g. note-291
-    // late but note-292 closer → 292 got judged, 291 dropped). Within the chosen
-    // time group (truly same-time overlapping taps) fall back to 方案二: pick the
-    // closest to the touch point, then merge hitboxes. Times are numeric and
-    // id-independent (ids can be arbitrary strings).
-    let bestLate = -Infinity;
-    let bestTimeSec = Infinity;
-    for (const n of overlapSet) {
-      const late = curTime - n.timeSec; // seconds, signed; larger = later
-      if (late > bestLate) { bestLate = late; bestTimeSec = n.timeSec; }
-    }
-    for (const n of overlapSet) {
-      if (n.timeSec !== bestTimeSec) continue; // only the most-late time group
-      const d = Math.hypot(px - n.x, py - n.y);
-      if (d < bestDist || (d === bestDist && best !== null && n.timeSec < best.timeSec)) {
-        best = n;
-        bestDist = d;
-      }
-    }
-    if (best) {
-      const dt = (curTime - best.timeSec) * 1000;
-      const j = evaluateJudgement(dt);
-      if (j) {
-        commitJudgement(best, j, dt);
-        // Merge the consumed tap's own box ONLY into other taps at the SAME
-        // timeSec (方案二). Never cross time windows: a tap at a different beat
-        // must keep its own hitbox, otherwise its hit area would be polluted and
-        // trigger false/early hits later (e.g. note-9 / note-10 same position).
-        const merged: HitRegion = { x: best.x, y: best.y, half: TAP_HIT_HALF };
-        for (const other of overlapSet) {
-          if (other === best || other.timeSec !== best.timeSec) continue;
-          const regions = other.extraHitRegions ?? (other.extraHitRegions = []);
-          const dup = regions.some((r) => r.x === merged.x && r.y === merged.y && r.half === merged.half);
-          if (!dup) regions.push(merged);
-        }
-      }
-    }
   };
 
   const tick = () => {
