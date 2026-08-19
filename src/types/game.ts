@@ -240,6 +240,11 @@ export interface GameStats {
   perfectCount: number;
   goodCount: number;
   missCount: number;
+  // early/late 拆分（Perfect 含 S-Perfect，good 仅 Good 档）。
+  perfectEarly: number;
+  perfectLate: number;
+  goodEarly: number;
+  goodLate: number;
   totalNotes: number;
   accuracy: number; // 0 to 100
   rank: 'EX+' | 'EX' | 'S' | 'A' | 'B' | 'C' | 'F';

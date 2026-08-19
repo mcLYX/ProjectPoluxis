@@ -141,7 +141,12 @@ export const SongCard: React.FC<SongCardProps> = ({
   const [coverError, setCoverError] = useState(false);
   const [showDiffMenu, setShowDiffMenu] = useState(false);
   const [editDiffIdx, setEditDiffIdx] = useState(0);
+  // 结算卡片：点击 PERFECT/GOOD 在「数量」与「early/late 拆分」间切换。
+  const [split, setSplit] = useState<'perfect' | 'good' | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
+
+  // 每次结算结果变化时重置拆分视图，避免切歌后残留旧状态。
+  useEffect(() => { setSplit(null); }, [resultData]);
 
   const accent = getAccent(item);
   const inResult = isExpanded && !!resultData;
@@ -465,20 +470,44 @@ export const SongCard: React.FC<SongCardProps> = ({
               {Math.round(resultData.stats.score).toLocaleString()}
             </div>
 
-            {/* Perfect merges S-Perfect: "15(+7)" */}
+            {/* Perfect merges S-Perfect: "15(+7)"；点击切换为 early/late 拆分 E/L */}
             <div className="grid grid-cols-3 gap-1.5 mb-1.5 short:mb-1">
-              <div className="rounded-lg bg-white/5 border border-yellow-500/40 py-1.5 short:py-1">
+              <div
+                onClick={() => setSplit((s) => (s === 'perfect' ? null : 'perfect'))}
+                className="rounded-lg bg-white/5 border border-yellow-500/40 py-1.5 short:py-1 cursor-pointer hover:bg-white/10 active:scale-95 transition select-none"
+              >
                 <div className="text-yellow-300 text-[10px] font-bold tracking-wider">PERFECT</div>
                 <div className="font-mono font-bold text-white text-sm">
-                  {resultData.stats.perfectCount + resultData.stats.sPerfectCount}
-                  {resultData.stats.sPerfectCount > 0 && (
-                    <span className="text-orange-400">(+{resultData.stats.sPerfectCount})</span>
+                  {split === 'perfect' ? (
+                    <span>
+                      <span className="text-cyan-300">E{resultData.stats.perfectEarly}</span>{' '}
+                      <span className="text-red-300">L{resultData.stats.perfectLate}</span>
+                    </span>
+                  ) : (
+                    <>
+                      {resultData.stats.perfectCount + resultData.stats.sPerfectCount}
+                      {resultData.stats.sPerfectCount > 0 && (
+                        <span className="text-orange-400">(+{resultData.stats.sPerfectCount})</span>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
-              <div className="rounded-lg bg-white/5 border border-sky-500/40 py-1.5 short:py-1">
+              <div
+                onClick={() => setSplit((s) => (s === 'good' ? null : 'good'))}
+                className="rounded-lg bg-white/5 border border-sky-500/40 py-1.5 short:py-1 cursor-pointer hover:bg-white/10 active:scale-95 transition select-none"
+              >
                 <div className="text-sky-400 text-[10px] font-bold tracking-wider">GOOD</div>
-                <div className="font-mono font-bold text-white text-sm">{resultData.stats.goodCount}</div>
+                <div className="font-mono font-bold text-white text-sm">
+                  {split === 'good' ? (
+                    <span>
+                      <span className="text-cyan-300">E{resultData.stats.goodEarly}</span>{' '}
+                      <span className="text-red-300">L{resultData.stats.goodLate}</span>
+                    </span>
+                  ) : (
+                    resultData.stats.goodCount
+                  )}
+                </div>
               </div>
               <div className="rounded-lg bg-white/5 border border-red-500/40 py-1.5 short:py-1">
                 <div className="text-red-400 text-[10px] font-bold tracking-wider">MISS</div>

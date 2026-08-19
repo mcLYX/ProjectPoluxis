@@ -275,7 +275,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   const [stats, setStats] = useState<GameStats>({
-    score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
+    score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0, perfectEarly: 0, perfectLate: 0, goodEarly: 0, goodLate: 0,
     goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: calculateRank(0),
   });
   // R4-5: stats 镜像 ref。handleSongEnd 需读取最新 stats，但不能把 stats 放进其
@@ -501,7 +501,7 @@ export function App() {
       setCurrentChart(chartData);
       setHasCustomAudio(useCustomAudio);
       setStats({
-        score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
+        score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0, perfectEarly: 0, perfectLate: 0, goodEarly: 0, goodLate: 0,
         goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(chartData), accuracy: 100, rank: calculateRank(0),
       });
       setTimingMarkers([]);
@@ -575,7 +575,7 @@ export function App() {
       const startTimeSec = startSec;
 
       setStats({
-        score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
+        score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0, perfectEarly: 0, perfectLate: 0, goodEarly: 0, goodLate: 0,
         goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: calculateRank(0),
       });
       setTimingMarkers([]);
@@ -970,6 +970,13 @@ export function App() {
       const pCount = prev.perfectCount + (fb.type === 'Perfect' ? 1 : 0);
       const gCount = prev.goodCount + (fb.type === 'Good' ? 1 : 0);
       const mCount = prev.missCount + (fb.type === 'Miss' ? 1 : 0);
+      // early/late 拆分：deltaT<0 为 early（偏早命中），>=0 为 late。
+      // 仅计入 Perfect 与 Good 档；S-Perfect（±40ms 临界）不参与 early/late 拆分。
+      const isEarly = fb.deltaT < 0;
+      const pEarly = prev.perfectEarly + (fb.type === 'Perfect' && isEarly ? 1 : 0);
+      const pLate = prev.perfectLate + (fb.type === 'Perfect' && !isEarly ? 1 : 0);
+      const gEarly = prev.goodEarly + (fb.type === 'Good' && isEarly ? 1 : 0);
+      const gLate = prev.goodLate + (fb.type === 'Good' && !isEarly ? 1 : 0);
       const newScore = prev.score + fb.scoreGained;
       const judgedTotal = sCount + pCount + gCount + mCount;
       const newAcc = judgedTotal > 0 ? ((sCount + pCount + gCount * 0.5) / judgedTotal) * 100 : 100;
@@ -981,6 +988,7 @@ export function App() {
       return {
         ...prev, score: newScore, combo: newCombo, maxCombo: newMaxCombo,
         sPerfectCount: sCount, perfectCount: pCount, goodCount: gCount, missCount: mCount,
+        perfectEarly: pEarly, perfectLate: pLate, goodEarly: gEarly, goodLate: gLate,
         accuracy: newAcc, rank: calculateRank(newScore),
       };
     });
