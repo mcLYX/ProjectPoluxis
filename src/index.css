@@ -5,9 +5,12 @@ html, body {
   /* Disable iOS Safari double-tap zoom + the text-selection loupe/magnifier
      that appears when gameplay taps register as text selection. The
      user-scalable=no in the viewport <meta> is ignored by modern Safari, so
-     touch-action: manipulation is the reliable switch that also removes the
-     ~300ms double-tap delay. -webkit-touch-callout kills the long-press menu. */
-  touch-action: manipulation;
+     touch-action must be set explicitly. `manipulation` still allows
+     pinch-zoom; use `pan-x pan-y` (retains two-axis scrolling, disables
+     pinch-zoom — HarmonyOS 4 / M99 上 user-scalable 也被忽略). A multi-finger
+     touchmove preventDefault fallback is also injected in index.html.
+     -webkit-touch-callout kills the long-press menu. */
+  touch-action: pan-x pan-y;
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
@@ -24,6 +27,25 @@ html, body {
   }
   .font-rajdhani {
     font-family: 'Rajdhani', sans-serif;
+  }
+  /* HarmonyOS 4（M99 内核）兼容：Tailwind 的 bg-clip-text 只生成无前缀
+     `background-clip: text`（Chromium 120+ 才支持），旧内核不认 → 文字透明、
+     渐变背景整块显示为"渐变方块"。此工具类同时带 -webkit- 前缀，并在内核
+     不支持 background-clip:text 时（@supports not）回退为纯白色文字。
+     用法：className="gradient-text bg-gradient-to-r from-... to-..."（渐变背景
+     类保留），或内联 style={{ backgroundImage }}。 */
+  .gradient-text {
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}
+@supports not ((-webkit-background-clip: text) or (background-clip: text)) {
+  .gradient-text {
+    background: none !important;
+    -webkit-text-fill-color: #ffffff;
+    color: #ffffff;
   }
 }
 

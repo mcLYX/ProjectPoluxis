@@ -461,7 +461,7 @@ export const SongCard: React.FC<SongCardProps> = ({
               </div>
             )}
 
-            <div className="text-3xl short:text-2xl font-black font-orbitron tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-white to-amber-300 mb-2 short:mb-1">
+            <div className="text-3xl short:text-2xl font-black font-orbitron tracking-tight gradient-text bg-gradient-to-r from-cyan-300 via-white to-amber-300 mb-2 short:mb-1">
               {Math.round(resultData.stats.score).toLocaleString()}
             </div>
 

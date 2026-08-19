@@ -73,6 +73,8 @@ const DEFAULT_SETTINGS = {
   customRenderScale: 1.0,
   musicVolume: 0.8,
   effectVolume: 0.9,
+  // 兼容模式（HarmonyOS 弱设备音频时钟停滞时）：谱面走墙钟、音频跟随谱面校准。
+  compatMode: false,
   // 当前选中的皮肤 id；null 表示使用默认纯色外观。
   selectedSkinId: null as string | null,
   // 默认皮肤（未选皮肤包时）的自定义项。
@@ -166,6 +168,12 @@ export function App() {
   const [speedMultiplier, setSpeedMultiplier] = useState(initialSettings.speedMultiplier);
   const [autoPlay, setAutoPlay] = useState(false);
   const [audioOffsetMs, setAudioOffsetMs] = useState(initialSettings.audioOffsetMs);
+  const [compatMode, setCompatMode] = useState(initialSettings.compatMode);
+  // 兼容模式 → AudioManager 时钟源切换（谱面走墙钟）。在渲染副作用中同步，
+  // 避免在 AudioContext 初始化前误设；play() 内会根据 compatMode 锚定墙钟。
+  useEffect(() => {
+    globalAudio.setCompatMode(compatMode);
+  }, [compatMode]);
   const [projectionLeadMs, setProjectionLeadMs] = useState(initialSettings.projectionLeadMs);
   const [noteRenderDistance, setNoteRenderDistance] = useState(initialSettings.noteRenderDistance);
   const [noteSizeScale, setNoteSizeScale] = useState(initialSettings.noteSizeScale);
@@ -278,6 +286,10 @@ export function App() {
     statsRef.current = stats;
   }, [stats]);
 
+  // 判定精度条 marker：原实现每判定一个 setTimeout 到期移除，高频连击时 timer 累积。
+  // 改为单一清理 timer + marker 内嵌 expiresAt，到期批量移除所有过期项——任意时刻
+  // 至多 1 个活跃 timer，减轻 HarmonyOS 平板点击停顿（见性能修复）。
+  const markerCleanTimerRef = useRef<number | null>(null);
   const [timingMarkers, setTimingMarkers] = useState<TimingMarker[]>([]);
   const [comboBurst, setComboBurst] = useState<{ key: number; value: number } | null>(null);
   // Ambient background is driven imperatively (ref + direct DOM writes inside
@@ -418,10 +430,10 @@ export function App() {
     saveSettings({
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
       noteSizeScale, qualityMode: quality.qualityMode, customAntialias: quality.customAntialias, customBloom: quality.customBloom,
-      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, musicVolume, effectVolume,
+      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, musicVolume, effectVolume, compatMode,
       selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
-  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
+  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, compatMode, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
   // 选中皮肤变化时，预加载贴图（灰度图→THREE.Texture）。失败/无皮肤则回退纯色。
   // 菜单态不预加载：避免把 three 拉进首屏；进入游戏/编辑器（GameCanvas 挂载）前才按需下载贴图。
@@ -974,10 +986,17 @@ export function App() {
     });
 
     const marker: TimingMarker = { id: `${fb.id}-${fb.createdAt}`, dt: fb.deltaT, type: fb.type };
+    // 内嵌到期时间戳（不进 TimingBar 接口，仅本地清理用）。
+    (marker as TimingMarker & { expiresAt: number }).expiresAt = performance.now() + MARKER_LIFETIME_MS;
     setTimingMarkers((prev) => [...prev.slice(-24), marker]);
-    window.setTimeout(() => {
-      setTimingMarkers((prev) => prev.filter((m) => m.id !== marker.id));
-    }, MARKER_LIFETIME_MS);
+    // 单一批量清理 timer：任意时刻至多一个，到期后移除全部过期 marker。
+    if (markerCleanTimerRef.current === null) {
+      markerCleanTimerRef.current = window.setTimeout(() => {
+        markerCleanTimerRef.current = null;
+        const now = performance.now();
+        setTimingMarkers((prev) => prev.filter((m) => (m as TimingMarker & { expiresAt: number }).expiresAt > now));
+      }, MARKER_LIFETIME_MS);
+    }
   }, []);
 
   // Pause / Resume with 3s countdown
@@ -1169,12 +1188,27 @@ export function App() {
       // while playing. Editor preview still needs reactive time for its timeline.
       let lastGlow = 0;
       let lastHud = 0;
+      // 兼容模式校准：每 5000ms 检测一次谱面墙钟与音频真实位置的偏差。
+      // 节流到 5s 保持音频完整性——只有持续落后才重建 buffer，避免频繁 seek 噪声。
+      let lastCompatCheck = 0;
       const tick = () => {
         const nowMs = performance.now();
         const doGlow = nowMs - lastGlow >= 16;
         const doHud = nowMs - lastHud >= 33;
         if (doGlow) lastGlow = nowMs;
         if (doHud) lastHud = nowMs;
+
+        // 兼容模式校准（仅 playing 且开启时）：音频时钟停滞时，把音频 buffer
+        // 跳到谱面当前点（音频跟随谱面，谱面绝不跳）。
+        if (compatMode && gameState === 'playing' && nowMs - lastCompatCheck >= 5000) {
+          lastCompatCheck = nowMs;
+          const chartTime = globalAudio.getCurrentTime();
+          const audioActual = globalAudio.getRawAudioTime();
+          // 阈值 150ms：仅在音频明显落后时校准，微差（正常 jitter）不动作。
+          if (audioActual < chartTime - 0.15) {
+            globalAudio.nudgeAudio(chartTime);
+          }
+        }
 
         const inEditorPreview = gameState === 'editor';
 
@@ -1218,7 +1252,7 @@ export function App() {
     return () => {
       if (gameTimerRef.current) cancelAnimationFrame(gameTimerRef.current);
     };
-  }, [gameState, editorPreviewPlaying, quality]);
+  }, [gameState, editorPreviewPlaying, quality, compatMode]);
 
   // Visual Editor Callbacks
   const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number): { id: string; x: number; y: number; beat: number } | null => {
@@ -1828,7 +1862,7 @@ export function App() {
               </div>
               <div className="text-right">
                 <div className="text-[10px] font-bold uppercase tracking-widest text-white/50">Score</div>
-                <div className="text-3xl font-black font-orbitron tracking-tight text-transparent bg-clip-text" style={{ backgroundImage: `linear-gradient(90deg, #ffffff 0%, ${hudAccentBright} 55%, #fcd34d 100%)` }}>
+                <div className="text-3xl font-black font-orbitron tracking-tight gradient-text" style={{ backgroundImage: `linear-gradient(90deg, #ffffff 0%, ${hudAccentBright} 55%, #fcd34d 100%)` }}>
                   {Math.round(stats.score).toLocaleString().padStart(8, '0')}
                 </div>
                 <div style={{ color: hudAccentLight }} className="text-xs font-mono">
@@ -2034,6 +2068,8 @@ export function App() {
         setMusicVolume={setMusicVolume}
         effectVolume={effectVolume}
         setEffectVolume={setEffectVolume}
+        compatMode={compatMode}
+        setCompatMode={setCompatMode}
         selectedSkinId={selectedSkinId}
         setSelectedSkinId={setSelectedSkinId}
         defaultSkinInnerEnabled={defaultSkinInnerEnabled}

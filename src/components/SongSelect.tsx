@@ -881,7 +881,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           )}
           {viewDepth === 'root' && (
             <h1 className="flex items-baseline leading-none">
-              <span className="text-2xl sm:text-3xl font-black font-orbitron tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-sky-200 to-amber-300">
+              <span className="text-2xl sm:text-3xl font-black font-orbitron tracking-wider gradient-text bg-gradient-to-r from-cyan-300 via-sky-200 to-amber-300">
                 Poluxis
               </span>
               <span className="text-[10px] font-bold font-orbitron uppercase tracking-[0.35em] text-white/40 mr-2 mt-1 self-start">

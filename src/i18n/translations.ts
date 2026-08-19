@@ -285,6 +285,8 @@ export const translations: AllDicts = {
     'settings.sfxVolHint': '控制打击音效、UI 交互音效的音量。',
     'settings.audioOffset': '延迟调整',
     'settings.audioOffsetHint': '音频的播放延迟，负数为提前，正数为延后。如果你正在使用蓝牙耳机，通常应调为负数以弥补延迟。',
+    'settings.compatMode': '兼容模式',
+    'settings.compatModeHint': '适用于音频与谱面不同步的弱设备（如部分鸿蒙平板）。开启后谱面按独立时钟运行，音频卡顿时自动校准跟上谱面，避免整个游戏被音频卡顿拖停。',
     'settings.done': '完成',
     'settings.language': '语言',
 
@@ -753,6 +755,8 @@ export const translations: AllDicts = {
     'settings.sfxVolHint': 'Volume of hit sounds and UI interaction sounds.',
     'settings.audioOffset': 'Audio Offset',
     'settings.audioOffsetHint': 'Playback latency: negative = earlier, positive = later. With Bluetooth headphones, set this negative to compensate.',
+    'settings.compatMode': 'Compatibility Mode',
+    'settings.compatModeHint': 'For weak devices where audio desyncs from the chart (e.g. some HarmonyOS tablets). Chart runs on its own clock; when audio stutters it is auto-recalibrated to follow the chart, so stutters no longer freeze the whole game.',
     'settings.done': 'Done',
     'settings.language': 'Language',
 
@@ -1221,6 +1225,8 @@ export const translations: AllDicts = {
     'settings.sfxVolHint': 'ヒット音・UI 操作音の音量。',
     'settings.audioOffset': '遅延調整',
     'settings.audioOffsetHint': '再生遅延。負は早め、正は遅め。Bluetooth イヤホン使用時は遅延を補うため負に設定すると良い。',
+    'settings.compatMode': '互換モード',
+    'settings.compatModeHint': '音声と譜面が同期しない弱い端末向け（一部の HarmonyOS タブレット等）。譜面は独立時計で動作し、音声が途切れた際は自動で譜面に追従校正されるため、音声の途切れがゲーム全体を止めなくなります。',
     'settings.done': '完了',
     'settings.language': '言語',
 

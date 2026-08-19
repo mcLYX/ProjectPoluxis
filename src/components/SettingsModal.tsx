@@ -46,6 +46,8 @@ interface SettingsModalProps {
   setMusicVolume: (value: number) => void;
   effectVolume: number;
   setEffectVolume: (value: number) => void;
+  compatMode: boolean;
+  setCompatMode: (value: boolean) => void;
   selectedSkinId: string | null;
   setSelectedSkinId: (value: string | null) => void;
   defaultSkinInnerEnabled: boolean;
@@ -81,6 +83,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setMusicVolume,
   effectVolume,
   setEffectVolume,
+  compatMode,
+  setCompatMode,
   selectedSkinId,
   setSelectedSkinId,
   defaultSkinInnerEnabled, setDefaultSkinInnerEnabled,
@@ -415,6 +419,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>+400ms</span></div>
         <p className="text-[11px] text-white/50 leading-relaxed">
           {t('settings.audioOffsetHint')}
+        </p>
+      </section>
+      <section className="space-y-1.5">
+        <label className="flex items-center gap-2 text-sm font-bold text-cyan-300 cursor-pointer select-none" onClick={() => setCompatMode(!compatMode)}>
+          <input type="checkbox" checked={compatMode} onChange={() => setCompatMode(!compatMode)} className="w-4 h-4 rounded border-white/30 bg-white/10 focus:outline-none cursor-pointer" />
+          {t('settings.compatMode')}
+        </label>
+        <p className="text-[11px] text-white/50 leading-relaxed">
+          {t('settings.compatModeHint')}
         </p>
       </section>
     </div>

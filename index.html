@@ -12,6 +12,17 @@
   </head>
   <body class="bg-[#0a0d12] text-white overflow-hidden select-none font-['Inter',sans-serif]">
     <div id="root"></div>
+    <script>
+      // HarmonyOS 4（M99 内核）双指缩放手势兜底：user-scalable=no 与
+      // touch-action: pan-x pan-y 在该内核可能不生效，这里在 React 挂载前
+      // 用一个非被动 touchmove 监听器阻止多指手势（双指缩放/旋转）。
+      // 必须在 React 挂载前注册，故放在 index.html（passive:false 才能 preventDefault）。
+      (function () {
+        document.addEventListener('touchmove', function (e) {
+          if (e.touches && e.touches.length > 1) e.preventDefault();
+        }, { passive: false });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

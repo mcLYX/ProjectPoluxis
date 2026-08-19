@@ -1145,6 +1145,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // display:none → block (e.g. switching the editor from 2D back to 3D), so the
   // WebGL canvas never gets re-sized / re-built and stays blank. Watch the
   // container with a ResizeObserver and bump `vpKey` on the hidden→visible edge.
+  // 容器 rect 缓存：触摸事件处理器用此缓存代替每次 getBoundingClientRect()。
+  // 原实现每次 touch/pointer 事件都强制同步 layout —— App 侧 HUD 每帧写 style 使
+  // layout 树持续脏，点击时该调用触发完整 layout 计算（HarmonyOS 弱设备上数十 ms
+  // 长任务），正是"每次点击停顿 + 音频/谱面连动停"的根因。此处仅在 ResizeObserver
+  // 触发时低频更新（一次 layout 读），触摸路径零同步 layout。
+  const containerRectRef = useRef<DOMRect | null>(null);
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -1157,6 +1163,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       requestAnimationFrame(() => {
         scheduled = false;
         const visible = el.clientWidth > 0 && el.clientHeight > 0;
+        containerRectRef.current = el.getBoundingClientRect();
         if (visible && !wasVisible) setVpKey((k) => k + 1);
         wasVisible = visible;
       });
@@ -1198,7 +1205,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     renderer.localClippingEnabled = true;
     renderer.setSize(w, h);
     // 渲染倍率（分辨率缩放）：>1 超采样更清晰但更耗 GPU，<1 降分辨率换帧率。
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5) * renderScaleRef.current);
+    // 上限 1.5→1.25：HarmonyOS 平板（Kirin 9000wm，dpr≥2）上 2x 屏原先会渲染到
+    // 1.5× 像素，约 30% 像素量用于超采样。降至 1.25 在弱 GPU 上显著减轻 fill-rate
+    // 压力，视觉清晰度仍足够；renderScale（低画质 0.75）继续叠加。
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25) * renderScaleRef.current);
     // Remove any previous canvas without touching other DOM children (text overlays, etc.)
     const existingCanvas = container.querySelector('canvas');
     if (existingCanvas) existingCanvas.remove();
@@ -1653,6 +1663,30 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     for (const t of delta.touches ?? []) place('touch', t.x, t.y);
   };
 
+  // 触摸/指针数学缓存：复用 Raycaster/向量/平面，避免每次 pointer 事件分配对象
+  // 并在 GC 压力下造成点击停顿（HarmonyOS 平板实测，见性能修复）。
+  const pointerMathRef = useRef<{
+    rc: THREE.Raycaster;
+    ndc: THREE.Vector2;
+    plane: THREE.Plane;
+    hit: THREE.Vector3;
+  } | null>(null);
+  if (!pointerMathRef.current) {
+    pointerMathRef.current = {
+      rc: new THREE.Raycaster(),
+      ndc: new THREE.Vector2(),
+      plane: new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
+      hit: new THREE.Vector3(),
+    };
+  }
+  // pointermove rAF 节流：合并同帧内多次 move，避免触摸拖动时的高频分配 + layout 读。
+  const pendingMoveRef = useRef<Map<number, { cx: number; cy: number; pointerType: string }>>(new Map());
+  const moveRafRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (moveRafRef.current !== null) cancelAnimationFrame(moveRafRef.current);
+    moveRafRef.current = null;
+  }, []);
+
   const updatePointer = (
     pointerId: number,
     cx: number,
@@ -1660,19 +1694,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     down: boolean,
     pointerType: string = 'mouse'
   ) => {
-    if (!containerRef.current || !cameraRef.current) return;
-    const r = containerRef.current.getBoundingClientRect();
-    const nx = ((cx - r.left) / r.width) * 2 - 1;
-    const ny = -((cy - r.top) / r.height) * 2 + 1;
-    const rc = new THREE.Raycaster(); rc.setFromCamera(new THREE.Vector2(nx, ny), cameraRef.current);
-    const t = new THREE.Vector3();
-    if (rc.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,0,1),0), t)) {
+    if (!containerRef.current || !cameraRef.current || !pointerMathRef.current) return;
+    // 读缓存 rect，避免每次触摸强制同步 layout（见 containerRectRef 注释）。
+    const r = containerRectRef.current ?? containerRef.current.getBoundingClientRect();
+    const { rc, ndc, plane, hit } = pointerMathRef.current;
+    ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+    rc.setFromCamera(ndc, cameraRef.current);
+    if (rc.ray.intersectPlane(plane, hit)) {
       const isTouchLike = pointerType === 'touch' || pointerType === 'pen';
       const active = isTouchLike ? down : true;
-      pointersRef.current.set(pointerId, { x: t.x, y: t.y, down, active, type: pointerType });
+      pointersRef.current.set(pointerId, { x: hit.x, y: hit.y, down, active, type: pointerType });
       if (down && dragPointerIdRef.current === null) {
         dragPointerIdRef.current = pointerId;
-        pointerDownStartRef.current = { x: t.x, y: t.y };
+        pointerDownStartRef.current = { x: hit.x, y: hit.y };
         // Start a fresh drag: reset throttled-commit tracking so the first move
         // is always committed immediately to React state.
         dragLiveXRef.current = NaN;
@@ -3090,21 +3124,42 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         handlePointerInteraction(p.x, p.y);
       }}
       onPointerMove={(e) => {
-        const existing = pointersRef.current.get(e.pointerId);
-        const down = existing ? existing.down : false;
-        updatePointer(e.pointerId, e.clientX, e.clientY, down, e.pointerType);
         const inQC = isEditorModeRef.current && activeToolRef.current === 'quick-create';
-        if (!inQC) return;
-        const track = qcTracksRef.current.get(e.pointerId);
-        const p = pointersRef.current.get(e.pointerId);
-        if (!track || !p) return;
-        const playing = isPlayingRef.current && !isPausedRef.current;
-        const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
-        const beat = chartTimeToBeat(tSec);
-        track.trajectory.push({ tSec, beat, x: p.x, y: p.y });
-        // Keep trajectory from growing unbounded during long presses.
-        if (track.trajectory.length > 120) track.trajectory.splice(0, track.trajectory.length - 120);
-        qcOnMove(track, beat);
+        if (inQC) {
+          // Quick-create 手势需要即时高精度采样（分类速度/位移），不走节流。
+          const existing = pointersRef.current.get(e.pointerId);
+          const down = existing ? existing.down : false;
+          updatePointer(e.pointerId, e.clientX, e.clientY, down, e.pointerType);
+          const track = qcTracksRef.current.get(e.pointerId);
+          const p = pointersRef.current.get(e.pointerId);
+          if (!track || !p) return;
+          const playing = isPlayingRef.current && !isPausedRef.current;
+          const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
+          const beat = chartTimeToBeat(tSec);
+          track.trajectory.push({ tSec, beat, x: p.x, y: p.y });
+          // Keep trajectory from growing unbounded during long presses.
+          if (track.trajectory.length > 120) track.trajectory.splice(0, track.trajectory.length - 120);
+          qcOnMove(track, beat);
+          return;
+        }
+        // 非 QC：rAF 节流合并同帧多次 move，避免触摸拖动时的高频分配 + layout 读。
+        // 判定（tap 在 down 同步处理）不受影响；slide 链在 tick 读 pointersRef，
+        // move 延迟一帧（≤16ms）对判定窗口无感知差异。
+        pendingMoveRef.current.set(e.pointerId, { cx: e.clientX, cy: e.clientY, pointerType: e.pointerType });
+        if (moveRafRef.current === null) {
+          moveRafRef.current = requestAnimationFrame(() => {
+            moveRafRef.current = null;
+            const pending = pendingMoveRef.current;
+            if (pending.size === 0) return;
+            for (const [pid, m] of pending) {
+              // 若期间已 up/removePointer 删除，跳过，避免幽灵指针。
+              const existing = pointersRef.current.get(pid);
+              if (!existing) continue;
+              updatePointer(pid, m.cx, m.cy, existing.down, m.pointerType);
+            }
+            pending.clear();
+          });
+        }
       }}
       onPointerUp={(e) => {
         const inQC = isEditorModeRef.current && activeToolRef.current === 'quick-create';

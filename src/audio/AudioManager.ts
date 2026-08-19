@@ -38,6 +38,21 @@ export class AudioManager {
   private isPlaying: boolean = false;
   private userAudioOffset: number = 0;
   private leadInTime: number = 0;
+  // ====== 兼容模式（音频跟随谱面）=====
+  // 背景：HarmonyOS ArkWeb 上 AudioContext.currentTime 可能停滞（音频输出停摆）
+  // 但 rAF/渲染仍走。原架构谱面时钟完全绑定 ctx.currentTime，音频一停谱面跟着停。
+  // 兼容模式把谱面时钟切到 performance.now() 锚定的墙钟，音频 buffer 仍由音频
+  // 时钟驱动；App 周期检测偏差，超阈值时仅重建 buffer（nudgeAudio）让音频追谱面。
+  // chartWallMs = 墙钟上 audio time 0 的时刻（play/seek/setPlaybackRate 重锚）。
+  private compatMode: boolean = false;
+  private chartWallMs: number = 0;
+  /** 开启/关闭兼容模式（外部设置项驱动）。 */
+  public setCompatMode(enabled: boolean): void {
+    this.compatMode = enabled;
+  }
+  public isCompatMode(): boolean {
+    return this.compatMode;
+  }
   private synthInterval: number | null = null;
   /** Handle for the one-shot `setTimeout` that defers the first synth tick when
    *  playback starts before the song's true beginning (audio time < 0, i.e. a
@@ -46,6 +61,26 @@ export class AudioManager {
    *  multiple pending timers, each of which later spawns its own `setInterval`,
    *  and the stacked loops play on top of each other ("叠加播放"). */
   private synthStartTimer: number | null = null;
+  // ====== Lookahead 合成调度（替代 setInterval 驱动）=====
+  // 原 setInterval 驱动在主线程上逐 tick 创建 Oscillator：主线程一旦被触摸等
+  // 重活阻塞，音符就停 + 累积，且 setInterval 的墙钟步进与 AudioContext 时钟
+  // 脱钩（停顿后音频位置与谱面错位）。Lookahead 调度用 osc.start(ctxTime)
+  // 把未来 ~0.25s 的音符预先排布到 AudioContext 硬件时钟上——已调度的音符由
+  // 音频线程按时触发，主线程短暂阻塞不再中断音频，也不会产生位置错位。
+  /** 下一个待排步的 step 序号（与音符模式 beat16/bar 对应）。 */
+  private synthNextStep: number = 0;
+  /** 下一个待排步在 AudioContext 时钟上的触发时间。 */
+  private synthNextTime: number = 0;
+  /** 相邻 step 在 AudioContext 时钟上的间隔（秒），= beatInterval/4。 */
+  private synthStepInterval: number = 0;
+  /** 已调度、尚未播完的 Oscillator 节点（stop/seek 时取消）。 */
+  private synthPending: AudioScheduledSourceNode[] = [];
+  /** Lookahead 定时器（递归 setTimeout，~100ms 检查一次）。 */
+  private synthLookaheadTimer: number | null = null;
+  /** 提前调度窗口（秒）。主线程阻塞短于该值时不中断音频（覆盖常见触摸/GC 停顿）。 */
+  private static readonly SYNTH_LOOKAHEAD_SEC = 0.5;
+  /** Lookahead 检查周期（毫秒）。 */
+  private static readonly SYNTH_LOOKAHEAD_MS = 100;
   private synthBpm: number = 140;
   /** Editor-only playback rate multiplier (0.25x / 0.5x / 1x / 2x). 1 = normal.
    *  Applied directly to the AudioBufferSource (so the pitch shifts with speed —
@@ -337,9 +372,17 @@ export class AudioManager {
     return audioSec + this.userAudioOffset;
   }
 
+  /** 兼容模式下的墙钟秒数（audio-time 坐标）：不依赖 ctx.currentTime，不受
+   *  AudioContext 时钟停滞影响。`chartWallMs` 为 audio time 0 对应的墙钟时刻。 */
+  private wallClockSec(): number {
+    return ((performance.now() - this.chartWallMs) / 1000) * this.playbackRate;
+  }
+
   /** Live audio-buffer position derived from the AudioContext clock.
-   *  `startTime` is the ctx timestamp at which the buffer position was 0. */
+   *  `startTime` is the ctx timestamp at which the buffer position was 0.
+   *  兼容模式下改用墙钟（谱面不被音频时钟拖累），非兼容模式保持原逻辑。 */
   private getAudioTime(): number {
+    if (this.compatMode) return this.wallClockSec();
     if (!this.ctx) return 0;
     return (this.ctx.currentTime - this.startTime) * this.playbackRate;
   }
@@ -504,6 +547,12 @@ export class AudioManager {
      * reaches 0 (chart time == userAudioOffset), with offset 0. */
     const audioStartSec = this.toAudioTime(startChartSec);
     this.startTime = this.ctx.currentTime - audioStartSec / this.playbackRate + leadInSec;
+    // 兼容模式：同步锚定墙钟，使 play() 后 getAudioTime() 与原实现一致，即
+    // `audioStartSec - leadInSec*rate`（lead-in 期间谱面从负值走起，音频延迟
+    // leadInSec 后开始）。公式推导：wallClockSec() = (now - chartWallMs)/1000 * rate，
+    // 令其等于 audioStartSec - leadInSec*rate → chartWallMs = now - audioStartSec*1000/rate
+    // + leadInSec*1000。此处 + leadInSec*1000 对应原 startTime 的 + leadInSec。
+    this.chartWallMs = performance.now() - (audioStartSec * 1000) / this.playbackRate + leadInSec * 1000;
     this.isPlaying = true;
 
     // Reset the beat-driven rhythm state. A new play call means a new chart
@@ -577,16 +626,9 @@ export class AudioManager {
         this.bgmSource.stop(stopTime);
       } catch {}
     }
-    if (this.synthInterval || this.synthStartTimer) {
+    if (this.synthInterval || this.synthStartTimer || this.synthLookaheadTimer) {
       window.setTimeout(() => {
-        if (this.synthInterval) {
-          window.clearInterval(this.synthInterval);
-          this.synthInterval = null;
-        }
-        if (this.synthStartTimer) {
-          window.clearTimeout(this.synthStartTimer);
-          this.synthStartTimer = null;
-        }
+        this.clearSynth();
       }, duration * 1000);
     }
     // NOTE: intentionally do NOT set this.isPlaying = false here. Doing so would
@@ -610,14 +652,7 @@ export class AudioManager {
       try { this.bgmSource.stop(); this.bgmSource.disconnect(); } catch {}
       this.bgmSource = null;
     }
-    if (this.synthInterval) {
-      window.clearInterval(this.synthInterval);
-      this.synthInterval = null;
-    }
-    if (this.synthStartTimer) {
-      window.clearTimeout(this.synthStartTimer);
-      this.synthStartTimer = null;
-    }
+    this.clearSynth();
   }
 
   /** In-place position jump while staying in the playing state — no stop/play
@@ -642,6 +677,8 @@ export class AudioManager {
     // clock is anchored so getCurrentTime() reads the exact target immediately.
     const audioTarget = this.toAudioTime(targetChartSec);
     this.startTime = this.ctx.currentTime - audioTarget / this.playbackRate;
+    // 兼容模式：同步锚定墙钟，seek 后 getCurrentTime() 立即读到 targetChartSec。
+    this.chartWallMs = performance.now() - (audioTarget * 1000) / this.playbackRate;
 
     if (useBuffer && this.bgmBuffer && this.bgmGain) {
       // Stop old source, start new one. If the target is before the song's true
@@ -662,69 +699,11 @@ export class AudioManager {
       this.bgmSource.connect(this.bgmGain);
       this.bgmSource.start(when, offset);
     } else {
-      // Synthesised: restart the interval loop from the matching step, but
-      // defer the first tick (silent) until the audio time reaches 0 if the
-      // target is before the song's true beginning.
-      if (this.synthInterval) {
-        window.clearInterval(this.synthInterval);
-        this.synthInterval = null;
-      }
-      if (this.synthStartTimer) {
-        window.clearTimeout(this.synthStartTimer);
-        this.synthStartTimer = null;
-      }
-      const beatInterval = 60 / this.synthBpm;
-      let step = Math.max(0, Math.floor(audioTarget / (beatInterval / 4)));
-      const delayMs = audioTarget < 0 ? (-audioTarget) / this.playbackRate * 1000 : 0;
-      const chords = [
-        [220, 277.18, 329.63, 440],
-        [174.61, 220, 261.63, 349.23],
-        [261.63, 329.63, 392, 523.25],
-        [196, 246.94, 293.66, 392],
-      ];
-      const tick = () => {
-        if (!this.isPlaying || !this.ctx || !this.bgmGain) return;
-        const now = this.ctx.currentTime;
-        const beat16 = step % 16;
-        const bar = Math.floor(step / 16) % chords.length;
-        const chord = chords[bar];
-        if (beat16 % 4 === 0) {
-          const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-          o.type = 'sine'; o.frequency.setValueAtTime(140, now); o.frequency.exponentialRampToValueAtTime(35, now + 0.08);
-          g.gain.setValueAtTime(0.8, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-          o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.12);
-        }
-        if (beat16 === 4 || beat16 === 12) {
-          const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-          o.type = 'triangle'; o.frequency.setValueAtTime(240, now); o.frequency.exponentialRampToValueAtTime(80, now + 0.09);
-          g.gain.setValueAtTime(0.5, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
-          o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.1);
-        }
-        if (beat16 % 2 === 1) {
-          const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-          o.type = 'triangle'; o.frequency.setValueAtTime(3000, now);
-          g.gain.setValueAtTime(0.15, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-          o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.04);
-        }
-        const arpNote = chord[beat16 % chord.length];
-        const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-        o.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine';
-        o.frequency.setValueAtTime(arpNote, now);
-        g.gain.setValueAtTime(0.25, now); g.gain.exponentialRampToValueAtTime(0.001, now + beatInterval * 0.35);
-        o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + beatInterval * 0.35);
-        step++;
-      };
-      if (delayMs > 0) {
-        this.synthStartTimer = window.setTimeout(() => {
-          this.synthStartTimer = null;
-          if (!this.isPlaying) return;
-          tick();
-          this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
-        }, delayMs);
-      } else {
-        tick();
-        this.synthInterval = window.setInterval(tick, (beatInterval / 4) * 1000);
-      }
+      // Synthesised: restart the lookahead scheduler from the matching step.
+      // The scheduler anchors the first step to the AudioContext clock (silent
+      // until audio time reaches 0 if the target precedes the song start);
+      // startSynthesizedMusic 开头会 clearSynth 清理上一轮调度。
+      this.startSynthesizedMusic(audioTarget, 0);
     }
   }
 
@@ -736,6 +715,38 @@ export class AudioManager {
   public getCurrentTime(): number {
     if (!this.isPlaying || !this.ctx) return this.pauseTime;
     return this.toChartTime(this.getAudioTime());
+  }
+
+  /** 真实音频位置（chart-time 坐标）：始终由 AudioContext 时钟驱动，不随兼容模式
+   *  墙钟分叉。App 校准循环用它对比谱面墙钟，判断音频是否落后。 */
+  public getRawAudioTime(): number {
+    if (!this.isPlaying || !this.ctx) return this.pauseTime;
+    return this.toChartTime((this.ctx.currentTime - this.startTime) * this.playbackRate);
+  }
+
+  /** 兼容模式校准动作：把音频 buffer 跳到 `targetChartSec`，但**不重锚谱面墙钟**。
+   *  谱面/判定/粒子/HUD 的位置完全不受影响——音频跟随谱面，允许音频跳变。
+   *  仅 buffer 音频有效（合成路径无独立音轨可校准，直接忽略）。 */
+  public nudgeAudio(targetChartSec: number): void {
+    if (!this.compatMode) return;
+    if (!this.isPlaying || !this.ctx) return;
+    if (!(this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer)) return;
+    if (!this.bgmGain) return;
+    const audioTarget = this.toAudioTime(targetChartSec);
+    // 复用 seek 的 buffer 重建（stop 旧源 + 新源从 offset 播），但不改 chartWallMs。
+    if (this.bgmSource) {
+      try { this.bgmSource.stop(); this.bgmSource.disconnect(); } catch { /* 已停止/已断开 */ }
+      this.bgmSource = null;
+    }
+    const when = audioTarget >= 0
+      ? this.ctx.currentTime
+      : this.ctx.currentTime + (-audioTarget) / this.playbackRate;
+    const offset = Math.max(0, audioTarget);
+    this.bgmSource = this.ctx.createBufferSource();
+    this.bgmSource.buffer = this.bgmBuffer;
+    this.bgmSource.playbackRate.value = this.playbackRate;
+    this.bgmSource.connect(this.bgmGain);
+    this.bgmSource.start(when, offset);
   }
 
   /** Set the editor playback rate (0.25 / 0.5 / 1 / 2). The rate is applied
@@ -755,6 +766,8 @@ export class AudioManager {
     const audioTime = this.getAudioTime();
     this.playbackRate = clamped;
     this.startTime = this.ctx.currentTime - audioTime / this.playbackRate;
+    // 兼容模式：同步重锚墙钟，使 getCurrentTime() 在变速后保持连续。
+    this.chartWallMs = performance.now() - (audioTime * 1000) / this.playbackRate;
     // Update the running source's rate in place (pitch shifts with speed).
     if (this.bgmSource) {
       this.bgmSource.playbackRate.value = clamped;
@@ -1029,9 +1042,28 @@ export class AudioManager {
 
   private startSynthesizedMusic(startOffset: number, leadInSec = 0) {
     if (!this.ctx || !this.bgmGain) return;
-    // Defensive: cancel any still-pending synth start timer (e.g. from a
-    // previous play/seek) so we never end up with two stacked loops. stop()
-    // also clears these, but this guards the play()->this path directly.
+    // 清理上一轮调度（防御，stop/seek 也会走 clearSynth）。
+    this.clearSynth();
+    const rate = this.playbackRate;
+    const beatInterval = 60 / this.synthBpm;
+    this.synthStepInterval = beatInterval / 4;
+    // Clamp the starting step at 0 so a negative offset (song hasn't begun) just
+    // starts from the beginning rather than ticking at a negative step.
+    this.synthNextStep = Math.max(0, Math.floor(startOffset / (beatInterval / 4)));
+    // The ctx time at which the audio time reaches 0 (chart time == offset).
+    // Defer the first step until then so the synth stays silent during lead-in
+    // when appropriate (positive offset) or begins mid-song only once audio
+    // time is non-negative (negative offset) — exactly like the buffer path.
+    this.synthNextTime = this.ctx.currentTime + leadInSec - startOffset / rate;
+    this.scheduleSynthLookahead();
+  }
+
+  /** 取消合成调度：停 lookahead 定时器，并静默/断开已调度但尚未播完的音符。 */
+  private clearSynth(): void {
+    if (this.synthLookaheadTimer) {
+      window.clearTimeout(this.synthLookaheadTimer);
+      this.synthLookaheadTimer = null;
+    }
     if (this.synthInterval) {
       window.clearInterval(this.synthInterval);
       this.synthInterval = null;
@@ -1040,68 +1072,102 @@ export class AudioManager {
       window.clearTimeout(this.synthStartTimer);
       this.synthStartTimer = null;
     }
-    const rate = this.playbackRate;
-    const beatInterval = 60 / this.synthBpm;
-    // Clamp the starting step at 0 so a negative offset (song hasn't begun) just
-    // starts from the beginning rather than ticking at a negative step.
-    let step = Math.max(0, Math.floor(startOffset / (beatInterval / 4)));
-    // The ctx time at which the audio time reaches 0 (chart time == offset).
-    // Defer the first tick until then so the synth stays silent during lead-in
-    // when appropriate (positive offset) or begins mid-song only once audio
-    // time is non-negative (negative offset) — exactly like the buffer path.
-    const baseStart = this.ctx.currentTime + leadInSec - startOffset / rate;
-    const delayMs = Math.max(0, (baseStart - this.ctx.currentTime) * 1000);
-    const intervalMs = (beatInterval / 4) * 1000;
-    const chords = [
-      [220, 277.18, 329.63, 440],
-      [174.61, 220, 261.63, 349.23],
-      [261.63, 329.63, 392, 523.25],
-      [196, 246.94, 293.66, 392],
-    ];
-    const tick = () => {
-      if (!this.isPlaying || !this.ctx || !this.bgmGain) return;
-      const now = this.ctx.currentTime;
-      const beat16 = step % 16;
-      const bar = Math.floor(step / 16) % chords.length;
-      const chord = chords[bar];
-      if (beat16 % 4 === 0) {
-        const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-        o.type = 'sine'; o.frequency.setValueAtTime(140, now); o.frequency.exponentialRampToValueAtTime(35, now + 0.08);
-        g.gain.setValueAtTime(0.8, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-        o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.12);
-      }
-      if (beat16 === 4 || beat16 === 12) {
-        const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-        o.type = 'triangle'; o.frequency.setValueAtTime(240, now); o.frequency.exponentialRampToValueAtTime(80, now + 0.09);
-        g.gain.setValueAtTime(0.5, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
-        o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.1);
-      }
-      if (beat16 % 2 === 1) {
-        const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-        o.type = 'triangle'; o.frequency.setValueAtTime(3000, now);
-        g.gain.setValueAtTime(0.15, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-        o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + 0.04);
-      }
-      const arpNote = chord[beat16 % chord.length];
-      const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-      o.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine';
-      o.frequency.setValueAtTime(arpNote, now);
-      g.gain.setValueAtTime(0.25, now); g.gain.exponentialRampToValueAtTime(0.001, now + beatInterval * 0.35);
-      o.connect(g); g.connect(this.bgmGain); o.start(now); o.stop(now + beatInterval * 0.35);
-      step++;
-    };
-    if (delayMs > 0) {
-      this.synthStartTimer = window.setTimeout(() => {
-        this.synthStartTimer = null;
-        if (!this.isPlaying) return;
-        tick(); // first note
-        this.synthInterval = window.setInterval(tick, intervalMs);
-      }, delayMs);
-    } else {
-      tick();
-      this.synthInterval = window.setInterval(tick, intervalMs);
+    // 已 start(when)（可能 when 在未来）的音符无法撤销 start，只能提前 stop
+    // 使其静音并断开，避免 seek/stop 后残留发声。
+    for (const src of this.synthPending) {
+      try { src.stop(); } catch { /* already stopped */ }
+      try { src.disconnect(); } catch { /* already disconnected */ }
     }
+    this.synthPending = [];
   }
+
+  /** 在 AudioContext 时钟 `when` 排布一个 step 的全部音符（与旧 setInterval
+   *  tick 逐字等价，仅把触发时刻 `now` 换成排布时刻 `when`）。 */
+  private scheduleSynthStep(step: number, when: number): void {
+    // 局部收窄：闭包内使用局部变量，避免非空断言（lint 基线约束）。
+    const ctx = this.ctx;
+    const bgmGain = this.bgmGain;
+    if (!ctx || !bgmGain) return;
+    const chords = this.synthChords;
+    const beat16 = step % 16;
+    const bar = Math.floor(step / 16) % chords.length;
+    const chord = chords[bar];
+    // rampTo 为 null 时表示固定频率（无频率滑音），对应原 tick 里仅
+    // setValueAtTime 而不用 exponentialRamp 的音符（3000Hz tick）。
+    const spawn = (type: OscillatorType, freq: number, rampTo: number | null, vol: number, dur: number) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, when);
+      if (rampTo !== null) o.frequency.exponentialRampToValueAtTime(rampTo, when + dur);
+      g.gain.setValueAtTime(vol, when);
+      g.gain.exponentialRampToValueAtTime(0.001, when + dur);
+      o.connect(g); g.connect(bgmGain);
+      o.start(when); o.stop(when + dur);
+      // onended 移除引用以便 GC；stop/seek 时 clearSynth 对仍挂着的 stop+disconnect。
+      o.onended = () => {
+        const i = this.synthPending.indexOf(o);
+        if (i >= 0) this.synthPending.splice(i, 1);
+      };
+      this.synthPending.push(o);
+    };
+    if (beat16 % 4 === 0) spawn('sine', 140, 35, 0.8, 0.12);
+    if (beat16 === 4 || beat16 === 12) spawn('triangle', 240, 80, 0.5, 0.1);
+    if (beat16 % 2 === 1) spawn('triangle', 3000, null, 0.15, 0.04);
+    // 琶音音符：sawtooth 强拍 / sine 其余；时长 = beatInterval*0.35。
+    const arpNote = chord[beat16 % chord.length];
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = (beat16 % 4 === 0) ? 'sawtooth' : 'sine';
+    o.frequency.setValueAtTime(arpNote, when);
+    g.gain.setValueAtTime(0.25, when);
+    const arpDur = (60 / this.synthBpm) * 0.35;
+    g.gain.exponentialRampToValueAtTime(0.001, when + arpDur);
+    o.connect(g); g.connect(bgmGain);
+    o.start(when); o.stop(when + arpDur);
+    o.onended = () => {
+      const i = this.synthPending.indexOf(o);
+      if (i >= 0) this.synthPending.splice(i, 1);
+    };
+    this.synthPending.push(o);
+  }
+
+  /** Lookahead 主循环：若下一个待排步已落入"当前 + 提前量"窗口内，则批量排布，
+   *  并把指针推进到窗口之外。已排布的音符在 AudioContext 时钟上精确触发，不受
+   *  主线程后续阻塞影响。 */
+  private scheduleSynthLookahead(): void {
+    if (this.synthLookaheadTimer) return; // 已有循环在跑
+    const lookaheadTick = (): void => {
+      this.synthLookaheadTimer = null;
+      if (!this.isPlaying || !this.ctx || !this.bgmGain) return;
+      // 防爆音：若主线程阻塞使排布指针落后于当前音频时钟（超过小余量），
+      // 跳过已错过的 step 而非补播——否则恢复瞬间多个 osc.start(过去时间)
+      // 会同时响起。错过即跳过，与旧 setInterval 丢弃堆积回调的语义一致。
+      const now = this.ctx.currentTime;
+      const behind = now - this.synthNextTime;
+      if (behind > 0.05) {
+        const skipSteps = Math.ceil(behind / this.synthStepInterval);
+        this.synthNextStep += skipSteps;
+        this.synthNextTime += skipSteps * this.synthStepInterval;
+      }
+      const horizon = now + AudioManager.SYNTH_LOOKAHEAD_SEC;
+      while (this.synthNextTime < horizon) {
+        this.scheduleSynthStep(this.synthNextStep, this.synthNextTime);
+        this.synthNextStep++;
+        this.synthNextTime += this.synthStepInterval;
+      }
+      this.synthLookaheadTimer = window.setTimeout(lookaheadTick, AudioManager.SYNTH_LOOKAHEAD_MS);
+    };
+    lookaheadTick();
+  }
+
+  /** 合成音符的和弦库（每 4 小节循环）。 */
+  private synthChords = [
+    [220, 277.18, 329.63, 440],
+    [174.61, 220, 261.63, 349.23],
+    [261.63, 329.63, 392, 523.25],
+    [196, 246.94, 293.66, 392],
+  ];
 }
 
 export const globalAudio = new AudioManager();

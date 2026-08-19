@@ -1643,7 +1643,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             {/* Beat HUD */}
             <div className="p-3 rounded-xl glass-sub border-white/12" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)' }}>
               <div className="text-[10px] uppercase font-bold text-white/50">{t('editor.curBeat')}</div>
-              <div className="text-3xl font-black font-orbitron text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 to-amber-300">
+              <div className="text-3xl font-black font-orbitron gradient-text bg-gradient-to-r from-cyan-300 to-amber-300">
                 {currentBeat.toFixed(2)}
               </div>
               <div className="flex justify-between items-center text-[11px] text-white/70 mt-1 font-mono">
