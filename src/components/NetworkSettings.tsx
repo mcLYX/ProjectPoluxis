@@ -72,9 +72,14 @@ export const NetworkSettings: React.FC = () => {
         {servers.map((s) => (
           <div
             key={s.id}
-            className={`glass-sub rounded-xl p-3 transition-shadow ${
-              current?.id === s.id ? 'ring-1 ring-cyan-400/70 shadow-[0_0_18px_rgba(34,211,238,0.45)]' : ''
-            }`}
+            className="glass-sub rounded-xl p-3 transition-shadow"
+            style={
+              current?.id === s.id
+                ? {
+                  boxShadow: '0 0 0 1px rgba(34,211,238,0.7), 0 0 10px rgba(34,211,238,0.45), inset 0 0 10px rgba(34,211,238,0.18)',
+                }
+                : undefined
+            }
           >
             {editingId === s.id ? (
               <div className="space-y-2">

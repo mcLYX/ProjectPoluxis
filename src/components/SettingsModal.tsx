@@ -400,7 +400,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const soundContent = (
     <div className="space-y-6">
       <section className="space-y-1.5">
-        <div className="flex justify-between"><label className="text-sm font-bold text-cyan-300">{t('settings.musicVol')}</label><span className={valueClass}>{Math.round(musicVolume * 100)}%</span></div>
+        <div className="flex justify-between"><label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Volume2 size={16} /> {t('settings.musicVol')}</label><span className={valueClass}>{Math.round(musicVolume * 100)}%</span></div>
         <input type="range" min="0" max="1" step="0.01" value={musicVolume} onChange={(e) => setMusicVolume(Number(e.target.value))} className={sliderClass} />
         <p className="text-[11px] text-white/50 leading-relaxed">
           {t('settings.musicVolHint')}
