@@ -3,7 +3,6 @@ import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 const GameCanvas = lazy(() => import('./components/GameCanvas').then(m => ({ default: m.GameCanvas })));
 const Editor2DCanvas = lazy(() => import('./components/Editor2DCanvas').then(m => ({ default: m.Editor2DCanvas })));
 const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').then(m => ({ default: m.VisualChartEditor })));
-const UnitTestModal = lazy(() => import('./components/UnitTestModal').then(m => ({ default: m.UnitTestModal })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
 import type { EditorTool, BatchSelection, QuickCreateDelta, MarqueeMode } from './components/VisualChartEditor';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
@@ -271,7 +270,6 @@ export function App() {
   const [clearBanner, setClearBanner] = useState<'FC' | 'AP' | 'AP+' | null>(null);
 
   // Modals
-  const [showUnitTest, setShowUnitTest] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   const [stats, setStats] = useState<GameStats>({
@@ -2055,9 +2053,6 @@ export function App() {
         </div>
       )}
 
-      <Suspense fallback={null}>
-      <UnitTestModal isOpen={showUnitTest} onClose={() => setShowUnitTest(false)} />
-      </Suspense>
       <Suspense fallback={null}>
       <SettingsModal
         isOpen={showSettings}
