@@ -13,6 +13,7 @@ import { storeFile, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
 import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet } from './types/game';
+import { qualityStore, useQuality } from './qualityStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
 import { getSkin, loadSkinTextures } from './data/skinStore';
 import type { EditorLaunchInfo, SongItem } from './types/beatmap';
@@ -136,6 +137,18 @@ function saveSettings(settings: typeof DEFAULT_SETTINGS) {
 export function App() {
   const { t } = useI18n();
   const initialSettings = loadSettings();
+  // R4-6: quality 渲染设置切片下沉到模块级 qualityStore（App 根 state 之外）。
+  // 幂等初始化；SettingsModal/App 经 useQuality 订阅，GameCanvas 仍以 props 接收。
+  qualityStore.init({
+    qualityMode: initialSettings.qualityMode,
+    customAntialias: initialSettings.customAntialias,
+    customBloom: initialSettings.customBloom,
+    customParticles: initialSettings.customParticles,
+    customDynamicLighting: initialSettings.customDynamicLighting,
+    customHitEffects: initialSettings.customHitEffects,
+    customRenderScale: initialSettings.customRenderScale,
+  });
+  const quality = useQuality();
   // 当前正在进行的谱面加载请求（用于防快速切歌覆盖 / 卸载取消，P2-9）。
   const loadChartAbortRef = useRef<AbortController | null>(null);
   useEffect(() => () => loadChartAbortRef.current?.abort(), []);
@@ -156,13 +169,7 @@ export function App() {
   const [projectionLeadMs, setProjectionLeadMs] = useState(initialSettings.projectionLeadMs);
   const [noteRenderDistance, setNoteRenderDistance] = useState(initialSettings.noteRenderDistance);
   const [noteSizeScale, setNoteSizeScale] = useState(initialSettings.noteSizeScale);
-  const [qualityMode, setQualityMode] = useState<QualityMode>(initialSettings.qualityMode);
-  const [customAntialias, setCustomAntialias] = useState(initialSettings.customAntialias);
-  const [customBloom, setCustomBloom] = useState(initialSettings.customBloom);
-  const [customParticles, setCustomParticles] = useState(initialSettings.customParticles);
-  const [customDynamicLighting, setCustomDynamicLighting] = useState(initialSettings.customDynamicLighting);
-  const [customHitEffects, setCustomHitEffects] = useState(initialSettings.customHitEffects);
-  const [customRenderScale, setCustomRenderScale] = useState(initialSettings.customRenderScale);
+  // quality 渲染设置已下沉 qualityStore（见上方 qualityStore.init / useQuality）。
   const [musicVolume, setMusicVolume] = useState(initialSettings.musicVolume);
   const [effectVolume, setEffectVolume] = useState(initialSettings.effectVolume);
   // 皮肤：选中 id → 预加载后的贴图集合（传给 GameCanvas）。
@@ -263,6 +270,13 @@ export function App() {
     score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0,
     goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: calculateRank(0),
   });
+  // R4-5: stats 镜像 ref。handleSongEnd 需读取最新 stats，但不能把 stats 放进其
+  // useCallback 依赖——否则每次判定 setStats 都会让 onSongEnd 换新身份，穿透
+  // GameCanvas 的 React.memo，导致每次判定整体重渲染。镜像 ref 解耦此问题。
+  const statsRef = useRef(stats);
+  useEffect(() => {
+    statsRef.current = stats;
+  }, [stats]);
 
   const [timingMarkers, setTimingMarkers] = useState<TimingMarker[]>([]);
   const [comboBurst, setComboBurst] = useState<{ key: number; value: number } | null>(null);
@@ -403,11 +417,11 @@ export function App() {
     }
     saveSettings({
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
-      noteSizeScale, qualityMode, customAntialias, customBloom,
-      customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume,
+      noteSizeScale, qualityMode: quality.qualityMode, customAntialias: quality.customAntialias, customBloom: quality.customBloom,
+      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, musicVolume, effectVolume,
       selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
-  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, qualityMode, customAntialias, customBloom, customParticles, customDynamicLighting, customHitEffects, customRenderScale, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
+  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
   // 选中皮肤变化时，预加载贴图（灰度图→THREE.Texture）。失败/无皮肤则回退纯色。
   // 菜单态不预加载：避免把 three 拉进首屏；进入游戏/编辑器（GameCanvas 挂载）前才按需下载贴图。
@@ -883,19 +897,19 @@ export function App() {
         setGameState('editor');
       } else {
         // Calculate badge for THIS play (shown on result card, including auto mode)
-        const badge = calcBadgeFromStats(stats);
+        const badge = calcBadgeFromStats(statsRef.current);
 
         // Save high score + best badge only if NOT auto play
         let isNewScore = false;
         let isNewB = false;
         if (currentSongInfo && !autoPlay) {
-          const result = submitScore(currentSongInfo.scoreKey, currentSongInfo.diffName, stats);
+          const result = submitScore(currentSongInfo.scoreKey, currentSongInfo.diffName, statsRef.current);
           isNewScore = result?.isNewScore ?? false;
           isNewB = result?.isNewBadge ?? false;
         }
 
         const info: ResultInfo = {
-          stats,
+          stats: statsRef.current,
           badge,
           isNewHighScore: isNewScore,
           isNewBadge: isNewB,
@@ -933,7 +947,7 @@ export function App() {
         }
       }
     }
-  }, [gameState, isPlayTestMode, currentSongInfo, stats, autoPlay, currentChart]);
+  }, [gameState, isPlayTestMode, currentSongInfo, autoPlay, currentChart]);
 
   const handleJudgementStable = useCallback((fb: JudgementFeedback) => {
     setStats((prev) => {
@@ -1164,7 +1178,7 @@ export function App() {
 
         const inEditorPreview = gameState === 'editor';
 
-        if (qualityMode !== 'low') {
+        if (quality.qualityMode !== 'low') {
           // Pump current BPM into the audio clock (~60fps) so the pulse stays
           // tempo-synced across BPM shifts. Derived from the LIVE audio time
           // (not React state) to avoid stale-beat drift.
@@ -1204,7 +1218,7 @@ export function App() {
     return () => {
       if (gameTimerRef.current) cancelAnimationFrame(gameTimerRef.current);
     };
-  }, [gameState, editorPreviewPlaying, qualityMode]);
+  }, [gameState, editorPreviewPlaying, quality]);
 
   // Visual Editor Callbacks
   const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number): { id: string; x: number; y: number; beat: number } | null => {
@@ -1570,7 +1584,7 @@ export function App() {
   return (
     <div className="relative w-full h-screen overflow-hidden bg-[#0a0d12] select-none text-white font-rajdhani">
       {/* Dynamic Ambient BG — fully static dark color in Low Quality Mode to save massive shader resources */}
-      {qualityMode === 'low' ? (
+      {quality.qualityMode === 'low' ? (
         <div className="absolute inset-0 bg-[#0e1218] pointer-events-none z-0" />
       ) : (
         <div
@@ -1602,13 +1616,13 @@ export function App() {
           projectionLeadMs={projectionLeadMs}
           noteRenderDistance={noteRenderDistance}
           noteSizeScale={noteSizeScale}
-          qualityMode={qualityMode}
-          antialias={qualityMode === 'custom' ? customAntialias : qualityMode !== 'low'}
-          allowBloom={qualityMode === 'custom' ? customBloom : (qualityMode === 'high' || qualityMode === 'ultra')}
-          allowParticles={qualityMode === 'custom' ? customParticles : (qualityMode === 'high' || qualityMode === 'ultra')}
-          allowDynamicLighting={qualityMode === 'custom' ? customDynamicLighting : qualityMode === 'ultra'}
-          allowHitEffects={qualityMode === 'custom' ? customHitEffects : qualityMode === 'ultra'}
-          renderScale={qualityMode === 'custom' ? customRenderScale : (qualityMode === 'low' ? 0.75 : 1.0)}
+          qualityMode={quality.qualityMode}
+          antialias={quality.qualityMode === 'custom' ? quality.customAntialias : quality.qualityMode !== 'low'}
+          allowBloom={quality.qualityMode === 'custom' ? quality.customBloom : (quality.qualityMode === 'high' || quality.qualityMode === 'ultra')}
+          allowParticles={quality.qualityMode === 'custom' ? quality.customParticles : (quality.qualityMode === 'high' || quality.qualityMode === 'ultra')}
+          allowDynamicLighting={quality.qualityMode === 'custom' ? quality.customDynamicLighting : quality.qualityMode === 'ultra'}
+          allowHitEffects={quality.qualityMode === 'custom' ? quality.customHitEffects : quality.qualityMode === 'ultra'}
+          renderScale={quality.qualityMode === 'custom' ? quality.customRenderScale : (quality.qualityMode === 'low' ? 0.75 : 1.0)}
           autoPlay={autoPlay}
           playSession={playSession}
           isEditorMode={gameState === 'editor'}
@@ -2016,20 +2030,6 @@ export function App() {
         setNoteRenderDistance={setNoteRenderDistance}
         noteSizeScale={noteSizeScale}
         setNoteSizeScale={setNoteSizeScale}
-        qualityMode={qualityMode}
-        setQualityMode={setQualityMode}
-        customAntialias={customAntialias}
-        setCustomAntialias={setCustomAntialias}
-        customBloom={customBloom}
-        setCustomBloom={setCustomBloom}
-        customParticles={customParticles}
-        setCustomParticles={setCustomParticles}
-        customDynamicLighting={customDynamicLighting}
-        setCustomDynamicLighting={setCustomDynamicLighting}
-        customHitEffects={customHitEffects}
-        setCustomHitEffects={setCustomHitEffects}
-        customRenderScale={customRenderScale}
-        setCustomRenderScale={setCustomRenderScale}
         musicVolume={musicVolume}
         setMusicVolume={setMusicVolume}
         effectVolume={effectVolume}

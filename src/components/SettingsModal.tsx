@@ -5,6 +5,8 @@ import { useI18n, LANGS } from '../i18n';
 import { NetworkSettings } from './NetworkSettings';
 import { DocContent } from './DocModal';
 import SkinManager from './SkinManager';
+// R4-6: quality 渲染设置改由模块级 qualityStore 承载（不再经 App props 传递）。
+import { qualityStore, useQuality } from '../qualityStore';
 
 /** 自定义档位下的单项开关（抗锯齿 / Bloom / 粒子）。 */
 const QualityToggle: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({
@@ -39,20 +41,7 @@ interface SettingsModalProps {
   setNoteRenderDistance: (value: number) => void;
   noteSizeScale: number;
   setNoteSizeScale: (value: number) => void;
-  qualityMode: QualityMode;
-  setQualityMode: (value: QualityMode) => void;
-  customAntialias: boolean;
-  setCustomAntialias: (value: boolean) => void;
-  customBloom: boolean;
-  setCustomBloom: (value: boolean) => void;
-  customParticles: boolean;
-  setCustomParticles: (value: boolean) => void;
-  customDynamicLighting: boolean;
-  setCustomDynamicLighting: (value: boolean) => void;
-  customHitEffects: boolean;
-  setCustomHitEffects: (value: boolean) => void;
-  customRenderScale: number;
-  setCustomRenderScale: (value: number) => void;
+  // qualityMode + 5×custom* 已下沉 qualityStore，不再经 props 传入。
   musicVolume: number;
   setMusicVolume: (value: number) => void;
   effectVolume: number;
@@ -88,20 +77,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setNoteRenderDistance,
   noteSizeScale,
   setNoteSizeScale,
-  qualityMode,
-  setQualityMode,
-  customAntialias,
-  setCustomAntialias,
-  customBloom,
-  setCustomBloom,
-  customParticles,
-  setCustomParticles,
-  customDynamicLighting,
-  setCustomDynamicLighting,
-  customHitEffects,
-  setCustomHitEffects,
-  customRenderScale,
-  setCustomRenderScale,
   musicVolume,
   setMusicVolume,
   effectVolume,
@@ -117,6 +92,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const { t, lang, setLang } = useI18n();
   const [tab, setTab] = useState<SettingsTab>('graphics');
+  // R4-6: quality 切片从 qualityStore 订阅（仅本组件重渲染）。
+  const quality = useQuality();
   if (!isOpen) return null;
 
   const sliderClass = 'w-full accent-cyan-400 cursor-pointer';
@@ -141,22 +118,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       <section className="space-y-1.5">
         <div className="flex justify-between">
           <label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Zap size={16} /> {t('settings.effects')}</label>
-          <span className={valueClass}>{qualityLabel(qualityMode)}</span>
+          <span className={valueClass}>{qualityLabel(quality.qualityMode)}</span>
         </div>
         <input
           type="range"
           min="0" max="4" step="1"
-          value={qualityIdx[qualityMode]}
-          onChange={(e) => setQualityMode(qualityOrder[Number(e.target.value)])}
+          value={qualityIdx[quality.qualityMode]}
+          onChange={(e) => qualityStore.set({ qualityMode: qualityOrder[Number(e.target.value)] })}
           className={sliderClass}
         />
         <div className="flex justify-between text-[11px] text-white/40 font-mono">
           <span>{qualityLabel('low')}</span><span>{qualityLabel('standard')}</span><span>{qualityLabel('high')}</span><span>{qualityLabel('ultra')}</span><span>{qualityLabel('custom')}</span>
         </div>
-        <p className="text-[11px] text-white/50 leading-relaxed">{qualityDesc(qualityMode)}</p>
+        <p className="text-[11px] text-white/50 leading-relaxed">{qualityDesc(quality.qualityMode)}</p>
       </section>
 
-      {qualityMode === 'custom' && (
+      {quality.qualityMode === 'custom' && (
         <section className="space-y-3 p-4 rounded-xl glass-sub border border-cyan-400/30">
           <div className="flex items-center gap-2 text-sm font-bold text-cyan-300">
             <Sliders size={16} /> {t('settings.custom.title')}
@@ -165,15 +142,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-3">
               <label className="text-sm font-medium text-white/80">{t('settings.custom.renderScale')}</label>
-              <span className={valueClass}>{(customRenderScale * 100).toFixed(0)}%</span>
+              <span className={valueClass}>{(quality.customRenderScale * 100).toFixed(0)}%</span>
             </div>
             <input
               type="range"
               min="0.25"
               max="2"
               step="0.05"
-              value={customRenderScale}
-              onChange={(e) => setCustomRenderScale(Number(e.target.value))}
+              value={quality.customRenderScale}
+              onChange={(e) => qualityStore.set({ customRenderScale: Number(e.target.value) })}
               className={sliderClass}
             />
             <div className="flex justify-between text-[11px] text-white/40 font-mono">
@@ -184,28 +161,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           <QualityToggle
             label={t('settings.custom.antialias')}
-            checked={customAntialias}
-            onChange={setCustomAntialias}
+            checked={quality.customAntialias}
+            onChange={(v) => qualityStore.set({ customAntialias: v })}
           />
           <QualityToggle
             label={t('settings.custom.bloom')}
-            checked={customBloom}
-            onChange={setCustomBloom}
+            checked={quality.customBloom}
+            onChange={(v) => qualityStore.set({ customBloom: v })}
           />
           <QualityToggle
             label={t('settings.custom.particles')}
-            checked={customParticles}
-            onChange={setCustomParticles}
+            checked={quality.customParticles}
+            onChange={(v) => qualityStore.set({ customParticles: v })}
           />
           <QualityToggle
             label={t('settings.custom.dynamicLighting')}
-            checked={customDynamicLighting}
-            onChange={setCustomDynamicLighting}
+            checked={quality.customDynamicLighting}
+            onChange={(v) => qualityStore.set({ customDynamicLighting: v })}
           />
           <QualityToggle
             label={t('settings.custom.hitEffects')}
-            checked={customHitEffects}
-            onChange={setCustomHitEffects}
+            checked={quality.customHitEffects}
+            onChange={(v) => qualityStore.set({ customHitEffects: v })}
           />
         </section>
       )}

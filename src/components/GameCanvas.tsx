@@ -3165,6 +3165,8 @@ const arePropsEqual = (prev: GameCanvasProps, next: GameCanvasProps): boolean =>
   for (const key of Object.keys(next) as Array<keyof GameCanvasProps>) {
     // During playback, gameTime prop is read from globalAudio instead — skip it.
     if (playing && key === 'gameTime') continue;
+    // quality 派生 props（qualityMode/antialias/allow*/renderScale）为低频稳定项，
+    // 仅设置弹窗变更（R4-6 起经 qualityStore 驱动），此处浅比较已正确避免误重渲。
     if (prev[key] !== next[key]) return false;
   }
   return true;
