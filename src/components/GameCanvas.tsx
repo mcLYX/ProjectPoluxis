@@ -601,6 +601,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // refs so the mount-effect loop can read/restart it without re-running setup.
   const viewportActiveRef = useRef(true);
   const startLoopRef = useRef<() => void>(() => {});
+  // Tracks whether the rAF render loop is currently scheduled. Lets re-arm
+  // triggers (viewport re-activate / gameplay start) restart a stopped loop
+  // without double-scheduling a second rAF chain.
+  const runningRef = useRef(false);
+  // Timestamp (performance.now) of the last successful tick. The frame
+  // watchdog uses it to detect a stalled loop and force-restart it.
+  const lastTickPerfRef = useRef(0);
   const pointersRef = useRef<Map<number, { x: number; y: number; down: boolean; active: boolean; type: string }>>(new Map());
   const dragPointerIdRef = useRef<number | null>(null);
   const pointerDownStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -1136,6 +1143,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (viewportActive) startLoopRef.current();
   }, [viewportActive]);
 
+  // Re-arm the render loop when gameplay actually starts. The single initial
+  // rAF scheduled inside the heavy setup effect (WebGL context creation,
+  // forceContextLoss/dispose, scene rebuild) can be dropped on low-end iOS
+  // when the main thread is saturated at game start — and `viewportActive`
+  // does NOT change at that moment (it is already true during play), so the
+  // effect above never re-fires to recover it. That leaves the scene frozen
+  // (incl. background particles) while audio/judge logic keep running off
+  // audio.getCurrentTime(). Re-arming on `isPlaying` recovers a dropped loop
+  // within the same session, without needing a pause/retry.
+  useEffect(() => {
+    if (isPlaying) startLoopRef.current();
+  }, [isPlaying]);
+
   // `vpKey` is bumped when the 3D viewport becomes visible again (see the
   // ResizeObserver below) so the heavy setup effect re-runs with correct
   // dimensions and the metadata edited while hidden.
@@ -1513,16 +1533,42 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // meshes and all refs stay alive, just no tick/render runs. The
     // `startLoopRef` closure re-arms it when the viewport becomes active again.
     const loop = () => {
-      if (!viewportActiveRef.current) return;
+      if (!viewportActiveRef.current) { runningRef.current = false; return; }
+      runningRef.current = true;
       animId = requestAnimationFrame(loop);
       tick();
     };
+    // Idempotent: only (re)schedules if the viewport is active AND no loop is
+    // already running. Prevents a double rAF chain when called from multiple
+    // triggers (viewport re-activate, gameplay start) in the same frame.
     startLoopRef.current = () => {
-      if (viewportActiveRef.current) animId = requestAnimationFrame(loop);
+      if (viewportActiveRef.current && !runningRef.current) {
+        runningRef.current = true;
+        animId = requestAnimationFrame(loop);
+      }
     };
-    animId = requestAnimationFrame(loop);
+    startLoopRef.current();
+    // Frame watchdog: if the viewport should be rendering but no tick has run
+    // for >1s, force-restart the rAF loop. This self-heals transient stalls
+    // that the single initial rAF (scheduled inside this heavy setup, e.g.
+    // WebGL context creation / forceContextLoss / scene rebuild) cannot
+    // guarantee on low-end iOS at game start, plus any tick exception that
+    // breaks the chain. Without it, the scene (incl. background particles)
+    // freezes while audio/judge keep running — recoverable only via a view
+    // update (tap / orientation change). 1s << normal frame cadence, so a
+    // merely-slow frame never trips it.
+    lastTickPerfRef.current = performance.now();
+    const watchdog = setInterval(() => {
+      if (!viewportActiveRef.current) return;
+      if (performance.now() - lastTickPerfRef.current > 1000) {
+        runningRef.current = false;
+        startLoopRef.current();
+      }
+    }, 400);
     return () => {
       cancelAnimationFrame(animId);
+      clearInterval(watchdog);
+      runningRef.current = false;
       window.removeEventListener('resize', onResize);
       resetPlayState();
       // Dispose legacy EffectComposer resources
@@ -1956,6 +2002,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   };
 
   const tick = () => {
+    lastTickPerfRef.current = performance.now();
     const scene = sceneRef.current; const camera = cameraRef.current; const renderer = rendererRef.current;
     if (!scene || !camera || !renderer) return;
     const playing = isPlayingRef.current && !isPausedRef.current;
