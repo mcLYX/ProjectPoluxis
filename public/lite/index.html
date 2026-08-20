@@ -360,7 +360,7 @@
       </div>
       <div class="modal-row">
         <label data-i18n="setProj">判定框浮现</label>
-        <input type="range" id="set-proj" min="0" max="1000" step="50">
+        <input type="range" id="set-proj" min="0" max="2000" step="50">
         <span class="val" id="val-proj">500ms</span>
       </div>
       <div class="modal-row">
@@ -1444,35 +1444,36 @@ if (!Object.assign) {
     this.init();
     leadInSec = leadInSec || 0;
     this.leadInTime = leadInSec;
-    /* The single chart -> audio conversion point. Clamped at 0 because the
-     * buffer cannot start before its first sample; clamping consistently
-     * (clock anchor and buffer start both use offsetSec) keeps them in sync. */
-    var offsetSec = Math.max(0, (startChartSec || 0) - this.userOffset);
+    /* The single chart -> audio conversion point (mirrors AudioManager.play).
+     * NOT clamped: audioStartSec may be negative (positive offset — the song
+     * hasn't begun yet, stays silent) OR positive (negative offset — the song
+     * is ALREADY partway when the chart starts, so audio must begin DURING the
+     * lead-in rather than wait until beat 0 and then jump to a middle offset). */
+    var audioStartSec = (startChartSec || 0) - this.userOffset;
     /* 兼容模式：锚定墙钟，使 getCurrentTime() 在 compat 下读到
-     * (offsetSec - leadInSec) + userOffset，并与 Web Audio 路径一致。
-     * 必须放在 offsetSec 求定之后——否则 offsetSec 为 undefined，
-     * chartWallMs=NaN，getCurrentTime() 返回 NaN，谱面直接定格。 */
-    if (this.compatMode) this.chartWallMs = now() - (offsetSec - leadInSec) * 1000;
+     * startChartSec - leadInSec（(audioStartSec - leadInSec) + userOffset 化简后
+     * 抵消 userOffset）。必须在 audioStartSec 求定之后——否则 undefined → NaN 定格。 */
+    if (this.compatMode) this.chartWallMs = now() - (audioStartSec - leadInSec) * 1000;
     var self = this;
+    /* 负延迟时歌曲已进行到 audioStartSec，lead-in 需按该值缩短（甚至无需等待）。 */
+    var effLeadIn = Math.max(0, leadInSec - audioStartSec);
     if (this.useHtml5) {
       this.stop();
       this.isPlaying = true;
       /* Shift start time forward so that getCurrentTime() returns
-       * offsetSec - leadInSec + userOffset immediately, matching the
-       * Web Audio API behaviour. */
-      this.startTime = now() - (offsetSec - leadInSec) * 1000;
+       * startChartSec - leadInSec immediately, matching the Web Audio path. */
+      this.startTime = now() - (audioStartSec - leadInSec) * 1000;
       if (this.htmlAudioEl) {
-        try { this.htmlAudioEl.currentTime = Math.max(0, offsetSec); } catch (e) {}
+        try { this.htmlAudioEl.currentTime = Math.max(0, audioStartSec); } catch (e) {}
         this.htmlAudioEl.volume = this.musicVolume;
-        /* Delay playback by leadInSec seconds to match the Web Audio path.
-         * Use setTimeout — less precise than Web Audio scheduling, but
-         * acceptable for the IE11 fallback. */
-        if (leadInSec > 0) {
+        /* Negative offset: the song is already partway, so start as soon as the
+         * (possibly zero) shortened lead-in elapses instead of the full leadIn. */
+        if (effLeadIn > 0) {
           window.setTimeout(function () {
             if (!self.isPlaying) return;
             var p = self.htmlAudioEl.play();
             if (p && typeof p.catch === 'function') p.catch(function () { /* autoplay blocked */ });
-          }, leadInSec * 1000);
+          }, effLeadIn * 1000);
         } else {
           var p = this.htmlAudioEl.play();
           if (p && typeof p.catch === 'function') p.catch(function () { /* autoplay blocked */ });
@@ -1481,20 +1482,25 @@ if (!Object.assign) {
       return;
     }
     if (!this.ctx) return; this.stop();
-    /* startTime is shifted forward by leadInSec so that getCurrentTime()
-     * returns offsetSec - leadInSec + userOffset right after play(),
-     * counting up normally. Real audio starts leadInSec seconds later
-     * from offsetSec, preserving note <-> audio synchronisation. */
-    this.startTime = this.ctx.currentTime - offsetSec + leadInSec;
+    /* startTime is anchored so getCurrentTime() returns startChartSec - leadInSec
+     * right after play() and counts up normally. Real audio begins when the
+     * chart clock reaches the offset (baseStart), from the song's beginning
+     * (offset 0); for negative offset that is DURING the lead-in. For a mid-song
+     * resume (baseStart in the past) we start now from the current audio position. */
+    this.startTime = this.ctx.currentTime - audioStartSec + leadInSec;
     this.isPlaying = true;
     var useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
-    var audioStartInCtx = this.ctx.currentTime + leadInSec;
+    var baseStart = this.ctx.currentTime + leadInSec - audioStartSec;
     if (useBuffer && this.bgmBuffer && this.bgmGain) {
       this.bgmSource = this.ctx.createBufferSource(); this.bgmSource.buffer = this.bgmBuffer;
       this.bgmSource.connect(this.bgmGain);
-      this.bgmSource.start(audioStartInCtx, Math.max(0, offsetSec));
+      if (baseStart >= this.ctx.currentTime) {
+        this.bgmSource.start(baseStart, 0);
+      } else {
+        this.bgmSource.start(this.ctx.currentTime, audioStartSec);
+      }
     } else {
-      this.startSynthesizedMusic(Math.max(0, offsetSec), leadInSec);
+      this.startSynthesizedMusic(Math.max(0, audioStartSec), effLeadIn);
     }
   };
   LiteAudio.prototype.pause = function () { if (!this.isPlaying) return; this.pauseTime = this.getCurrentTime(); this.stop(); };
