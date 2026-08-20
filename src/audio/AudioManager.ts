@@ -349,7 +349,13 @@ export class AudioManager {
    *                loop). Starts at 0 at the first sample. NEVER leaves this
    *                class.
    *   chart time — the clock the chart / notes / editor / HUD live in.
-   *                chartTime = audioTime + userAudioOffset.
+   *                chartTime = audioTime + userAudioOffset * playbackRate.
+   *
+   *  The offset is scaled by playbackRate because it compensates for OUTPUT
+   *  LATENCY (Bluetooth etc.), a REAL-TIME delay L. Since the chart clock runs
+   *  at `playbackRate` relative to wall time, a real delay L is L*rate chart
+   *  seconds. Without this scaling the compensation is only correct at rate 1
+   *  and audio drifts vs. the chart at other speeds. See toAudioTime below.
    *
    * EVERY public method of AudioManager speaks CHART TIME (play, seek,
    * getCurrentTime, pause position). Callers must never add or subtract the
@@ -362,14 +368,19 @@ export class AudioManager {
    *  stay exact and keep reading the real chart time even when it is below the
    *  offset (including negative values during lead-in). The buffer is started
    *  later (at the ctx time when audio time reaches 0, i.e. chart time ==
-   *  userAudioOffset) so the two coordinates never desync. */
+   *  userAudioOffset * playbackRate) so the two coordinates never desync.
+   *
+   *  The user offset compensates OUTPUT LATENCY (a real-time delay). Because the
+   *  chart clock runs at `playbackRate`, that real delay must be expressed as
+   *  `userAudioOffset * playbackRate` chart seconds — otherwise the compensation
+   *  is only correct at rate 1 and audio drifts vs. the chart at other speeds. */
   private toAudioTime(chartSec: number): number {
-    return chartSec - this.userAudioOffset;
+    return chartSec - this.userAudioOffset * this.playbackRate;
   }
 
-  /** audio time -> chart time. */
+  /** audio time -> chart time. Mirrors toAudioTime (offset scaled by rate). */
   private toChartTime(audioSec: number): number {
-    return audioSec + this.userAudioOffset;
+    return audioSec + this.userAudioOffset * this.playbackRate;
   }
 
   /** 兼容模式下的墙钟秒数（audio-time 坐标）：不依赖 ctx.currentTime，不受
@@ -760,14 +771,20 @@ export class AudioManager {
       this.playbackRate = clamped;
       return;
     }
-    // Preserve the current position across the rate switch by re-anchoring
-    // startTime. The offset plays no part here: it is a constant shift between
-    // the two coordinates, so preserving audio time preserves chart time too.
+    // Preserve the current CHART position across the rate switch. Because the
+    // offset is now scaled by playbackRate (toAudioTime/toChartTime), the
+    // `chartTime = audioTime + offset*rate` term changes with the rate, so we
+    // must shift the audio anchor by that delta to keep the current chartTime
+    // continuous (otherwise the chart would jump by offset*(rate_new-rate_old)
+    // the instant you change speed).
     const audioTime = this.getAudioTime();
+    const prevOffsetRate = this.userAudioOffset * this.playbackRate;
+    const nextOffsetRate = this.userAudioOffset * clamped;
     this.playbackRate = clamped;
-    this.startTime = this.ctx.currentTime - audioTime / this.playbackRate;
+    const anchoredAudioTime = audioTime + (prevOffsetRate - nextOffsetRate);
+    this.startTime = this.ctx.currentTime - anchoredAudioTime / this.playbackRate;
     // 兼容模式：同步重锚墙钟，使 getCurrentTime() 在变速后保持连续。
-    this.chartWallMs = performance.now() - (audioTime * 1000) / this.playbackRate;
+    this.chartWallMs = performance.now() - (anchoredAudioTime * 1000) / this.playbackRate;
     // Update the running source's rate in place (pitch shifts with speed).
     if (this.bgmSource) {
       this.bgmSource.playbackRate.value = clamped;

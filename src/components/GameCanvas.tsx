@@ -608,6 +608,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // Timestamp (performance.now) of the last successful tick. The frame
   // watchdog uses it to detect a stalled loop and force-restart it.
   const lastTickPerfRef = useRef(0);
+  // Single rAF handle, shared across loop/startLoop/cleanup so the loop chain
+  // can always be cancelled. A `runningRef` token guarantees at most ONE chain
+  // ever exists — stale chains self-terminate instead of accumulating.
+  const animIdRef = useRef(0);
   const pointersRef = useRef<Map<number, { x: number; y: number; down: boolean; active: boolean; type: string }>>(new Map());
   const dragPointerIdRef = useRef<number | null>(null);
   const pointerDownStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -1527,25 +1531,29 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       }
     };
     window.addEventListener('resize', onResize);
-    let animId = 0;
-    // Self-scheduling render loop. When the viewport is inactive (editor in 2D
-    // view) the loop stops scheduling itself entirely — the WebGL scene, note
-    // meshes and all refs stay alive, just no tick/render runs. The
-    // `startLoopRef` closure re-arms it when the viewport becomes active again.
+    // Single-chain render loop guarded by a `runningRef` token. The loop only
+    // keeps scheduling itself while the token is true AND the viewport is
+    // active; flipping the token false makes any live chain self-terminate on
+    // its very next frame. This guarantees AT MOST ONE chain ever exists — a
+    // force-restart (watchdog / viewport re-activate) cannot accumulate
+    // duplicate rAF chains, which previously multiplied tick() work every time
+    // it fired (cause of the progressive frame-rate drop on iOS).
     const loop = () => {
-      if (!viewportActiveRef.current) { runningRef.current = false; return; }
-      runningRef.current = true;
-      animId = requestAnimationFrame(loop);
+      if (!viewportActiveRef.current || !runningRef.current) {
+        runningRef.current = false;
+        return;
+      }
+      animIdRef.current = requestAnimationFrame(loop);
       tick();
     };
-    // Idempotent: only (re)schedules if the viewport is active AND no loop is
-    // already running. Prevents a double rAF chain when called from multiple
-    // triggers (viewport re-activate, gameplay start) in the same frame.
+    // Re-arm the loop. Idempotent: a live chain never triggers a second one.
+    // Always cancels the single tracked handle first so even a stray chain is
+    // killed before a fresh one is scheduled.
     startLoopRef.current = () => {
-      if (viewportActiveRef.current && !runningRef.current) {
-        runningRef.current = true;
-        animId = requestAnimationFrame(loop);
-      }
+      if (!viewportActiveRef.current || runningRef.current) return;
+      cancelAnimationFrame(animIdRef.current);
+      runningRef.current = true;
+      animIdRef.current = requestAnimationFrame(loop);
     };
     startLoopRef.current();
     // Frame watchdog: if the viewport should be rendering but no tick has run
@@ -1561,12 +1569,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const watchdog = setInterval(() => {
       if (!viewportActiveRef.current) return;
       if (performance.now() - lastTickPerfRef.current > 1000) {
+        // Drop the token first: any live chain sees runningRef=false on its
+        // next frame and self-terminates, then a single fresh chain is armed.
         runningRef.current = false;
         startLoopRef.current();
       }
     }, 400);
     return () => {
-      cancelAnimationFrame(animId);
+      cancelAnimationFrame(animIdRef.current);
       clearInterval(watchdog);
       runningRef.current = false;
       window.removeEventListener('resize', onResize);
