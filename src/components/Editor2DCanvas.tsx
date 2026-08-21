@@ -52,6 +52,9 @@ interface Editor2DCanvasProps {
   onMarqueeSelect: (hitIds: string[], mode: MarqueeMode) => void;
   /** 多选批量移动：写入一组绝对位置（头节点与子节点 id 均可）。 */
   onMoveNotes: (positions: Array<{ id: string; x: number; y: number; beat: number }>) => void;
+  /** Preview mode: the 2D editor overlays a live 3D viewport, so its background
+   *  must be semi-transparent (not opaque) to let the 3D show through. */
+  preview?: boolean;
 }
 
 /* Beat <-> chart-time conversion. Both directions delegate to the shared
@@ -97,9 +100,13 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   onSelectNotes,
   onMarqueeSelect,
   onMoveNotes,
+  preview = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Read in the rAF draw loop without re-subscribing it on every toggle.
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
 
   const chartRef = useRef(chart);
   chartRef.current = chart;
@@ -275,9 +282,19 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       const cssW = w / dpr;
       const cssH = h / dpr;
 
-      // Background (whole canvas)
-      ctx.fillStyle = '#070a0f';
-      ctx.fillRect(0, 0, cssW, cssH);
+      // Background (whole canvas). In preview mode the 2D editor sits ON TOP of
+      // a live 3D viewport, so clear to transparent and paint only a *semi*
+      // -transparent veil (real per-pixel alpha, canvas composited over the DOM)
+      // instead of the opaque fill. The 3D stage behind shows through the veil
+      // while the fully-opaque grid/notes drawn below stay readable.
+      if (previewRef.current) {
+        ctx.clearRect(0, 0, cssW, cssH);
+        ctx.fillStyle = 'rgba(7,10,15,0.4)';
+        ctx.fillRect(0, 0, cssW, cssH);
+      } else {
+        ctx.fillStyle = '#070a0f';
+        ctx.fillRect(0, 0, cssW, cssH);
+      }
 
       const field = fieldRect(cssW, cssH);
       // Clip drawing to the centered playfield
@@ -286,7 +303,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       ctx.rect(field.left, field.top, field.width, field.height);
       ctx.clip();
       // Playfield background
-      ctx.fillStyle = 'rgba(10,16,24,0.9)';
+      ctx.fillStyle = previewRef.current ? 'rgba(10,16,24,0.3)' : 'rgba(10,16,24,0.9)';
       ctx.fillRect(field.left, field.top, field.width, field.height);
 
       // Lane separators (vertical) — same inner inset as notes, so they align.
@@ -297,7 +314,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const lx = X_MIN + i * xStep;
         const lx01 = (lx - X_MIN) / X_SPAN;
         const px = field.left + FIELD_INNER_PAD_X + lx01 * (field.width - FIELD_INNER_PAD_X * 2);
-        ctx.strokeStyle = i % 2 === 0 ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)';
+        ctx.strokeStyle = i % 2 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)';
         ctx.beginPath();
         ctx.moveTo(px, field.top);
         ctx.lineTo(px, field.top + field.height);
@@ -319,7 +336,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const py = worldToPixel(tb, 0, cssW, cssH, curTime).py;
         if (py < field.top - 2 || py > field.top + field.height + 2) continue;
         const isInteger = Number.isInteger(Math.round(b * 1000) / 1000);
-        ctx.strokeStyle = isInteger ? 'rgba(120,200,255,0.18)' : 'rgba(120,200,255,0.07)';
+        ctx.strokeStyle = isInteger ? 'rgba(120,200,255,0.2)' : 'rgba(120,200,255,0.1)';
         ctx.lineWidth = isInteger ? 1.2 : 0.6;
         ctx.beginPath();
         ctx.moveTo(fl, py);

@@ -242,6 +242,7 @@ export function App() {
   const [editorVlineCount, setEditorVlineCount] = useState<number>(13);
   const [editorPxPerBeat, setEditorPxPerBeat] = useState<number>(100);
   const [editorViewMode, setEditorViewMode] = useState<'3d' | '2d'>('3d');
+  const [editorPreview3D, setEditorPreview3D] = useState(false);
   const [isPlayTestMode, setIsPlayTestMode] = useState(false);
   const playTestStartBeatRef = useRef(0);
   // 试玩起点（秒 / 拍）与“是否从当前位置开始”，用于暂停后重试时回到
@@ -1648,7 +1649,7 @@ export function App() {
         <Suspense fallback={null}>
         <GameCanvas
           chart={currentChart}
-          viewportActive={!(gameState === 'editor' && editorViewMode === '2d')}
+          viewportActive={!(gameState === 'editor' && editorViewMode === '2d' && !editorPreview3D)}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}
           gameTime={gameTime}
@@ -1695,6 +1696,7 @@ export function App() {
           <Editor2DCanvas
             chart={currentChart}
             gameTime={gameTime}
+            preview={editorPreview3D}
             isPlaying={editorPreviewPlaying}
             snapSubdivision={snapSubdivision}
             activeTool={effectiveEditorTool}
@@ -1743,6 +1745,8 @@ export function App() {
           marqueeMode={marqueeMode}
           snapSubdivision={snapSubdivision}
           viewMode={editorViewMode}
+          preview3D={editorPreview3D}
+          onTogglePreview3D={() => setEditorPreview3D((v) => !v)}
           onSetViewMode={(mode) => {
             setEditorViewMode(mode);
             if (mode === '2d' && editorTool === 'quick-create') {

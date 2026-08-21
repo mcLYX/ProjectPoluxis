@@ -125,6 +125,10 @@ interface VisualChartEditorProps {
   /** 编辑器“高级功能”放置规则 DSL（仅本地配置，不写入谱面）。 */
   editorDsl: string;
   onEditorDslChange: (dsl: string) => void;
+  /** Live 3D preview behind the 2D editor (2D 背景半透明, 透出背后 3D 舞台). */
+  preview3D?: boolean;
+  /** 切换 3D 预览开关。 */
+  onTogglePreview3D?: () => void;
 }
 
 /** Numeric field that allows an EMPTY state (commits `null` on empty). The
@@ -453,6 +457,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onStartPlayTest,
   viewMode,
   onSetViewMode,
+  preview3D,
+  onTogglePreview3D,
   onApplyQuickCreateDelta: _onApplyQuickCreateDelta,
   editorDsl,
   onEditorDslChange,
@@ -1705,6 +1711,15 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                           >+</button>
                         </div>
                       </div>
+                      <label className="flex items-center gap-1.5 text-[11px] text-white/70 cursor-pointer pt-1">
+                        <input
+                          type="checkbox"
+                          checked={!!preview3D}
+                          onChange={() => onTogglePreview3D?.()}
+                          className="accent-cyan-400"
+                        />
+                        {t('editor.preview3d')}
+                      </label>
                     </div>
                   )}
                 </div>
@@ -2111,14 +2126,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             <NumField
               value={liveDrag && liveDrag.id === selectedNote.id ? liveDrag.x : selectedNote.x}
               onCommit={(v) => handleModifySelected({ x: v ?? 0 })}
-              step="any" min={-2.4} max={2.4}
+              step={0.1} min={-2.4} max={2.4}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
             <NumField
               value={liveDrag && liveDrag.id === selectedNote.id ? liveDrag.y : selectedNote.y}
               onCommit={(v) => handleModifySelected({ y: v ?? 0 })}
-              step="any" min={-1.5} max={1.5}
+              step={0.1} min={-1.5} max={1.5}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
@@ -2167,14 +2182,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               <NumField
                 value={cl ? cl.x : sn.x}
                 onCommit={(v) => handlePatchSlideNode(i, { x: v ?? 0 })}
-                step="any" min={-2.4} max={2.4}
+                step={0.1} min={-2.4} max={2.4}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
               <NumField
                 value={cl ? cl.y : sn.y}
                 onCommit={(v) => handlePatchSlideNode(i, { y: v ?? 0 })}
-                step="any" min={-1.5} max={1.5}
+                step={0.1} min={-1.5} max={1.5}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
