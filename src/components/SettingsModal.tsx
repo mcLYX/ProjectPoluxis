@@ -158,7 +158,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               className={sliderClass}
             />
             <div className="flex justify-between text-[11px] text-white/40 font-mono">
-              <span>50%</span><span>200%</span>
+              <span>25%</span><span>200%</span>
             </div>
             <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.custom.renderScaleHint')}</p>
           </div>
