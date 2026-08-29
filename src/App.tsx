@@ -243,6 +243,8 @@ export function App() {
   const [editorPxPerBeat, setEditorPxPerBeat] = useState<number>(100);
   const [editorViewMode, setEditorViewMode] = useState<'3d' | '2d'>('3d');
   const [editorPreview3D, setEditorPreview3D] = useState(false);
+  /** 2D 编辑器画布上是否叠加音频波形（需已加载真实音频，非自带合成器）。 */
+  const [editorShowWaveform, setEditorShowWaveform] = useState(false);
   const [isPlayTestMode, setIsPlayTestMode] = useState(false);
   const playTestStartBeatRef = useRef(0);
   // 试玩起点（秒 / 拍）与“是否从当前位置开始”，用于暂停后重试时回到
@@ -1697,6 +1699,7 @@ export function App() {
             chart={currentChart}
             gameTime={gameTime}
             preview={editorPreview3D}
+            showWaveform={editorShowWaveform}
             isPlaying={editorPreviewPlaying}
             snapSubdivision={snapSubdivision}
             activeTool={effectiveEditorTool}
@@ -1747,6 +1750,8 @@ export function App() {
           viewMode={editorViewMode}
           preview3D={editorPreview3D}
           onTogglePreview3D={() => setEditorPreview3D((v) => !v)}
+          showWaveform={editorShowWaveform}
+          onToggleShowWaveform={() => setEditorShowWaveform((v) => !v)}
           onSetViewMode={(mode) => {
             setEditorViewMode(mode);
             if (mode === '2d' && editorTool === 'quick-create') {

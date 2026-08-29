@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { globalAudio } from '../audio/AudioManager';
 import { beatToSecondsMultiBpm, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
+import { getWaveformPeaks, peakInRange } from '../utils/waveform';
 import type { ChartData, NoteData, EasingType } from '../types/game';
 import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
@@ -20,6 +21,13 @@ const FIELD_INNER_PAD_X = 30;
 /** Vertical position of the judgement line (fraction of field height from top).
  *  More room above for upcoming (future) notes. */
 const JUDGE_FRAC = 0.8;
+/** Full-scale waveform amplitude (1.0) reaches this fraction of the playfield's
+ *  half-width, so the loudest peaks never actually touch the field edges. */
+const WAVE_AMP_RATIO = 0.618;
+/** Waveform fill. Kept translucent so grid lines / notes drawn afterwards stay
+ *  legible; dimmer in preview mode, where the 3D stage shows through behind. */
+const WAVE_FILL = 'rgba(130,205,255,0.15)';
+const WAVE_FILL_PREVIEW = 'rgba(130,205,255,0.1)';
 
 interface Editor2DCanvasProps {
   chart: ChartData;
@@ -55,6 +63,10 @@ interface Editor2DCanvasProps {
   /** Preview mode: the 2D editor overlays a live 3D viewport, so its background
    *  must be semi-transparent (not opaque) to let the 3D show through. */
   preview?: boolean;
+  /** Overlay a semi-transparent waveform of the loaded audio. Only has an
+   *  effect when a real audio file is loaded (see AudioManager.isUsingRealAudio)
+   *  — the built-in synthesizer produces no sample data to draw. */
+  showWaveform?: boolean;
 }
 
 /* Beat <-> chart-time conversion. Both directions delegate to the shared
@@ -101,6 +113,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   onMarqueeSelect,
   onMoveNotes,
   preview = false,
+  showWaveform = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -165,6 +178,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   vlineRef.current = vlineCount;
   const pxPerBeatRef = useRef(pxPerBeat);
   pxPerBeatRef.current = pxPerBeat;
+  const showWaveformRef = useRef(showWaveform);
+  showWaveformRef.current = showWaveform;
 
   // Drag state
   const dragRef = useRef<{
@@ -326,6 +341,44 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       const fw = field.width - FIELD_INNER_PAD_X * 2;
       const judgeY = field.top + field.height * JUDGE_FRAC;
       const curBeat = timeToBeat(curTime, segs);
+
+      // ----- Audio waveform overlay (optional) -----
+      // Time runs vertically (later = up, exactly like the notes) and amplitude
+      // horizontally, mirrored about the field's centre line.
+      //
+      // Alignment: a row's vertical position maps to CHART seconds, which
+      // already contain chart.metadata.offset — so the waveform inherits the
+      // metadata offset for free. The user's audio offset is deliberately NOT
+      // applied (unlike AudioManager's own chart<->audio conversion): it
+      // compensates output latency — what you HEAR — and must not slide the
+      // waveform away from the notes it is meant to be read against.
+      if (showWaveformRef.current && globalAudio.isUsingRealAudio()) {
+        const wbuf = globalAudio.getActiveBuffer();
+        if (wbuf) {
+          const wp = getWaveformPeaks(wbuf);
+          const centreX = fl + fw / 2;
+          const maxHalf = (fw / 2) * WAVE_AMP_RATIO;
+          const pxPerBeatNow = pxPerBeatRef.current;
+          const fieldBottom = field.top + field.height;
+          const rowTop = Math.floor(field.top);
+          ctx.fillStyle = previewRef.current ? WAVE_FILL_PREVIEW : WAVE_FILL;
+          // One beat->time conversion per row: rows are contiguous and time is
+          // monotonic, so each row reuses the previous row's lower edge as its
+          // own upper edge.
+          let tHi = beatToSecondsMultiBpm(curBeat + (judgeY - rowTop) / pxPerBeatNow, bpm, offset, bpmlist);
+          for (let py = rowTop; py < fieldBottom; py += 1) {
+            const tLo = beatToSecondsMultiBpm(curBeat + (judgeY - (py + 1)) / pxPerBeatNow, bpm, offset, bpmlist);
+            const amp = peakInRange(wp, tLo, tHi);
+            tHi = tLo;
+            if (amp <= 0) continue;
+            const halfW = amp * maxHalf;
+            // Height slightly over 1 so adjacent rows never leave a seam once
+            // the backing store is scaled by dpr.
+            ctx.fillRect(centreX - halfW, py, halfW * 2, 1.4);
+          }
+        }
+      }
+
       const topBeat = curBeat + (judgeY - field.top) / pxPerBeatRef.current;
       const botBeat = curBeat + (judgeY - (field.top + field.height)) / pxPerBeatRef.current;
       const startBeat = Math.floor(Math.min(topBeat, botBeat)) - 1;

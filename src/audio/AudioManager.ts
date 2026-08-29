@@ -190,6 +190,14 @@ export class AudioManager {
     return this.bgmBuffer;
   }
 
+  /** True when playback uses a real decoded audio file rather than the built-in
+   *  procedural synthesizer — i.e. exactly the case in which there IS sample
+   *  data to draw (the editor's waveform overlay keys off this). Mirrors the
+   *  `useBuffer` test used by play()/seek() so the two can never disagree. */
+  public isUsingRealAudio(): boolean {
+    return !!(this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer);
+  }
+
   public getMusicVolume(): number {
     return this.musicVolume;
   }

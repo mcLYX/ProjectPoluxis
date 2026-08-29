@@ -129,6 +129,10 @@ interface VisualChartEditorProps {
   preview3D?: boolean;
   /** 切换 3D 预览开关。 */
   onTogglePreview3D?: () => void;
+  /** 2D 画布上叠加半透明音频波形（仅在已加载真实音频、而非自带合成器时生效）。 */
+  showWaveform?: boolean;
+  /** 切换音频波形开关。 */
+  onToggleShowWaveform?: () => void;
 }
 
 /** Numeric field that allows an EMPTY state (commits `null` on empty). The
@@ -459,6 +463,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onSetViewMode,
   preview3D,
   onTogglePreview3D,
+  showWaveform,
+  onToggleShowWaveform,
   onApplyQuickCreateDelta: _onApplyQuickCreateDelta,
   editorDsl,
   onEditorDslChange,
@@ -1719,6 +1725,17 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                           className="accent-cyan-400"
                         />
                         {t('editor.preview3d')}
+                      </label>
+                      {/* 音频波形：勾选后 2D 画布按时间轴叠加半透明波形。仅当已加载
+                          真实音频文件（非自带合成器）时才有样本数据可画。 */}
+                      <label className="flex items-center gap-1.5 text-[11px] text-white/70 cursor-pointer pt-1">
+                        <input
+                          type="checkbox"
+                          checked={!!showWaveform}
+                          onChange={() => onToggleShowWaveform?.()}
+                          className="accent-cyan-400"
+                        />
+                        {t('editor.showWaveform')}
                       </label>
                     </div>
                   )}
