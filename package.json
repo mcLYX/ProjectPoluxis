@@ -1,7 +1,7 @@
 {
   "name": "poluxis",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.4.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dev:toy": "vite --config vite.toy.config.ts --mode toy",
+    "build:toy": "vite build --config vite.toy.config.ts --mode toy"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.2",

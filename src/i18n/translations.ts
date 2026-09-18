@@ -18,6 +18,11 @@ export const translations: AllDicts = {
     'action.cancel': '取消',
     'action.close': '关闭',
 
+    // --- 横竖屏提示 ---
+    'orientation.hint': '此游戏更适合横屏游玩',
+    'orientation.subtitle': '请将设备旋转至横屏，以获得最佳游玩体验',
+    'orientation.dismiss': '继续竖屏',
+
     // --- SongSelect ---
     'songselect.doc': '说明',
     'songselect.upload': '上传',
@@ -49,6 +54,7 @@ export const translations: AllDicts = {
     'songcard.accent': '强调色',
     'songcard.difficulties': '难度谱面',
     'songcard.deleteDifficulty': '删除该难度',
+    'songcard.share': '分享',
 
     // --- VisualChartEditor ---
     'editor.editorTitle': '谱面编辑器',
@@ -491,6 +497,11 @@ export const translations: AllDicts = {
     'action.cancel': 'Cancel',
     'action.close': 'Close',
 
+    // --- orientation hint ---
+    'orientation.hint': 'This game plays better in landscape',
+    'orientation.subtitle': 'Rotate your device to landscape for the best experience',
+    'orientation.dismiss': 'Continue in portrait',
+
     // --- SongSelect ---
     'songselect.doc': 'Guide',
     'songselect.upload': 'Upload',
@@ -522,6 +533,7 @@ export const translations: AllDicts = {
     'songcard.accent': 'Accent',
     'songcard.difficulties': 'Difficulties',
     'songcard.deleteDifficulty': 'Delete difficulty',
+    'songcard.share': 'Share',
 
     // --- VisualChartEditor ---
     'editor.editorTitle': 'Chart Editor',
@@ -964,6 +976,11 @@ export const translations: AllDicts = {
     'action.cancel': 'キャンセル',
     'action.close': '閉じる',
 
+    // --- 横縦向きヒント ---
+    'orientation.hint': 'このゲームは横向きでのプレイに最適です',
+    'orientation.subtitle': '横向きに回転すると最適な体験になります',
+    'orientation.dismiss': '縦向きのまま続ける',
+
     // --- SongSelect ---
     'songselect.doc': '説明',
     'songselect.upload': 'アップロード',
@@ -995,6 +1012,7 @@ export const translations: AllDicts = {
     'songcard.accent': 'アクセントカラー',
     'songcard.difficulties': '難易度譜面',
     'songcard.deleteDifficulty': 'この難易度を削除',
+    'songcard.share': 'シェア',
 
     // --- VisualChartEditor ---
     'editor.editorTitle': '譜面エディタ',

@@ -15,6 +15,7 @@ import type { JudgeSystemContext } from '../hooks/judgeContext';
 import { useJudgeSystem } from '../hooks/useJudgeSystem';
 import { useNoteEffects } from '../hooks/useNoteEffects';
 import { useEditorGestures } from '../hooks/useEditorGestures';
+import { setCanvasCapturer } from '../utils/canvasCapture';
 
 import { globalAudio } from '../audio/AudioManager';
 import { liveDragStore } from '../liveDragStore';
@@ -1222,6 +1223,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const renderer = new THREE.WebGLRenderer({
       antialias: useAA,
       alpha: true,
+      // 允许在帧结束后读取画布（结算截图 / 分享成绩用）。轻微性能开销，可接受。
+      preserveDrawingBuffer: true,
       powerPreference: 'high-performance'
     });
     // Per-material clipping planes drive the slide-pipe "clip at the judgement
@@ -1237,6 +1240,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const existingCanvas = container.querySelector('canvas');
     if (existingCanvas) existingCanvas.remove();
     container.appendChild(renderer.domElement); rendererRef.current = renderer;
+    // 注册截图函数：结算分享时抓取当前游戏画面（不把 3D 模块静态引入首屏）。
+    setCanvasCapturer(() => {
+      const r = rendererRef.current;
+      const s = sceneRef.current;
+      const c = cameraRef.current;
+      if (!r) return null;
+      try {
+        if (s && c) r.render(s, c);
+        return r.domElement.toDataURL('image/png');
+      } catch {
+        return null;
+      }
+    });
 
     // iOS Safari (tabbed AND standalone/PWA) arms a double-tap-zoom gesture
     // recognizer per touch *target*. That recognizer holds the 2nd+ rapid tap

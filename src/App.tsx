@@ -6,11 +6,12 @@ const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').th
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
 import type { EditorTool, BatchSelection, QuickCreateDelta, MarqueeMode } from './components/VisualChartEditor';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
+import { OrientationHint } from './components/OrientationHint';
 import { TimingBar, TimingMarker } from './components/TimingBar';
 import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
-import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
+import { resolveBeatmapUrl, resolveCoverUrl, parseDifficultyMeta } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
@@ -21,7 +22,9 @@ import { clampInt } from './utils/math';
 import { safeStorage } from './utils/storage';
 import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
 import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
-import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats } from './utils/scoreStore';
+import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats, getAllHighScores, mergeCloudHighScores, type HighScoreMap } from './utils/scoreStore';
+import { getPlatform } from './platform';
+import { composeResultCard } from './utils/resultCard';
 import { globalAudio } from './audio/AudioManager';
 import { useI18n } from './i18n';
 import { applyDslToNote, loadEditorDsl, saveEditorDsl } from './utils/editorRules';
@@ -921,46 +924,103 @@ export function App() {
           isNewB = result?.isNewBadge ?? false;
         }
 
-        const info: ResultInfo = {
-          stats: statsRef.current,
-          badge,
-          isNewHighScore: isNewScore,
-          isNewBadge: isNewB,
-          songId: currentSongInfo?.songId ?? null,
-          diffName: currentSongInfo?.diffName ?? null,
-          meta: {
-            title: currentChart.metadata.title,
-            artist: currentChart.metadata.artist,
-            difficulty: currentChart.metadata.difficulty,
-            bpm: currentChart.metadata.bpm,
-          },
-        };
-
-        // Back to song select in "result card" mode (bars hidden, enlarged card)
-        const showResult = () => {
-          setResultInfo(info);
-          setGameState('menu');
-          setTransitionPhase('fade-in');
-          transitionTimerRef.current = window.setTimeout(() => {
-            setTransitionPhase('idle');
-            transitionTimerRef.current = null;
-          }, 300);
-        };
-
-        // Show clear banner (FC / AP / AP+) first if earned
-        if (badge) {
-          setClearBanner(badge);
-          window.setTimeout(() => {
-            setClearBanner(null);
-            showResult();
-          }, 1800);
-        } else {
-          // No badge — wait for audio fade-out (1s) then show result
-          window.setTimeout(showResult, 1000);
+        // 平台上报：Toy 端提交排行榜 + 云镜像进度；web 端为空操作 / 本地。
+        // 不阻塞结算展示（fire-and-forget）。
+        if (currentSongInfo && !autoPlay) {
+          getPlatform()
+            .then((platform) => {
+              platform.submitScore({
+                score: statsRef.current.score,
+                songId: currentSongInfo.scoreKey,
+                difficulty: currentSongInfo.diffName,
+                accuracy: statsRef.current.accuracy,
+                rank: statsRef.current.rank,
+                maxCombo: statsRef.current.maxCombo,
+              });
+              platform.saveProgress('highscores', getAllHighScores());
+            })
+            .catch(() => {});
         }
+
+        // 结算后游戏画面已清空，分享图不以游戏 canvas 为底；改为专辑图（无则强调色
+        // 渐变）作背景，异步合成一张带完整结算信息的成绩卡片用于分享。
+        // 封面优先取曲目 cover（idb:// 需异步读库转 blob URL），回退到谱面 jacket。
+        const meta = {
+          title: currentChart.metadata.title,
+          artist: currentChart.metadata.artist,
+          difficulty: currentChart.metadata.difficulty,
+          bpm: currentChart.metadata.bpm,
+        };
+
+        findSongById(currentSongInfo?.songId ?? '')
+          .then((songItem) => resolveCoverUrl(currentChart.metadata.jacket || songItem?.cover || ''))
+          .then((jacketUrl) => {
+            const info: ResultInfo = {
+              stats: statsRef.current,
+              image: undefined,
+              badge,
+              isNewHighScore: isNewScore,
+              isNewBadge: isNewB,
+              songId: currentSongInfo?.songId ?? null,
+              diffName: currentSongInfo?.diffName ?? null,
+              meta,
+            };
+
+            composeResultCard({
+              stats: statsRef.current,
+              badge,
+              isNewHighScore: isNewScore,
+              meta,
+              jacket: jacketUrl || null,
+              accentColor: currentChart.metadata.bgScheme.accentColor,
+              isAutoplay: autoPlay,
+            })
+              .then((card) => {
+                if (!card) return;
+                info.image = card;
+                // 若结算卡片已展示则刷新；否则等 showResult 里 setResultInfo(info) 生效
+                setResultInfo((prev) => (prev === info ? { ...info } : prev));
+              })
+              .catch(() => {});
+
+            // Back to song select in "result card" mode (bars hidden, enlarged card)
+            const showResult = () => {
+              setResultInfo(info);
+              setGameState('menu');
+              setTransitionPhase('fade-in');
+              transitionTimerRef.current = window.setTimeout(() => {
+                setTransitionPhase('idle');
+                transitionTimerRef.current = null;
+              }, 300);
+            };
+
+            // Show clear banner (FC / AP / AP+) first if earned
+            if (badge) {
+              setClearBanner(badge);
+              window.setTimeout(() => {
+                setClearBanner(null);
+                showResult();
+              }, 1800);
+            } else {
+              // No badge — wait for audio fade-out (1s) then show result
+              window.setTimeout(showResult, 1000);
+            }
+          })
+          .catch(() => {});
       }
     }
   }, [gameState, isPlayTestMode, currentSongInfo, autoPlay, currentChart]);
+
+  // 启动时从平台拉回跨设备进度（Toy 端为云存储；web 端本地，无网络）。
+  // 合并策略只升不降，不影响本地已有更好成绩。失败静默。
+  useEffect(() => {
+    getPlatform()
+      .then((platform) => platform.loadProgress<HighScoreMap>('highscores'))
+      .then((cloud) => {
+        if (cloud) mergeCloudHighScores(cloud);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleJudgementStable = useCallback((fb: JudgementFeedback) => {
     setStats((prev) => {
@@ -2117,6 +2177,9 @@ export function App() {
           </div>
         </div>
       )}
+
+      {/* 横竖屏提示：竖屏游玩时建议横屏，切横屏自动消失，可手动关闭 */}
+      <OrientationHint />
 
       {/* 轻量 Toast（谱面保存反馈等） */}
       {appToast && (

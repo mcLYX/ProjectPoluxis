@@ -92,6 +92,24 @@ export function resolveBeatmapUrl(url?: string): string {
   return `${BASE_URL}${url.replace(/^\//, '')}`;
 }
 
+/**
+ * 解析可用于 <img>/canvas 绘制的封面地址。
+ * - idb:// 资源同步缓存未命中时，走异步 resolveIdbUrl 读库生成 blob URL（封面通常
+ *   不会被预取，resolveBeatmapUrl 会原样返回 idb:// 导致浏览器无法加载）。
+ * - 远程 http(s)/blob 原样返回；相对路径按 BASE_URL 重写。
+ */
+export async function resolveCoverUrl(ref?: string): Promise<string> {
+  if (!ref) return '';
+  if (ref.startsWith('idb://')) {
+    try {
+      return await resolveIdbUrl(ref);
+    } catch {
+      return '';
+    }
+  }
+  return resolveBeatmapUrl(ref);
+}
+
 export function buildBuiltinAlbum(): AlbumItem {
   const entries = Object.entries(DEMO_CHARTS);
   const bySong = new Map<string, { id: string; chart: ChartData }[]>();

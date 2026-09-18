@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+import packageJson from "./package.json";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +12,9 @@ const __dirname = path.dirname(__filename);
 // https://vite.dev/config/
 // 标准多文件构建（适合 OpenResty / nginx 静态托管）。
 //
+// 版本号注入：web 构建为 package.json 的 version（toy 构建在 vite.toy.config.ts
+// 追加 `_toy` 后缀），供 DocModal 等统一消费，避免硬编码。
+
 // 部署说明：
 // - 默认根目录部署：base 用 './'（相对路径），PWA 的 start_url/scope 也走相对，
 //   子目录下同样可正常注册 Service Worker 与 manifest。
@@ -18,6 +22,10 @@ const __dirname = path.dirname(__filename);
 //   其余 PWA 配置（manifest.start_url、scope、SW 注册路径）都会被插件按 base 自动处理，
 //   无需逐处手动加前缀。
 export default defineConfig({
+  // 版本号注入（toy 构建在 vite.toy.config.ts 追加 `_toy` 后缀）。
+  define: {
+    __APP_VERSION__: JSON.stringify(packageJson.version),
+  },
   base: "./",
   build: {
     assetsDir: "assets",
@@ -102,6 +110,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      // web 构建：virtual:toy-platform → 公共占位桩（零 B站代码）。
+      // toy 构建由 vite.toy.config.ts 覆盖此别名指向私有 adapters/toy.ts。
+      "virtual:toy-platform": path.resolve(__dirname, "src/platform/adapters/__toy_stub.ts"),
     },
   },
   server: {

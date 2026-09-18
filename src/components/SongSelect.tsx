@@ -71,6 +71,8 @@ export interface ResultInfo {
   badge: ClearBadge | null;
   isNewHighScore: boolean;
   isNewBadge: boolean;
+  /** 结算瞬间抓取的游戏画面（PNG dataURL），用于分享/截图；无可用画面时为 undefined。 */
+  image?: string;
   /** null → played a custom chart (file manager / not in manifest) */
   songId: string | null;
   diffName: string | null;

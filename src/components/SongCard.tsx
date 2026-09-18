@@ -9,10 +9,11 @@ const EDIT_INPUT_STYLE: React.CSSProperties = {
   WebkitBackdropFilter: 'blur(6px)',
 };
 import { resolveBeatmapUrl, isFallbackSong, countLeafSongs, albumHasPlayableSong } from '../data/beatmapLoader';
-import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft, Save, Trash2 } from 'lucide-react';
+import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft, Save, Trash2, Share } from 'lucide-react';
 import { getHighScore, HighScoreEntry, ClearBadge } from '../utils/scoreStore';
 import { GameStats } from '../types/game';
 import { useI18n } from '../i18n';
+import { getPlatform } from '../platform';
 
 /** Play-result payload shown on the enlarged "result" variant of the card. */
 export interface SongCardResultData {
@@ -20,6 +21,8 @@ export interface SongCardResultData {
   badge: ClearBadge | null;
   isNewHighScore: boolean;
   isNewBadge: boolean;
+  /** 结算瞬间抓取的游戏画面（PNG dataURL），用于分享/截图。 */
+  image?: string;
 }
 
 interface SongCardProps {
@@ -210,6 +213,23 @@ export const SongCard: React.FC<SongCardProps> = ({
       onCollapse();
     } else {
       onExpand();
+    }
+  };
+
+  // 结算卡片「分享成绩」：把当前游戏画面（resultData.image）分享 / 保存到相册。
+  // Toy 端走 toy.share + saveImageToAlbum；web 端走 Web Share / 下载（见平台适配器）。
+  const handleShare = async () => {
+    if (!resultData?.image) return;
+    try {
+      const blob = await (await fetch(resultData.image)).blob();
+      const platform = await getPlatform();
+      await platform.shareResult({
+        image: blob,
+        title: item.title,
+        text: `${item.title} · ${resultData.stats.rank} · ${Math.round(resultData.stats.score).toLocaleString()}`,
+      });
+    } catch {
+      /* 用户取消或不支持 → 静默 */
     }
   };
 
@@ -564,6 +584,19 @@ export const SongCard: React.FC<SongCardProps> = ({
           </div>
         ) : (
           <div className="flex items-center gap-2">
+            {inResult && (
+              <button
+                data-action="share"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleShare();
+                }}
+                className="px-4 py-2.5 rounded-xl bg-black/40 backdrop-blur-sm border border-white/25 text-white/85 hover:bg-white/10 hover:scale-105 active:scale-95 font-bold text-sm transition flex items-center gap-1.5"
+              >
+                <Share size={14} />
+                {t('songcard.share')}
+              </button>
+            )}
             {inResult && (
               <button
                 data-action="exit-result"

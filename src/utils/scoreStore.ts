@@ -152,6 +152,31 @@ export function clearAllHighScores() {
 }
 
 /**
+ * 把云端最高分合并回本地（跨设备进度同步）。仅取更高分数 / 更好徽章，不降级本地成绩。
+ * 用于 Toy 端从云存储拉回进度后写回本地。cloud 非法时直接忽略。
+ */
+export function mergeCloudHighScores(cloud: HighScoreMap): void {
+  if (!cloud || typeof cloud !== 'object') return;
+  const all = loadFromStorage();
+  let changed = false;
+  for (const [key, entry] of Object.entries(cloud)) {
+    if (!entry || typeof entry.score !== 'number') continue;
+    const prev = all[key];
+    if (!prev || entry.score > prev.score) {
+      all[key] = entry;
+      changed = true;
+    } else {
+      const better = higherBadge(prev.bestBadge, entry.bestBadge);
+      if (better !== prev.bestBadge) {
+        all[key] = { ...prev, bestBadge: better };
+        changed = true;
+      }
+    }
+  }
+  if (changed) saveToStorage(all);
+}
+
+/**
  * 清除某谱面的成绩。
  *  - 不传 difficultyName：清除该谱面全部难度的成绩（如整首谱面被删除）。
  *  - 传 difficultyName：只清除被修改保存的那一个难度的成绩，其余难度成绩保留。
