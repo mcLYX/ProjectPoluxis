@@ -57,6 +57,18 @@ export interface SkinTextureSet {
   projection?: import('three').Texture;
 }
 
+/** 2D 渲染器（quality 'lite'）使用的皮肤图集：纯图片，不依赖 three.js。
+ *  与 SkinTextureSet 一一对应，仅元素类型从 THREE.Texture 换成可直接 drawImage 的图源。 */
+export interface SkinImageSet {
+  tap?: CanvasImageSource;
+  touch?: CanvasImageSource;
+  slide?: CanvasImageSource;
+  projTap?: CanvasImageSource;
+  projTouch?: CanvasImageSource;
+  projSlide?: CanvasImageSource;
+  projection?: CanvasImageSource;
+}
+
 /** Easing curve for the segment connecting a slide node to its previous node.
  *  - 'linear'  : straight line (default).
  *  - 'sine-in' : curve leaves the previous node perpendicularly, then bends in
@@ -72,6 +84,7 @@ export type JudgementType = 'S-Perfect' | 'Perfect' | 'Good' | 'Miss';
 
 /**
  * Graphics quality tiers.
+ * - 'lite':    Replaces the 3D scene with a 2D canvas renderer (no WebGL at all).
  * - 'low':     No antialiasing, pixelRatio locked to 1.0, ambient bg is flat color.
  * - 'standard': Antialiasing on, pixelRatio up to 1.5, ambient bg uses audio frequency.
  * - 'high':    Standard + Bloom post-processing (if chart.effectToggles.bloom)
@@ -81,7 +94,7 @@ export type JudgementType = 'S-Perfect' | 'Perfect' | 'Good' | 'Miss';
  * - 'custom':  User-defined tier; antialias / bloom / particles / renderScale
  *              are each controlled independently via the custom* settings.
  */
-export type QualityMode = 'low' | 'standard' | 'high' | 'ultra' | 'custom';
+export type QualityMode = 'lite' | 'low' | 'standard' | 'high' | 'ultra' | 'custom';
 
 /** A single child node of a slide chain (the head is the NoteData itself). */
 export interface SlideNodeData {

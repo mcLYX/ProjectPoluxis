@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 // 重度/非首屏组件按需懒加载，降低菜单首屏 JS 体积（three 等仅在使用时下载）。
 const GameCanvas = lazy(() => import('./components/GameCanvas').then(m => ({ default: m.GameCanvas })));
+// 2D canvas renderer (quality 'lite'). Does NOT import three.js, so its chunk stays tiny.
+const GameCanvas2D = lazy(() => import('./components/GameCanvas2D').then(m => ({ default: m.GameCanvas2D })));
 const Editor2DCanvas = lazy(() => import('./components/Editor2DCanvas').then(m => ({ default: m.Editor2DCanvas })));
 const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').then(m => ({ default: m.VisualChartEditor })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
@@ -12,10 +14,10 @@ import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
 import { resolveBeatmapUrl, resolveCoverUrl, parseDifficultyMeta } from './data/beatmapLoader';
-import type { QualityMode, SkinTextureSet } from './types/game';
+import type { QualityMode, SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
-import { getSkin, loadSkinTextures } from './data/skinStore';
+import { getSkin, loadSkinImages, loadSkinTextures } from './data/skinStore';
 import type { EditorLaunchInfo, SongItem } from './types/beatmap';
 import { calculateNoteScore, calculateRank } from './utils/scoring';
 import { clampInt } from './utils/math';
@@ -80,7 +82,7 @@ const DEFAULT_SETTINGS = {
   // 当前选中的皮肤 id；null 表示使用默认纯色外观。
   selectedSkinId: null as string | null,
   // 默认皮肤（未选皮肤包时）的自定义项。
-  // 默认皮肤音符边框 = 内框(跟随音符色,1px) + 外框(软边纹理,可自定义)。判定框颜色恒等于音符色。
+  // 默认皮肤音符边框 = 内框(跟随音符色) + 外框(软边纹理,可自定义)。判定框颜色恒等于音符色。
   defaultSkinInnerEnabled: true,   // 内框开关，默认开
   defaultSkinOuterEnabled: false,  // 外框开关，默认关（关闭时外框不渲染）
   defaultSkinOuterWidth: 0.05,     // 外框粗细（仅开关启用时生效）
@@ -185,6 +187,8 @@ export function App() {
   // 皮肤：选中 id → 预加载后的贴图集合（传给 GameCanvas）。
   const [selectedSkinId, setSelectedSkinId] = useState<string | null>(initialSettings.selectedSkinId);
   const [skinTextures, setSkinTextures] = useState<SkinTextureSet | null>(null);
+  // Lite（2D 渲染器）皮肤图集：纯图片，无需 three.js。
+  const [skinImages, setSkinImages] = useState<SkinImageSet | null>(null);
   // 默认皮肤（未选皮肤包时）自定义项。
   const [defaultSkinInnerEnabled, setDefaultSkinInnerEnabled] = useState(initialSettings.defaultSkinInnerEnabled);
   const [defaultSkinOuterEnabled, setDefaultSkinOuterEnabled] = useState(initialSettings.defaultSkinOuterEnabled);
@@ -193,6 +197,9 @@ export function App() {
   const [defaultSkinOuterAlpha, setDefaultSkinOuterAlpha] = useState(initialSettings.defaultSkinOuterAlpha);
   const [defaultSkinJudgeWidth, setDefaultSkinJudgeWidth] = useState(initialSettings.defaultSkinJudgeWidth);
   const [playSession, setPlaySession] = useState(0);
+  // 渲染器"预热"标记：一旦进过游戏/编辑器就记住，返回菜单时保持挂载，使菜单的
+  // 模糊背景仍能透视后面的场景；首屏菜单仍不加载 three（未预热 → 不挂载）。
+  const [rendererWarmed, setRendererWarmed] = useState<{ d3: boolean; d2: boolean }>({ d3: false, d2: false });
   const [hasCustomAudio, setHasCustomAudio] = useState(false);
   const [songSelectState, setSongSelectState] = useState<SongSelectNavState | null>(null);
   // Stable identity so SongSelect's state-sync useEffect doesn't loop on every
@@ -447,16 +454,39 @@ export function App() {
     (async () => {
       if (!selectedSkinId) {
         setSkinTextures(null);
+        setSkinImages(null);
         return;
       }
       const meta = await getSkin(selectedSkinId);
-      const tex = await loadSkinTextures(meta);
-      if (!cancelled) setSkinTextures(tex);
+      if (quality.qualityMode === 'lite') {
+        // 2D 渲染器：加载纯图片皮肤（不导入 three.js）。
+        const imgs = await loadSkinImages(meta);
+        if (!cancelled) {
+          setSkinImages(imgs);
+          setSkinTextures(null);
+        }
+      } else {
+        const tex = await loadSkinTextures(meta);
+        if (!cancelled) {
+          setSkinTextures(tex);
+          setSkinImages(null);
+        }
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedSkinId, gameState]);
+  }, [selectedSkinId, gameState, quality.qualityMode]);
+
+  // 标记渲染器已预热（按当前画质种类分别记录，避免 Lite 会话后返回菜单时误加载 three）。
+  useEffect(() => {
+    if (gameState === 'menu') return;
+    const lite = quality.qualityMode === 'lite';
+    setRendererWarmed((w) => {
+      if (lite) return w.d2 ? w : { ...w, d2: true };
+      return w.d3 ? w : { ...w, d3: true };
+    });
+  }, [gameState, quality.qualityMode]);
 
   // Calculate current beat from gameTime. Uses the shared inverse so charts
   // with a bpmlist stay accurate (a plain bpm*t/60 would drift after the first
@@ -1684,10 +1714,28 @@ export function App() {
     }
   }, [currentChart]);
 
+  // Quality routing (see QualityMode in types/game.ts):
+  //  - 'lite': the editor AND gameplay both use the 2D canvas renderer
+  //    (GameCanvas2D) — three.js is never loaded.
+  //  - otherwise: the Three.js scene (GameCanvas) is used for both.
+  //  - The custom* options only tune the 3D scene.
+  const isLiteRenderer = quality.qualityMode === 'lite';
+  const quality3D: QualityMode = isLiteRenderer ? 'low' : quality.qualityMode;
+  // Lazy mount: the renderer is only pulled in when entering the editor or a chart
+  // — never on a cold start at the menu. Once it has been warmed (played/edited at
+  // least once) it stays mounted so the menu's blurred backdrop still shows the
+  // scene behind. 'lite' never loads three (uses GameCanvas2D instead).
+  const show3D = !isLiteRenderer && (gameState !== 'menu' || rendererWarmed.d3);
+  const show2D = isLiteRenderer && (gameState !== 'menu' || rendererWarmed.d2);
+  // Whether the perspective viewport is the active surface: in the editor the
+  // top-down 2D canvas (Editor2DCanvas) takes over when viewMode === '2d' and
+  // 3D preview is off.
+  const viewportActive = !(gameState === 'editor' && editorViewMode === '2d' && !editorPreview3D);
+
   return (
     <div className="relative w-full h-screen overflow-hidden bg-[#0a0d12] select-none text-white font-rajdhani">
       {/* Dynamic Ambient BG — fully static dark color in Low Quality Mode to save massive shader resources */}
-      {quality.qualityMode === 'low' ? (
+      {quality.qualityMode === 'low' || quality.qualityMode === 'lite' ? (
         <div className="absolute inset-0 bg-[#0e1218] pointer-events-none z-0" />
       ) : (
         <div
@@ -1696,13 +1744,14 @@ export function App() {
         />
       )}
 
-      {/* 3D Viewport — always mounted. In 2D editor mode the viewport stays
-          mounted but GameCanvas pauses its rAF render loop via `viewportActive`
-          (zero background cost: no render, no window update, no per-frame work),
-          so switching back to 3D resumes instantly without rebuilding the WebGL
-          scene / re-creating every note mesh (that rebuild was a [Violation]
-          multi-hundred-ms hitch). The paused loop therefore no longer starves
-          the 2D canvas of frame budget either. */}
+      {/* 3D Viewport — mounted lazily: only when entering the editor or a chart,
+          so three.js is not pulled into the first paint (menu). Inside the editor
+          the viewport stays mounted and GameCanvas pauses its rAF render loop via
+          `viewportActive` (zero background cost) when the 2D editor mode is
+          active, so switching back to 3D resumes instantly without rebuilding the
+          WebGL scene. When quality is 'lite' the 3D scene is skipped entirely and
+          GameCanvas2D is used during play instead (see below). */}
+      {show3D && (
       <div
         className="absolute inset-0 z-0"
         data-viewport="3d"
@@ -1711,7 +1760,7 @@ export function App() {
         <Suspense fallback={null}>
         <GameCanvas
           chart={currentChart}
-          viewportActive={!(gameState === 'editor' && editorViewMode === '2d' && !editorPreview3D)}
+          viewportActive={viewportActive}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}
           gameTime={gameTime}
@@ -1719,13 +1768,13 @@ export function App() {
           projectionLeadMs={projectionLeadMs}
           noteRenderDistance={noteRenderDistance}
           noteSizeScale={noteSizeScale}
-          qualityMode={quality.qualityMode}
-          antialias={quality.qualityMode === 'custom' ? quality.customAntialias : quality.qualityMode !== 'low'}
-          allowBloom={quality.qualityMode === 'custom' ? quality.customBloom : (quality.qualityMode === 'high' || quality.qualityMode === 'ultra')}
-          allowParticles={quality.qualityMode === 'custom' ? quality.customParticles : (quality.qualityMode === 'high' || quality.qualityMode === 'ultra')}
-          allowDynamicLighting={quality.qualityMode === 'custom' ? quality.customDynamicLighting : quality.qualityMode === 'ultra'}
-          allowHitEffects={quality.qualityMode === 'custom' ? quality.customHitEffects : quality.qualityMode === 'ultra'}
-          renderScale={quality.qualityMode === 'custom' ? quality.customRenderScale : (quality.qualityMode === 'low' ? 0.75 : 1.0)}
+          qualityMode={quality3D}
+          antialias={quality3D === 'custom' ? quality.customAntialias : quality3D !== 'low'}
+          allowBloom={quality3D === 'custom' ? quality.customBloom : (quality3D === 'high' || quality3D === 'ultra')}
+          allowParticles={quality3D === 'custom' ? quality.customParticles : (quality3D === 'high' || quality3D === 'ultra')}
+          allowDynamicLighting={quality3D === 'custom' ? quality.customDynamicLighting : quality3D === 'ultra'}
+          allowHitEffects={quality3D === 'custom' ? quality.customHitEffects : quality3D === 'ultra'}
+          renderScale={quality3D === 'custom' ? quality.customRenderScale : (quality3D === 'low' ? 0.75 : 1.0)}
           autoPlay={autoPlay}
           playSession={playSession}
           isEditorMode={gameState === 'editor'}
@@ -1750,6 +1799,47 @@ export function App() {
         />
         </Suspense>
       </div>
+      )}
+
+      {/* 2D Lite viewport — replaces the 3D scene when quality === 'lite'. */}
+      {show2D && (
+      <div
+        className="absolute inset-0 z-0"
+        data-viewport="lite-2d"
+        onWheel={gameState === 'editor' ? handleEditorWheel : undefined}
+      >
+        <Suspense fallback={null}>
+        <GameCanvas2D
+          chart={currentChart}
+          viewportActive={viewportActive}
+          isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
+          isPaused={gameState === 'paused'}
+          isEditorMode={gameState === 'editor'}
+          activeEditorTool={effectiveEditorTool}
+          selectedNoteId={selectedNoteId}
+          gameTime={gameTime}
+          playSession={playSession}
+          speedMultiplier={speedMultiplier}
+          projectionLeadMs={projectionLeadMs}
+          noteRenderDistance={noteRenderDistance}
+          noteSizeScale={noteSizeScale}
+          autoPlay={autoPlay}
+          onJudgement={handleJudgementStable}
+          onSongEnd={handleSongEnd}
+          onSelectEditorNote={handleSelectEditorNote}
+          onMoveEditorNote={handleMoveEditorNote}
+          onPlaceEditorNote={handlePlaceEditorNote}
+          skinImages={skinImages}
+          defaultSkinInnerEnabled={defaultSkinInnerEnabled}
+          defaultSkinOuterEnabled={defaultSkinOuterEnabled}
+          defaultSkinOuterWidth={defaultSkinOuterWidth}
+          defaultSkinOuterColor={defaultSkinOuterColor}
+          defaultSkinOuterAlpha={defaultSkinOuterAlpha}
+          defaultSkinJudgeWidth={defaultSkinJudgeWidth}
+        />
+        </Suspense>
+      </div>
+      )}
 
       {/* 2D top-down editor viewport (replaces 3D when in 2D mode) */}
       {gameState === 'editor' && editorViewMode === '2d' && (

@@ -237,3 +237,82 @@ export async function loadSkinTextures(meta: SkinMeta | null | undefined): Promi
   if (projection) set.projection = projection;
   return Object.keys(set).length ? set : null;
 }
+
+/* --------------------------------------------------------------------------- *
+ * 2D 皮肤图集（quality 'lite'）—— 不依赖 three.js。
+ * --------------------------------------------------------------------------- */
+
+/** Load a bitmap URL into an HTMLImageElement. */
+function loadImageElement(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('image decode failed'));
+    img.src = url;
+  });
+}
+
+/** Rasterise an SVG URL into a canvas. Mirrors loadSvgTexture's sizing logic so
+ *  the 2D and 3D paths see the same intrinsic dimensions. */
+async function rasterizeSvg(url: string): Promise<HTMLCanvasElement> {
+  const resp = await fetch(url);
+  let svg = await resp.text();
+  const dim = svg.match(/<svg[^>]*\b(?:width|viewBox)=/i);
+  let size = 256;
+  if (dim) {
+    const vb = svg.match(/viewBox=["']\s*[\d.-]+\s+[\d.-]+\s+([\d.]+)\s+([\d.]+)/i);
+    const wh = svg.match(/\bwidth=["']([\d.]+)/i);
+    if (vb) size = Math.max(1, Math.round(parseFloat(vb[1])));
+    else if (wh) size = Math.max(1, Math.round(parseFloat(wh[1])));
+  }
+  if (!/\b(?:width|height)=/.test(svg)) {
+    svg = svg.replace(/<svg/i, `<svg width="${size}" height="${size}"`);
+  }
+  const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const img = await loadImageElement(dataUrl);
+  const w = img.naturalWidth || size;
+  const h = img.naturalHeight || size;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const cx = canvas.getContext('2d');
+  if (cx) cx.drawImage(img, 0, 0, w, h);
+  return canvas;
+}
+
+/**
+ * Preload a skin's maps as plain images for the 2D canvas renderer.
+ * Same refs as loadSkinTextures but WITHOUT importing three.js, so the Lite
+ * build never pulls three in. Missing/failed maps are silently omitted.
+ */
+export async function loadSkinImages(meta: SkinMeta | null | undefined): Promise<SkinImageSet | null> {
+  if (!meta) return null;
+  const loadOne = async (ref?: string): Promise<CanvasImageSource | undefined> => {
+    if (!ref) return undefined;
+    try {
+      const url = await resolveIdbUrl(ref);
+      if (ref.toLowerCase().endsWith('.svg')) return await rasterizeSvg(url);
+      return await loadImageElement(url);
+    } catch {
+      return undefined;
+    }
+  };
+  const [tap, touch, slide, projTap, projTouch, projSlide, projection] = await Promise.all([
+    loadOne(meta.maps.tap),
+    loadOne(meta.maps.touch),
+    loadOne(meta.maps.slide),
+    loadOne(meta.maps.projTap),
+    loadOne(meta.maps.projTouch),
+    loadOne(meta.maps.projSlide),
+    loadOne(meta.maps.projection),
+  ]);
+  const set: SkinImageSet = {};
+  if (tap) set.tap = tap;
+  if (touch) set.touch = touch;
+  if (slide) set.slide = slide;
+  if (projTap) set.projTap = projTap;
+  if (projTouch) set.projTouch = projTouch;
+  if (projSlide) set.projSlide = projSlide;
+  if (projection) set.projection = projection;
+  return Object.keys(set).length ? set : null;
+}

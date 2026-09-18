@@ -103,8 +103,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const sliderClass = 'w-full accent-cyan-400 cursor-pointer';
   const valueClass = 'font-mono text-cyan-200 text-sm min-w-20 text-right';
 
-  const qualityIdx: Record<QualityMode, number> = { low: 0, standard: 1, high: 2, ultra: 3, custom: 4 };
-  const qualityOrder: QualityMode[] = ['low', 'standard', 'high', 'ultra', 'custom'];
+  const qualityIdx: Record<QualityMode, number> = { lite: 0, low: 1, standard: 2, high: 3, ultra: 4, custom: 5 };
+  const qualityOrder: QualityMode[] = ['lite', 'low', 'standard', 'high', 'ultra', 'custom'];
   const qualityLabel = (q: QualityMode) => t(`settings.quality.${q}`);
   const qualityDesc = (q: QualityMode) => t(`settings.quality.desc.${q}`);
 
@@ -126,13 +126,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
         <input
           type="range"
-          min="0" max="4" step="1"
+          min="0" max="5" step="1"
           value={qualityIdx[quality.qualityMode]}
           onChange={(e) => qualityStore.set({ qualityMode: qualityOrder[Number(e.target.value)] })}
           className={sliderClass}
         />
         <div className="flex justify-between text-[11px] text-white/40 font-mono">
-          <span>{qualityLabel('low')}</span><span>{qualityLabel('standard')}</span><span>{qualityLabel('high')}</span><span>{qualityLabel('ultra')}</span><span>{qualityLabel('custom')}</span>
+          <span>{qualityLabel('lite')}</span><span>{qualityLabel('low')}</span><span>{qualityLabel('standard')}</span><span>{qualityLabel('high')}</span><span>{qualityLabel('ultra')}</span><span>{qualityLabel('custom')}</span>
         </div>
         <p className="text-[11px] text-white/50 leading-relaxed">{qualityDesc(quality.qualityMode)}</p>
       </section>
