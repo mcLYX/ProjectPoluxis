@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1120">
+  <!-- PWA manifest (relative so it works under a sub-path like /poluxis/lite/) -->
+  <link rel="manifest" href="../manifest.webmanifest">
+  <title>Project:Poluxis (Lite)</title>
+  <!--LITE_BASE_CSS-->
+  <!--LITE_IE9_CSS-->
+</head>
+<body>
+<div id="app">
+  <canvas id="game-canvas"></canvas>
+  <div id="hud">
+    <div class="hud-chart-info" id="hud-chart-info"></div>
+    <div class="hud-score" id="hud-score">0</div>
+    <div class="hud-acc" id="hud-acc">100.00%</div>
+    <div class="hud-rank" id="hud-rank">EX+</div>
+    <div class="hud-pause-btn">
+      <button class="pause-btn" id="btn-pause" data-i18n="pause">暂停</button>
+    </div>
+    <div class="hud-progress"><div class="hud-progress-fill" id="hud-progress-fill"></div></div>
+  </div>
+  <div class="overlay">
+    <!-- Menu -->
+    <div class="screen" id="menu-screen">
+      <div>
+        <h1 class="menu-title"><span style="font-size: 11px;">Project</span>Poluxis Lite</h1>
+      </div>
+      <div class="chart-list" id="chart-list"></div>
+      <div class="menu-footer">
+        <div class="toolbar">
+          <label><input type="checkbox" id="autoplay-toggle"> <span data-i18n="autoplay">Auto-Play</span></label>
+          <button class="btn-tool" id="btn-settings" data-i18n="settings">设置</button>
+          <button class="btn-tool" id="btn-editor" data-i18n="editor">导入和编辑</button>
+          <button class="btn-tool" id="btn-switch-full" data-i18n="switchFull">切换完整版</button>
+        </div>
+        <button class="btn-start" id="btn-start">START GAME</button>
+      </div>
+    </div>
+    <!-- Pause -->
+    <div class="screen hidden" id="pause-screen">
+      <div class="pause-card">
+        <h2 class="pause-title" data-i18n="paused">已暂停</h2>
+        <div class="pause-actions">
+          <button class="btn-start" id="btn-resume" data-i18n="resume">继续</button>
+          <button class="btn-tool" id="btn-restart" data-i18n="restart">重新开始</button>
+          <button class="btn-tool" id="btn-pause-menu" data-i18n="backMenu">返回菜单</button>
+        </div>
+      </div>
+    </div>
+    <!-- Result -->
+    <div class="screen hidden" id="result-screen">
+      <div class="result-card" id="result-card"></div>
+    </div>
+  </div>
+  <!-- Settings Modal -->
+  <div class="modal-backdrop" id="settings-modal">
+    <div class="modal-card">
+      <h3 class="modal-title" data-i18n="setTitle">设置</h3>
+      <div class="modal-row">
+        <label data-i18n="setSpeed">下落速度</label>
+        <input type="range" id="set-speed" min="0.5" max="4" step="0.1">
+        <span class="val" id="val-speed">1.0x</span>
+      </div>
+      <div class="modal-row">
+        <label data-i18n="setSize">音符缩放</label>
+        <input type="range" id="set-size" min="0.6" max="1" step="0.05">
+        <span class="val" id="val-size">1.0x</span>
+      </div>
+      <div class="modal-row">
+        <label data-i18n="setRender">渲染距离</label>
+        <input type="range" id="set-render" min="20" max="120" step="5">
+        <span class="val" id="val-render">70</span>
+      </div>
+      <div class="modal-row">
+        <label data-i18n="setOffset">音频偏移</label>
+        <input type="range" id="set-offset" min="-600" max="400" step="5">
+        <span class="val" id="val-offset">0ms</span>
+      </div>
+      <div class="modal-row">
+        <label data-i18n="setProj">判定框浮现</label>
+        <input type="range" id="set-proj" min="0" max="2000" step="50">
+        <span class="val" id="val-proj">500ms</span>
+      </div>
+      <div class="modal-row">
+        <label data-i18n="setMusic">音乐音量</label>
+        <input type="range" id="set-music" min="0" max="1" step="0.01">
+        <span class="val" id="val-music">80%</span>
+      </div>
+      <div class="modal-row">
+        <label data-i18n="setSfx">音效音量</label>
+        <input type="range" id="set-sfx" min="0" max="1" step="0.01">
+        <span class="val" id="val-sfx">90%</span>
+      </div>
+      <div class="modal-row" style="align-items:center;">
+        <label data-i18n="setCompat" style="margin-right:8px;">兼容模式（谱面独立时钟）</label>
+        <input type="checkbox" id="set-compat" style="width:18px;height:18px;accent-color:#22d3ee;">
+      </div>
+      <div class="modal-row" style="align-items:center;">
+        <label data-i18n="lang" style="margin-right:8px;">语言</label>
+        <div id="lang-switch" style="display:flex;gap:6px;">
+          <button type="button" data-lang="zh">中文</button>
+          <button type="button" data-lang="en">English</button>
+          <button type="button" data-lang="ja">日本語</button>
+        </div>
+      </div>
+      <!-- Server connection (IE9-compatible, no persistence). Address = beatmaps dir. -->
+      <div class="modal-row" style="align-items:center;">
+        <label data-i18n="srvLabel" style="margin-right:8px;">服务器</label>
+        <input type="text" id="srv-url" placeholder="https://host/beatmaps" spellcheck="false"
+               style="-ms-flex:1 1 auto;flex:1 1 auto;min-width:0;padding:6px 8px;background:#05070d;border:1px solid rgba(6,182,212,0.3);border-radius:6px;color:#e2e8f0;font-family:inherit;font-size:12px;">
+        <button type="button" class="btn-tool" id="btn-srv-connect" data-i18n="srvConnect" style="margin-left:8px;">连接</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-tool" id="btn-settings-close" data-i18n="setClose">关闭</button>
+      </div>
+    </div>
+  </div>
+  <!-- Chart Editor Modal -->
+  <div class="modal-backdrop" id="editor-modal">
+    <div class="modal-card">
+      <h3 class="modal-title" data-i18n="edTitle">导入和编辑</h3>
+      <p class="editor-hint" data-i18n="edHint">
+        粘贴 JSON 格式的谱面。结构：<code>{ metadata: {...}, notes: [...] }</code>。
+        notes 支持 type: <code>tap</code> / <code>touch</code> / <code>slide</code>（slide 带 nodes 数组）。
+      </p>
+      <textarea class="editor-textarea" id="editor-textarea" spellcheck="false" placeholder='{ "metadata": {...}, "notes": [...] }'></textarea>
+      <p class="editor-error" id="editor-error"></p>
+      <div class="modal-actions">
+        <label class="file-input-wrap">
+          <input type="file" id="editor-file" accept=".json,application/json">
+          <span class="upload-btn" data-i18n="edImportChart">导入谱面</span>
+        </label>
+        <label class="file-input-wrap">
+          <input type="file" id="editor-audio-file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac">
+          <span class="upload-btn" id="editor-audio-label" data-i18n="edImportAudio">导入音频</span>
+        </label>
+        <button class="btn-tool" id="btn-editor-load" data-i18n="edLoad">加载谱面</button>
+        <button class="btn-tool" id="btn-editor-close" data-i18n="edClose">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Register the PWA service worker (relative path so it works under a sub-path like /poluxis/lite/) -->
+<script type="module" src="../registerSW.js"></script>
+
+<!--LITE_APP_JS-->
+</body>
+</html>

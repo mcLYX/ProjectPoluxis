@@ -1,0 +1,231 @@
+/* === Visual style aligned with the full version (IE11 compatible) ===
+     * All modern-only properties have IE11 fallbacks:
+     *   inset:0 → top:0;right:0;bottom:0;left:0  (+ width/height:100%)
+     *   gap → margin/padding workarounds
+     *   -webkit-text-fill-color:transparent → solid color fallback (IE11 ignores this)
+     *   flex column centering → explicit heights + box-sizing
+     *   vh units are OK in IE11 */
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%; width: 100%;
+      background: #05070d; color: #e2e8f0;
+      font-family: 'Consolas', 'Courier New', monospace;
+      overflow: hidden; -ms-user-select: none; -moz-user-select: none; -webkit-user-select: none; user-select: none;
+      -ms-touch-action: none; touch-action: none;
+    }
+    #app { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; }
+    /* touch-action MUST be set on the canvas itself (the actual touch target
+     * during gameplay — HUD/overlay are pointer-events:none and click-through).
+     * touch-action does NOT inherit from html/body. With the default `auto`,
+     * IE11 runs its touch-gesture pipeline on every pointermove: 1 finger =
+     * pan detection (cheap), but 2+ fingers = full pinch-zoom gesture pipeline
+     * (transform matrices + MSGesture state machine + hit-testing per event).
+     * On the Atom Z3735G this drops multi-touch framerate to single digits,
+     * independent of game logic (Autoplay is affected too). `none` disables all
+     * default touch gestures so IE11 just delivers raw pointer events. */
+    #game-canvas {
+      position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+      width: 100%; height: 100%; display: block;
+      -ms-touch-action: none; touch-action: none;
+    }
+    /* overlay is click-through by default; only visible .screen children capture
+     * pointer events. This lets the HUD pause button (z-index 5, below the
+     * overlay's z-index 10) receive clicks during gameplay when all screens
+     * are hidden. */
+    .overlay { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+    .screen { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column; pointer-events: auto; }
+    .screen.hidden { display: none; }
+
+    /* Menu */
+    #menu-screen {
+      -ms-flex-pack: justify; justify-content: space-between; padding: 24px;
+      background: rgba(5, 7, 13, 0.5);
+    }
+    .menu-title {
+      font-size: 36px; font-weight: 900; letter-spacing: 6px; margin: 0;
+      background: linear-gradient(90deg, #06b6d4, #2563eb);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-align: center;
+    }
+    /* IE11 fallback for gradient text is at the end of the stylesheet
+     * (must come after the base rules so it can override them). */
+    .menu-subtitle { text-align: center; font-size: 12px; color: #94a3b8; letter-spacing: 2px; margin: 4px 0 0 0; }
+    .chart-list { -ms-flex: 1 1 auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: 720px; width: 100%; margin: 0 auto; padding: max(16px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
+    .chart-card {
+      padding: 14px 18px; margin-bottom: 10px; border-radius: 14px; cursor: pointer;
+      background: rgba(9, 17, 36, 0.9); border: 1px solid rgba(6, 182, 212, 0.2);
+    }
+    .chart-card:hover { border-color: rgba(6, 182, 212, 0.5); background: #0c1733; }
+    .chart-card.selected { border-color: #06b6d4; box-shadow: 0 0 18px rgba(6, 182, 212, 0.25); }
+    .chart-title { font-size: 16px; font-weight: 700; color: #fff; margin: 0 0 4px 0; }
+    .chart-meta { font-size: 12px; color: #94a3b8; }
+    .chart-bpm { display: inline-block; padding: 2px 8px; border-radius: 6px; border: 1px solid rgba(6,182,212,0.3); color: #67e8f9; margin-left: 8px; font-size: 11px; }
+    .menu-footer {
+      display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap;
+      -ms-flex-align: center; align-items: center;
+      -ms-flex-pack: justify; justify-content: space-between;
+      border-top: 1px solid rgba(6, 182, 212, 0.2); padding-top: 12px;
+    }
+    .toolbar { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; font-size: 12px; color: #cbd5e1; }
+    .toolbar > * { margin-right: 16px; }
+    .toolbar > *:last-child { margin-right: 0; }
+    /* Buttons — frosted glass: translucent accent fill + accent hairline
+     * border + outer glow + inner top highlight (mirrors .glass-btn /
+     * .glass-btn-primary in src/index.css). Concrete accent colors are
+     * re-injected per chart by the Theme module; the values here are the
+     * cyan defaults. backdrop-filter is progressive enhancement (IE11
+     * ignores it, and the design still reads correctly without blur). */
+    .btn-tool {
+      padding: 6px 12px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+      backdrop-filter: blur(10px) saturate(130%);
+      border: 1px solid rgba(6, 182, 212, 0.42); color: #67e8f9;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+    }
+    .btn-tool:hover {
+      background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    .btn-start {
+      padding: 12px 28px; border-radius: 14px; cursor: pointer;
+      background: rgba(6, 182, 212, 0.18);
+      -webkit-backdrop-filter: blur(10px) saturate(140%);
+      backdrop-filter: blur(10px) saturate(140%);
+      border: 1px solid rgba(6, 182, 212, 0.5);
+      color: #fff; font-family: inherit; font-weight: 900; font-size: 14px; letter-spacing: 2px;
+      box-shadow: 0 0 24px rgba(6, 182, 212, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+      margin-top: 12px;
+    }
+    .btn-start:hover {
+      background: rgba(6, 182, 212, 0.28); border-color: rgba(6, 182, 212, 0.66);
+      box-shadow: 0 0 34px rgba(6, 182, 212, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.26);
+      -ms-transform: scale(1.04); transform: scale(1.04);
+    }
+
+    /* HUD — layout mirrors full version App.tsx L506-534:
+     *   top-left:  chart info (title/difficulty/BPM)
+     *   top-right: Score (large) + ACC/RANK below
+     *   bottom-left: Pause button
+     *   bottom: progress bar
+     * Combo is drawn on canvas (transparent, center, behind notes) — not in HUD. */
+    #hud { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; display: none; }
+    #hud.active { display: block; }
+    .hud-score { position: absolute; top: 16px; right: 20px; font-size: 28px; font-weight: 900; color: #fff; text-shadow: 0 0 12px rgba(6,182,212,0.6); text-align: right; }
+    .hud-acc { position: absolute; top: 50px; right: 20px; font-size: 14px; color: #38bdf8; font-weight: 700; text-align: right; }
+    .hud-rank { position: absolute; top: 70px; right: 20px; font-size: 18px; color: #38bdf8; font-weight: 900; text-align: right; letter-spacing: 1px; }
+    .hud-pause-btn { position: absolute; bottom: 24px; left: 20px; pointer-events: auto; }
+    /* Chart info badge (top-left) — mirrors full version's chart label */
+    .hud-chart-info { position: absolute; top: 16px; left: 20px; font-size: 11px; color: #94a3b8; width: 220px; line-height: 1.4; }
+    .hud-chart-info .ci-title { color: #e2e8f0; font-weight: 700; font-size: 13px; }
+    /* Progress bar (bottom) — mirrors full version's TimingBar */
+    .hud-progress { position: absolute; bottom: 0; left: 0; right: 0; height: 4px; background: rgba(15, 23, 42, 0.6); }
+    .hud-progress-fill { height: 100%; background: #06b6d4; width: 0%; }
+
+    /* Result */
+    #result-screen { -ms-flex-pack: center; justify-content: center; -ms-flex-align: center; align-items: center; background: rgba(5, 7, 13, 0.85); }
+    .result-card { max-width: 420px; width: 90%; margin: max(16px, env(safe-area-inset-top, 0px)) auto max(16px, env(safe-area-inset-bottom, 0px)); background: rgba(14, 27, 56, 0.95); border: 1px solid rgba(6,182,212,0.3); border-radius: 18px; padding: 28px; text-align: center; }
+    .result-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 4px 0; letter-spacing: 1px; word-break: break-word; }
+    .result-meta { font-size: 11px; color: #94a3b8; margin: 0 0 14px 0; }
+    .result-rank {
+      font-size: 56px; font-weight: 900; margin: 0 0 8px 0;
+      background: linear-gradient(90deg, #fbbf24, #f97316);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    /* Score: bumped from 24px/400 → 36px/800 per user spec "略微改粗改大".
+     * Still smaller than the 56px rank so the rank stays the visual anchor. */
+    .result-score { font-size: 36px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; }
+    .result-row { display: -ms-flexbox; display: flex; -ms-flex-pack: justify; justify-content: space-between; font-size: 13px; color: #cbd5e1; margin: 4px 0; }
+    .result-row .p { color: #ffd700; }
+    .result-row .g { color: #38bdf8; } .result-row .m { color: #ef4444; }
+    /* Orange (+N) suffix beside the merged Perfect count — shows how many of
+     * the Perfects were S-Perfect. Color matches the old .sp row (#ff8c00). */
+    .result-row .s-perfect-indicator { color: #ff8c00; font-weight: 700; margin-left: 2px; }
+    .result-actions { display: -ms-flexbox; display: flex; -ms-flex-pack: center; justify-content: center; margin-top: 20px; }
+    .result-actions .btn-tool { margin: 0 5px; }
+
+    /* Pause */
+    #pause-screen { -ms-flex-pack: center; justify-content: center; -ms-flex-align: center; align-items: center; background: rgba(5, 7, 13, 0.8); }
+    .pause-card { text-align: center; }
+    .pause-title { font-size: 32px; font-weight: 900; letter-spacing: 4px; color: #67e8f9; margin: 0 0 24px 0; }
+    .pause-actions { display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column; min-width: 200px; }
+    .pause-actions .btn-start { margin-top: 0; }
+    .pause-actions .btn-tool { margin-top: 10px; }
+    .pause-actions .btn-tool:first-child { margin-top: 0; }
+
+    /* Modal (settings / editor) */
+    .modal-backdrop {
+      position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%;
+      z-index: 20; display: none;
+      background: rgba(0,0,0,0.6);
+      padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); box-sizing: border-box;
+    }
+    .modal-backdrop.active { display: block; }
+    .modal-card {
+      max-width: 560px; width: 100%; max-height: 88%; overflow-y: auto;
+      margin: 0 auto; margin-top: 5%;
+      background: rgba(14, 27, 56, 0.97); border: 1px solid rgba(6,182,212,0.3);
+      border-radius: 18px; padding: 22px; box-sizing: border-box;
+    }
+    .modal-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; }
+    .modal-row { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; -ms-flex-pack: justify; justify-content: space-between; margin: 10px 0; font-size: 13px; color: #cbd5e1; }
+    .modal-row label { -ms-flex: 0 0 auto; flex: 0 0 auto; min-width: 120px; margin-right: 12px; }
+    .modal-row input[type="range"] { -ms-flex: 1 1 auto; flex: 1 1 auto; }
+    .modal-row input[type="number"] { width: 70px; padding: 4px 6px; background: #05070d; border: 1px solid rgba(6,182,212,0.3); border-radius: 6px; color: #e2e8f0; font-family: inherit; font-size: 12px; margin-left: 12px; }
+    .modal-row .val { color: #67e8f9; font-weight: 700; min-width: 48px; text-align: right; margin-left: 12px; }
+    .modal-actions { display: -ms-flexbox; display: flex; -ms-flex-pack: end; justify-content: flex-end; margin-top: 18px; }
+    .modal-actions .btn-tool { margin-left: 10px; }
+    .editor-textarea {
+      width: 100%; min-height: 280px; box-sizing: border-box;
+      background: #05070d; border: 1px solid rgba(6,182,212,0.3); border-radius: 8px;
+      color: #e2e8f0; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; padding: 10px;
+    }
+    .editor-hint { font-size: 11px; color: #94a3b8; margin: 6px 0 0 0; line-height: 1.5; }
+    .editor-error { font-size: 12px; color: #ef4444; margin: 6px 0 0 0; min-height: 16px; }
+    .file-input-wrap { display: inline-block; }
+    .file-input-wrap input[type="file"] { display: none; }
+    .upload-btn {
+      display: inline-block; padding: 6px 12px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+      backdrop-filter: blur(10px) saturate(130%);
+      border: 1px solid rgba(6, 182, 212, 0.42); color: #67e8f9;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+    }
+    .upload-btn:hover {
+      background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    .pause-btn {
+      pointer-events: auto; padding: 8px 14px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+      backdrop-filter: blur(10px) saturate(130%);
+      border: 1px solid rgba(6, 182, 212, 0.42); color: #67e8f9;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+    }
+    .pause-btn:hover {
+      background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    /* === IE11 fallbacks ===
+     * Must come AFTER all base rules so they can properly override.
+     * Targeted via IE11-specific media query. */
+    @media all and (-ms-high-contrast: none), (-ms-high-contrast: active) {
+      .menu-title {
+        background: transparent; background-image: none;
+        color: #06b6d4; -webkit-text-fill-color: #06b6d4;
+      }
+      .result-rank {
+        background: transparent; background-image: none;
+        color: #fbbf24; -webkit-text-fill-color: #fbbf24;
+      }
+      /* .btn-start needs no override: rgba() backgrounds and box-shadow work in
+       * IE11, so the glass look survives (only backdrop-filter blur is lost). */
+      .hud-progress-fill { background: #06b6d4; }
+    }

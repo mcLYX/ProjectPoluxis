@@ -1,0 +1,43 @@
+/* IE9 overrides — minimal "just enough to click START GAME" fixes.
+     * Full layout polish is intentionally skipped per user requirement. */
+
+    /* 1. Gradient-text fallback (webkit-background-clip:text not supported).
+     *    The IE11 media query above doesn't apply to IE9, so force solid color. */
+    .menu-title  { background: transparent !important; color: #06b6d4 !important; }
+    .result-rank { background: transparent !important; color: #fbbf24 !important; }
+
+    /* 2. Flexbox not supported in IE9. Give menu-screen a crude block layout
+     *    so the title, chart-list, and footer (start button) are all visible.
+     *    We don't care about alignment — just that START is reachable. */
+    .screen { display: block !important; }
+    #menu-screen { padding: 16px; overflow: auto; }
+    .chart-list  { max-height: 45%; overflow-y: auto; margin: 8px 0; padding: 8px 0; }
+    .menu-footer { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(6,182,212,0.2); }
+    .toolbar     { display: block; }
+    .toolbar > * { display: inline-block; margin: 4px 8px 4px 0; }
+    .btn-start   { display: block; margin: 12px auto 0 auto; }
+
+    /* 3. Pause/result screens: rough centering so buttons are reachable */
+    .pause-card, .result-card { margin: 15% auto 0 auto; }
+    .result-row { display: block; }
+    .result-row span { display: inline-block; width: 48%; }
+    .result-actions { text-align: center; }
+
+    /* 4. Modal layout — flex rows → floated labels + inline-block inputs */
+    .modal-row { display: block; padding: 4px 0; zoom: 1; overflow: hidden; }
+    .modal-row label { float: left; min-width: 120px; margin-right: 12px; }
+    .modal-row input[type="range"],
+    .modal-row input[type="number"],
+    .modal-row .val { display: inline-block; vertical-align: middle; margin: 2px 0; }
+    .modal-actions { text-align: right; }
+
+    /* 5. pointer-events:none is ignored on IE9 HTML elements.
+     *    The JS forwarder handles the event re-dispatch, but we also force
+     *    overlay/hud to not claim mouse events by reducing their clickable
+     *    footprint when their content is hidden. */
+    .overlay        { z-index: 10; }
+    .overlay > *    { position: static; }
+    .screen.hidden  { display: none !important; }
+    #hud            { z-index: 5; }
+    #hud:not(.active) { display: none !important; }
+    .hud-pause-btn  { z-index: 6; }
