@@ -180,18 +180,18 @@
    * Good = baseUnit * 0.5, Miss = 0. */
   function calculateNoteScore(j, total) {
     if (total <= 0) return 0;
-    var base = 10000000 / total;
+    var base = SCORE_BASE / total;
     if (j === 'S-Perfect') return base + 1;
     if (j === 'Perfect') return base;
     if (j === 'Good') return base * 0.5;
     return 0;
   }
   function calculateRank(score) {
-    if (score >= 9900000) return 'EX+';
-    if (score >= 9500000) return 'EX';
-    if (score >= 9000000) return 'S';
-    if (score >= 8000000) return 'A';
-    if (score >= 7000000) return 'B';
-    if (score >= 6000000) return 'C';
+    if (score >= RANK_THRESHOLDS.EX_PLUS) return 'EX+';
+    if (score >= RANK_THRESHOLDS.EX) return 'EX';
+    if (score >= RANK_THRESHOLDS.S) return 'S';
+    if (score >= RANK_THRESHOLDS.A) return 'A';
+    if (score >= RANK_THRESHOLDS.B) return 'B';
+    if (score >= RANK_THRESHOLDS.C) return 'C';
     return 'F';
   }

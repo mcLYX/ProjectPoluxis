@@ -550,28 +550,13 @@
   })();
 
   /* --- Chart editor (text JSON) --- */
-  /* Validates a parsed chart object. Returns {ok, chart, error}. */
+  /* Shared chart validator (single source of truth: src/shared/chartSchema.ts,
+   * inlined into this build by scripts/build-lite.mjs). It mirrors the full
+   * app's parseAndValidateChart; this wrapper adapts its {valid, chart, error}
+   * shape to the {ok, chart, error} shape the editor expects. */
   function validateChart(obj) {
-    if (!obj || typeof obj !== 'object') return { ok: false, error: L('errRootObj') };
-    var md = obj.metadata;
-    if (!md || typeof md !== 'object') return { ok: false, error: L('errNoMeta') };
-    if (typeof md.bpm !== 'number' || md.bpm <= 0) return { ok: false, error: L('errBpm') };
-    if (typeof md.title !== 'string' || !md.title) return { ok: false, error: L('errTitle') };
-    if (!md.bgScheme) md.bgScheme = { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' };
-    if (!md.noteColor) md.noteColor = md.bgScheme.accentColor || '#00f0ff';
-    if (typeof md.offset !== 'number') md.offset = 0;
-    if (!md.difficulty) md.difficulty = 'Custom';
-    if (!md.artist) md.artist = 'Unknown';
-    if (!Array.isArray(obj.notes)) return { ok: false, error: L('errNotesArr') };
-    for (var i = 0; i < obj.notes.length; i++) {
-      var n = obj.notes[i];
-      if (typeof n.beat !== 'number') return { ok: false, error: L('errNoteBeat', { i: i }) };
-      if (typeof n.x !== 'number' || typeof n.y !== 'number') return { ok: false, error: L('errNoteXY', { i: i }) };
-      if (n.type !== 'tap' && n.type !== 'touch' && n.type !== 'slide') return { ok: false, error: L('errNoteType', { i: i }) };
-      if (n.type === 'slide' && !Array.isArray(n.nodes)) return { ok: false, error: L('errSlideNodes', { i: i }) };
-      if (!n.id) n.id = 'ed-' + i + '-' + Date.now().toString(36);
-    }
-    return { ok: true, chart: obj };
+    var r = parseAndValidateChart(obj);
+    return { ok: r.valid, chart: r.chart, error: r.error };
   }
   function openEditor() {
     editorError.textContent = '';
@@ -698,108 +683,7 @@
     }
   });
 
-  /* === 8. Demo charts (synced from src/data/demoCharts.ts) === */
-  var DEMO_CHARTS = {
-    'neon-cyberspace': {
-      metadata: {
-        title: 'Neon Cyberspace', artist: 'SYSTEM TEST // DEMO', difficulty: 'Hard Lv.6',
-        bpm: 140, offset: 0.05,
-        bgScheme: { gradientStart: '#050c1e', gradientEnd: '#1b072c', accentColor: '#00f0ff' },
-        noteColor: '#00f0ff'
-      },
-      notes: [
-        { id: 'nc-1', beat: 2, x: -1.2, y: -0.6, type: 'tap' },
-        { id: 'nc-2', beat: 3, x: 1.2, y: -0.6, type: 'tap' },
-        { id: 'nc-3', beat: 4, x: -0.6, y: 0.6, type: 'touch', color: '#ff2df7' },
-        { id: 'nc-4', beat: 5, x: 0.6, y: 0.6, type: 'touch', color: '#ff2df7' },
-        { id: 'nc-5', beat: 6, x: 0.0, y: 0.0, type: 'tap', color: '#ffb703' },
-        { id: 'nc-6', beat: 7, x: -1.4, y: 0.8, type: 'tap' },
-        { id: 'nc-7', beat: 8, x: 1.4, y: 0.8, type: 'tap' },
-        { id: 'nc-8', beat: 9, x: 0.0, y: -0.9, type: 'touch' },
-        { id: 'nc-9', beat: 10, x: -1.0, y: -0.3, type: 'tap' },
-        { id: 'nc-10', beat: 10.5, x: -0.5, y: 0.3, type: 'tap' },
-        { id: 'nc-11', beat: 11, x: 0.5, y: 0.3, type: 'tap' },
-        { id: 'nc-12', beat: 11.5, x: 1.0, y: -0.3, type: 'tap' },
-        { id: 'nc-13', beat: 12, x: 0.0, y: 0.8, type: 'touch' },
-        { id: 'nc-14', beat: 13, x: -1.3, y: -0.7, type: 'tap' },
-        { id: 'nc-15', beat: 14, x: 1.3, y: -0.7, type: 'tap' },
-        { id: 'nc-16', beat: 15, x: 0.0, y: -0.4, type: 'touch' },
-        { id: 'nc-17', beat: 16, x: -0.9, y: 0.5, type: 'tap' },
-        { id: 'nc-18', beat: 17, x: 0.9, y: 0.5, type: 'tap' },
-        { id: 'nc-19', beat: 18, x: -1.5, y: 0.0, type: 'touch' },
-        { id: 'nc-20', beat: 19, x: 1.5, y: 0.0, type: 'touch' },
-        { id: 'nc-21', beat: 20, x: -0.8, y: -0.8, type: 'tap' },
-        { id: 'nc-22', beat: 20.5, x: 0.0, y: -0.8, type: 'tap' },
-        { id: 'nc-23', beat: 21, x: 0.8, y: -0.8, type: 'tap' },
-        { id: 'nc-24', beat: 22, x: 0.0, y: 0.6, type: 'touch' },
-        { id: 'nc-25', beat: 23, x: -1.2, y: 0.4, type: 'tap' },
-        { id: 'nc-26', beat: 24, x: 1.2, y: 0.4, type: 'tap' },
-        { id: 'nc-27', beat: 25, x: 0.0, y: -0.2, type: 'touch' },
-        { id: 'nc-28', beat: 26, x: -1.1, y: -0.6, type: 'tap' },
-        { id: 'nc-29', beat: 27, x: 1.1, y: -0.6, type: 'tap' },
-        { id: 'nc-30', beat: 28, x: 0.0, y: 0.7, type: 'tap' },
-        { id: 'nc-s1', beat: 29, x: -1.4, y: -0.8, type: 'slide', nodes: [
-          { beat: 30, x: 0.0, y: 0.5 }, { beat: 31, x: 1.4, y: -0.8 }
-        ] }
-      ]
-    },
-    'quantum-horizon': {
-      metadata: {
-        title: 'Quantum Horizon', artist: 'SYSTEM TEST // DEMO', difficulty: 'Easy Lv.3',
-        bpm: 128, offset: 0.0,
-        bgScheme: { gradientStart: '#081120', gradientEnd: '#0a1d37', accentColor: '#38bdf8' },
-        noteColor: '#38bdf8'
-      },
-      notes: [
-        { id: 'qh-1', beat: 2, x: -1.0, y: -0.5, type: 'tap' },
-        { id: 'qh-2', beat: 4, x: 1.0, y: -0.5, type: 'tap' },
-        { id: 'qh-3', beat: 6, x: 0.0, y: 0.5, type: 'touch' },
-        { id: 'qh-4', beat: 8, x: -0.8, y: 0.3, type: 'tap' },
-        { id: 'qh-5', beat: 10, x: 0.8, y: 0.3, type: 'tap' },
-        { id: 'qh-6', beat: 12, x: 0.0, y: -0.6, type: 'touch' },
-        { id: 'qh-7', beat: 14, x: -1.2, y: 0.0, type: 'tap' },
-        { id: 'qh-8', beat: 16, x: 1.2, y: 0.0, type: 'tap' },
-        { id: 'qh-9', beat: 18, x: 0.0, y: 0.7, type: 'touch' },
-        { id: 'qh-10', beat: 20, x: -0.7, y: -0.5, type: 'tap' },
-        { id: 'qh-11', beat: 22, x: 0.7, y: -0.5, type: 'tap' },
-        { id: 'qh-12', beat: 24, x: 0.0, y: 0.0, type: 'touch' },
-        { id: 'qh-13', beat: 26, x: -1.1, y: 0.6, type: 'tap' },
-        { id: 'qh-14', beat: 28, x: 1.1, y: 0.6, type: 'tap' },
-        { id: 'qh-15', beat: 30, x: 0.0, y: -0.8, type: 'tap' },
-        { id: 'qh-s1', beat: 31, x: -1.0, y: 0.0, type: 'slide', nodes: [
-          { beat: 32, x: 0.0, y: 0.6 }, { beat: 33, x: 1.0, y: 0.0 }
-        ] }
-      ]
-    },
-    'starlight-pulse': {
-      metadata: {
-        title: 'Starlight Pulse', artist: 'SYSTEM TEST // DEMO', difficulty: 'Normal Lv.5',
-        bpm: 174, offset: 0.02,
-        bgScheme: { gradientStart: '#041712', gradientEnd: '#132c1c', accentColor: '#10b981' },
-        noteColor: '#10b981'
-      },
-      notes: [
-        { id: 'sp-1', beat: 2, x: -1.3, y: -0.7, type: 'tap' },
-        { id: 'sp-2', beat: 3, x: -0.6, y: -0.2, type: 'touch' },
-        { id: 'sp-3', beat: 4, x: 0.6, y: 0.2, type: 'touch' },
-        { id: 'sp-4', beat: 5, x: 1.3, y: 0.7, type: 'tap' },
-        { id: 'sp-5', beat: 6, x: 0.0, y: -0.8, type: 'tap' },
-        { id: 'sp-6', beat: 7, x: -1.1, y: 0.6, type: 'tap' },
-        { id: 'sp-7', beat: 8, x: 1.1, y: 0.6, type: 'tap' },
-        { id: 'sp-8', beat: 9, x: 0.0, y: 0.0, type: 'touch' },
-        { id: 'sp-9', beat: 10, x: -1.4, y: -0.4, type: 'tap' },
-        { id: 'sp-10', beat: 11, x: 1.4, y: -0.4, type: 'tap' },
-        { id: 'sp-11', beat: 12, x: -0.7, y: 0.7, type: 'touch' },
-        { id: 'sp-12', beat: 13, x: 0.7, y: 0.7, type: 'touch' },
-        { id: 'sp-13', beat: 14, x: 0.0, y: -0.5, type: 'tap' },
-        { id: 'sp-14', beat: 15, x: -1.2, y: 0.2, type: 'tap' },
-        { id: 'sp-15', beat: 16, x: 1.2, y: 0.2, type: 'tap' },
-        { id: 'sp-16', beat: 17, x: 0.0, y: 0.8, type: 'tap' },
-        { id: 'sp-17', beat: 18, x: -0.8, y: -0.8, type: 'touch' },
-        { id: 'sp-18', beat: 19, x: 0.8, y: -0.8, type: 'touch' },
-        { id: 'sp-s1', beat: 20, x: -1.2, y: 0.0, type: 'slide', nodes: [
-          { beat: 21, x: -0.4, y: 0.6 }, { beat: 22, x: 0.4, y: -0.6 }, { beat: 23, x: 1.2, y: 0.0 }
-        ] }
-      ]
-    }
-  };
+  /* === 8. Demo charts ===
+   * Provided by the inlined shared module src/shared/demoCharts.ts (single source
+   * of truth, also used by the full app — including the "event-showcase" chart
+   * that used to be missing here). Do NOT keep a copy in this file. */

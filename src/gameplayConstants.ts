@@ -1,24 +1,20 @@
 import type { RingPt } from './systems/geometry';
+import { TAP_SIZE, TOUCH_SIZE, SLIDE_HALF } from './shared/gameplaySpec';
 
 /**
- * R4-2：判定/特效/编辑器 hook 与 GameCanvas 共享的游戏常数，单一来源。
- * GameCanvas 从本模块导入后不再重复定义；如需调整取值，只改这里即可。
- * （原 `export const` 曾位于 GameCanvas.tsx，为消除 react-refresh
- *  only-export-components 警告与 hook→组件 循环依赖而收敛到此。）
+ * R4-2：游戏常数单一来源的一部分。
+ * 纯 *spec* 常量（音符尺寸 / 判定窗 / 计分基数等）已收敛到
+ * src/shared/gameplaySpec.ts —— 本模块 `export *` 它们以保持既有导入路径不变；
+ * 需要改这些数值时只改 src/shared/gameplaySpec.ts 一处即可（常规版与 Lite 版同步）。
+ * 下面只保留 3D 渲染特有的几何数据（依赖 RingPt 类型），并就地 import 了
+ * TAP_SIZE / TOUCH_SIZE / SLIDE_HALF 供 ring 顶点计算使用。
  */
-export const TAP_SIZE = 1.6;
-export const TOUCH_SIZE = TAP_SIZE * 0.707;
-export const SLIDE_SIZE = TAP_SIZE * 0.707; // slide diamond edge = 0.707x tap
-export const SLIDE_HALF = (SLIDE_SIZE * Math.SQRT2) / 2; // half-diagonal of the 45°-rotated square
+export * from './shared/gameplaySpec';
 
 /** Layer index used by SelectiveBloom — note meshes are added to this layer
  *  so the bloom camera (which only sees this layer) renders ONLY notes,
  *  not tunnel lines, projections, or burst outlines. */
 export const BLOOM_LAYER = 1;
-export const JUDGE_Z = 0;
-export const TAP_HIT_HALF = 1.2;
-export const SLIDE_HIT_HALF = 1.2;
-export const HIT_WINDOW_MS = 160;
 
 export const TAP_RING_OUTER: RingPt[] = [
   [-TAP_SIZE / 2, -TAP_SIZE / 2],

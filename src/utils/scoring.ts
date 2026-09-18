@@ -1,16 +1,22 @@
 import { JudgementType, GameStats } from '../types/game';
+import {
+  JUDGE_THRESH,
+  JUDGE_COLORS,
+  JUDGE_SCALE,
+  SCORE_BASE,
+  RANK_THRESHOLDS,
+} from '../shared/gameplaySpec';
 
-export const JUDGEMENT_THRESHOLDS = {
-  S_PERFECT_MAX_MS: 40,
-  PERFECT_MAX_MS: 80,
-  GOOD_MAX_MS: 160,
-};
+/** Legacy alias kept so existing importers (judge system, UI) need no change. */
+export const JUDGEMENT_THRESHOLDS = JUDGE_THRESH;
 
+/** Colours + UI metadata per judgement. Hex/scale come from the shared spec;
+ *  `name`/`glowClass` are full-version-only presentation details. */
 export const JUDGEMENT_COLORS: Record<JudgementType, { hex: string; name: string; glowClass: string; scale: number }> = {
-  'S-Perfect': { hex: '#ff8c00', name: '橙色', glowClass: 'glow-s-perfect text-orange-400', scale: 1.2 },
-  'Perfect': { hex: '#ffd700', name: '黄色', glowClass: 'glow-perfect text-yellow-300', scale: 1.1 },
-  'Good': { hex: '#38bdf8', name: '天蓝色', glowClass: 'glow-good text-sky-400', scale: 1.05 },
-  'Miss': { hex: '#ef4444', name: '暗红灰', glowClass: 'text-red-500', scale: 1.0 },
+  'S-Perfect': { hex: JUDGE_COLORS['S-Perfect'], name: '橙色', glowClass: 'glow-s-perfect text-orange-400', scale: JUDGE_SCALE['S-Perfect'] },
+  'Perfect': { hex: JUDGE_COLORS['Perfect'], name: '黄色', glowClass: 'glow-perfect text-yellow-300', scale: JUDGE_SCALE['Perfect'] },
+  'Good': { hex: JUDGE_COLORS['Good'], name: '天蓝色', glowClass: 'glow-good text-sky-400', scale: JUDGE_SCALE['Good'] },
+  'Miss': { hex: JUDGE_COLORS['Miss'], name: '暗红灰', glowClass: 'text-red-500', scale: JUDGE_SCALE['Miss'] },
 };
 
 /**
@@ -18,11 +24,11 @@ export const JUDGEMENT_COLORS: Record<JudgementType, { hex: string; name: string
  */
 export function evaluateJudgement(deltaTMs: number): JudgementType | null {
   const absDelta = Math.abs(deltaTMs);
-  if (absDelta < JUDGEMENT_THRESHOLDS.S_PERFECT_MAX_MS) {
+  if (absDelta < JUDGE_THRESH.S_PERFECT) {
     return 'S-Perfect';
-  } else if (absDelta < JUDGEMENT_THRESHOLDS.PERFECT_MAX_MS) {
+  } else if (absDelta < JUDGE_THRESH.PERFECT) {
     return 'Perfect';
-  } else if (absDelta < JUDGEMENT_THRESHOLDS.GOOD_MAX_MS) {
+  } else if (absDelta < JUDGE_THRESH.GOOD) {
     return 'Good';
   }
   return null; // outside valid hit window (too early / too late)
@@ -37,7 +43,7 @@ export function evaluateJudgement(deltaTMs: number): JudgementType | null {
  */
 export function calculateNoteScore(judgement: JudgementType, totalNotes: number): number {
   if (totalNotes <= 0) return 0;
-  const baseUnit = 10000000 / totalNotes;
+  const baseUnit = SCORE_BASE / totalNotes;
   switch (judgement) {
     case 'S-Perfect':
       return baseUnit + 1;
@@ -55,11 +61,11 @@ export function calculateNoteScore(judgement: JudgementType, totalNotes: number)
  * Calculate Rank based on current score
  */
 export function calculateRank(score: number): GameStats['rank'] {
-  if (score >= 9900000) return 'EX+';
-  if (score >= 9500000) return 'EX';
-  if (score >= 9000000) return 'S';
-  if (score >= 8000000) return 'A';
-  if (score >= 7000000) return 'B';
-  if (score >= 6000000) return 'C';
+  if (score >= RANK_THRESHOLDS.EX_PLUS) return 'EX+';
+  if (score >= RANK_THRESHOLDS.EX) return 'EX';
+  if (score >= RANK_THRESHOLDS.S) return 'S';
+  if (score >= RANK_THRESHOLDS.A) return 'A';
+  if (score >= RANK_THRESHOLDS.B) return 'B';
+  if (score >= RANK_THRESHOLDS.C) return 'C';
   return 'F';
 }

@@ -1,7 +1,9 @@
 import type { EasingType } from '../types/game';
 
-/** Ordered list of supported easing types (used for validation + UI iteration). */
-export const EASING_TYPES: EasingType[] = ['linear', 'sine-in', 'sine-out', 'sine-io'];
+// EASING_TYPES is the single source of truth in src/shared/chartSchema.ts
+// (shared with the Lite build). Re-export it so existing importers
+// (e.g. VisualChartEditor.tsx) keep working without changes.
+export { EASING_TYPES } from '../shared/chartSchema';
 
 /**
  * Easing functions mapping progress t∈[0,1] → eased progress ∈[0,1]

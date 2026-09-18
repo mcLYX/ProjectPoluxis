@@ -24,10 +24,35 @@ const OUT = path.join(root, 'public', 'lite', 'index.html');
 
 const minify = process.env.LITE_MINIFY !== 'false';
 
+/* 0. Shared modules — single source of truth shared by the full app and the
+ *    Lite build. Each is transpiled to ES5, its `export` keywords stripped (so
+ *    each `var`/`function` becomes a plain shared-scope binding), and prepended
+ *    to the IIFE. Editing any of these updates BOTH versions.
+ *    - gameplaySpec.ts : gameplay *spec* constants (judge windows, scoring, …)
+ *    - chartSchema.ts   : chart validation / normalization (one rule set for both)
+ *    - demoCharts.ts    : built-in demo charts (one dataset for both)
+ *    Order only affects readability; all are in scope before the components run. */
+const SHARED_FILES = ['gameplaySpec.ts', 'chartSchema.ts', 'demoCharts.ts'];
+let sharedFragment = '';
+for (const f of SHARED_FILES) {
+  const res = await transform(fs.readFileSync(path.join(root, 'src', 'shared', f), 'utf8'), {
+    loader: 'ts',
+    target: ['es5'],
+  });
+  let frag = res.code.replace(/export\s+/g, '');
+  if (/\bexport\b/.test(frag)) {
+    throw new Error('shared module still contained `export` after stripping: ' + f);
+  }
+  sharedFragment += '\n/* ===== shared: ' + f + ' ===== */\n' + frag + '\n';
+}
+
 /* 1. Concatenate component files in order (numeric prefixes guarantee order). */
 const files = fs.readdirSync(COMP_DIR).filter((f) => f.endsWith('.js')).sort();
 if (files.length === 0) throw new Error('no component files found in ' + COMP_DIR);
-let bundle = '';
+let bundle =
+  '/* ===== shared modules (single source of truth) ===== */\n' +
+  sharedFragment +
+  '\n';
 for (const f of files) {
   bundle += '\n/* ===== ' + f + ' ===== */\n' + fs.readFileSync(path.join(COMP_DIR, f), 'utf8');
 }
