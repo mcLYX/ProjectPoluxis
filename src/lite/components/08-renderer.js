@@ -176,6 +176,83 @@
     ctx.stroke();
     ctx.restore();
   }
+  /* Draw a slide pipe as a tapered RIBBON following an arbitrary polyline
+   * (a sampled *eased* curve), instead of a single straight segment.
+   * `samples` = ordered projected points {x,y,scale,alpha} from the consumed
+   * edge (playhead) to node B. Each point's half-width is perspective-scaled;
+   * the ribbon is built from left/right offset edges (perpendicular to the
+   * local tangent) and filled/stroked with a per-vertex alpha gradient so it
+   * fades at the far end — mirroring the straight-pipe version's look under a
+   * 2D canvas. This is the 2D equivalent of the full version's curved tube
+   * centreline (GameCanvas.buildSlideTubeGeometry: x/y follow ease(τ) while z
+   * advances linearly with τ). */
+  function drawPipeCurve(samples, color, brightness) {
+    if (!samples || samples.length < 2) return;
+    brightness = brightness || 1.0;
+    var cr = parseInt(color.substr(1, 2), 16);
+    var cg = parseInt(color.substr(3, 2), 16);
+    var cb = parseInt(color.substr(5, 2), 16);
+    var n = samples.length;
+    var hw = [];
+    for (var i = 0; i < n; i++) {
+      hw.push(Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * samples[i].scale));
+    }
+    var left = [], right = [];
+    for (var i = 0; i < n; i++) {
+      var pa = samples[Math.max(0, i - 1)], pb = samples[Math.min(n - 1, i + 1)];
+      var tx = pb.x - pa.x, ty = pb.y - pa.y;
+      var tl = Math.sqrt(tx * tx + ty * ty) || 1;
+      var nx = -ty / tl, ny = tx / tl;
+      left.push({ x: samples[i].x + nx * hw[i], y: samples[i].y + ny * hw[i] });
+      right.push({ x: samples[i].x - nx * hw[i], y: samples[i].y - ny * hw[i] });
+    }
+    ctx.save();
+    /* When the ribbon collapses to a near-zero-length (pipe nearly consumed),
+     * samples[0]≈samples[n-1] and createLinearGradient() becomes a DEGENERATE
+     * (zero-length) gradient — some browsers then render it as fully transparent
+     * or fully opaque and flip between frames → the whole pipe "twinkles". Guard
+     * by falling back to a solid fill/stroke in that case. */
+    var gDegenerate = (Math.abs(samples[n - 1].x - samples[0].x) < 0.5 &&
+                       Math.abs(samples[n - 1].y - samples[0].y) < 0.5);
+    /* Filled ribbon body (per-vertex alpha gradient along the polyline). */
+    if (gDegenerate) {
+      ctx.fillStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' +
+        Math.min(1, samples[Math.floor(n / 2)].alpha * 0.45 * brightness) + ')';
+    } else {
+      var fillGrad = ctx.createLinearGradient(samples[0].x, samples[0].y, samples[n - 1].x, samples[n - 1].y);
+      for (var k = 0; k < n; k++) {
+        var fa = Math.min(1, samples[k].alpha * 0.45 * brightness);
+        fillGrad.addColorStop(k / (n - 1), 'rgba(' + cr + ',' + cg + ',' + cb + ',' + fa + ')');
+      }
+      ctx.fillStyle = fillGrad;
+    }
+    ctx.beginPath();
+    ctx.moveTo(left[0].x, left[0].y);
+    for (var i = 1; i < n; i++) ctx.lineTo(left[i].x, left[i].y);
+    for (var i = n - 1; i >= 0; i--) ctx.lineTo(right[i].x, right[i].y);
+    ctx.closePath();
+    ctx.fill();
+    /* Edge outlines (brighter, separate gradient). */
+    if (gDegenerate) {
+      ctx.strokeStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' +
+        Math.min(1, samples[Math.floor(n / 2)].alpha * 0.6 * brightness) + ')';
+    } else {
+      var strGrad = ctx.createLinearGradient(samples[0].x, samples[0].y, samples[n - 1].x, samples[n - 1].y);
+      for (var k = 0; k < n; k++) {
+        var sa = Math.min(1, samples[k].alpha * 0.6 * brightness);
+        strGrad.addColorStop(k / (n - 1), 'rgba(' + cr + ',' + cg + ',' + cb + ',' + sa + ')');
+      }
+      ctx.strokeStyle = strGrad;
+    }
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var i = 0; i < n; i++) { if (i === 0) ctx.moveTo(left[i].x, left[i].y); else ctx.lineTo(left[i].x, left[i].y); }
+    ctx.stroke();
+    ctx.beginPath();
+    for (var i = 0; i < n; i++) { if (i === 0) ctx.moveTo(right[i].x, right[i].y); else ctx.lineTo(right[i].x, right[i].y); }
+    ctx.stroke();
+    ctx.restore();
+  }
   /* Draw a pipe cap — a filled (no wireframe) semi-transparent diamond at a
    * projected point. Used at judge-plane cross-sections to make the cut pipe
    * look like it has a solid 3D end, not a flat edge. */

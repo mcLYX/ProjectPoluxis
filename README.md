@@ -492,9 +492,64 @@ npx cap sync android      # 把 dist/ 同步进安卓工程
 npx cap open android      # 用 Android Studio 打开并构建 / 运行
 ```
 
-### 4. Lite 版与回退
+### 4. Lite 版与构建
 
 项目内置 **Lite 版**（精简 / 兼容回退逻辑），用于低性能设备、部分旧版浏览器，或网络受限场景。当主资源（如外部谱面、音频）加载失败时，游戏会自动回退到代码内**硬编码的内置示范谱面**与**合成器音效**，保证始终可玩。
+
+Lite 版是一个**单文件 HTML**（JS + CSS 全部内联），不依赖打包框架，可直接部署到任意静态托管。
+
+#### 构建命令
+
+```bash
+# 构建 Lite 版单文件，输出到 public/lite/index.html（默认压缩，约 80 KB）
+npm run build:lite
+
+# 调试用：跳过压缩，生成更易读的产物（约 141 KB，便于在浏览器 DevTools 里排查）
+LITE_MINIFY=false npm run build:lite
+
+# 逆向拆分：把已有的 public/lite/index.html 还原为模块化源（见下「源码结构」）
+npm run split:lite
+```
+
+- 产物 `public/lite/index.html` 随常规 `npm run build` / `npm run preview` 一并进入 `dist/lite/`，在站点 `/lite/` 路径下即可访问（同样是相对 `base`，支持子目录部署）。
+- PWA 的 `registerSW.js` / `manifest.webmanifest` 会以相对路径（`../...`）引用根目录版本，在 `/lite/` 下正确指向 `/`。
+
+#### 构建流程（`scripts/build-lite.mjs`）
+
+1. 把 `src/lite/components/*.js` 按**文件名数字顺序**拼接成一个共享作用域的 IIFE（原函数声明与 `var` 全部落在同一闭包，组件间可互相引用）；
+2. 用 esbuild 把整段 IIFE 转译到 **ES5**（并默认压缩），保证兼容旧浏览器；
+3. 把转译后的 JS 与 `src/lite/styles/{base.css,ie9.css}`（IE9 兼容块）内联进 HTML 模板 `src/lite/index.template.html` 的占位符，写出 `public/lite/index.html`。
+
+#### 源码结构（模块化拆分）
+
+Lite 版的“模块化源”位于 `src/lite/`，由 `build:lite` 拼接回单文件：
+
+```
+src/lite/
+├── components/            # 各 *.js 按数字顺序拼接（共享同一 IIFE 作用域）
+│   ├── 00-prelude.js       # polyfill / 头部
+│   ├── 01-i18n.js          # 文案
+│   ├── 02-polyfills.js
+│   ├── 03-constants.js     # 常量
+│   ├── 04-chart.js         # 谱面解析（现委托给共享核心）
+│   ├── 05-colors.js        # 颜色工具
+│   ├── 06-theme.js         # 主题
+│   ├── 07-audio.js         # LiteAudio（合成器音效）
+│   ├── 08-renderer.js      # 渲染
+│   ├── 09-engine.js        # 游戏循环 / 判定
+│   ├── 10-ui.js            # 界面与选歌逻辑
+│   └── 11-init.js          # 启动
+├── styles/
+│   ├── base.css            # 主样式
+│   └── ie9.css             # IE9 兼容样式
+└── index.template.html     # 含 <!--LITE_BASE_CSS--> / <!--LITE_IE9_CSS--> / <!--LITE_APP_JS--> 占位符
+```
+
+> `npm run split:lite` 会把一个现有的 `public/lite/index.html` 按段标记逆向拆回上面的 `components/*.js` + `styles/*.css` + `index.template.html`。这常用于“修改已交付的单文件产物”后，把改动落回可维护的模块化源。
+
+#### 与常规版共享核心
+
+谱面解析、校验、内置示范谱面、玩法常量、缓动等逻辑来自 `src/shared/`（`gameplaySpec.ts`、`chartSchema.ts`、`demoCharts.ts`、`beatTime.ts`、`easing.ts`）。构建时这些 `.ts` 被转译（剥离 `export` 关键字）后**前置拼进 IIFE**，因此改任意共享文件都会**同时影响常规版与 Lite 版**，确保两套逻辑一致。
 
 ---
 
@@ -649,6 +704,10 @@ npm run preview   # 试听效果
 │   ├── utils/
 │   │   ├── chartParser.ts      # 谱面 JSON 解析 / 校验 / 导出
 │   │   └── editorRules.ts      # 编辑器“放置规则”DSL 解释器
+│   ├── lite/               # Lite 版模块化源（build:lite 拼成单文件 HTML，见上文「Lite 版与构建」）
+│   │   ├── components/*.js   # 按数字顺序拼接的共享作用域 IIFE
+│   │   ├── styles/          # base.css / ie9.css
+│   │   └── index.template.html
 │   └── audio/AudioManager.ts   # 音频与合成器音效
 ├── beatmaps/               # （可选）你的谱面 / 封面 / 音乐源目录，见上文
 ├── public/

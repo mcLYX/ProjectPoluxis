@@ -439,61 +439,117 @@
           if (zA < spawnLimit && zB < spawnLimit) continue;
           if (zA > 0 && zB > 0) continue;
 
-          /* Eased consumption (mirrors GameCanvas slide tube): the pipe is
-           * consumed from node A toward node B following the eased progress.
-           * τ = normalized TIME within [tA, tB] (advances linearly; easing is
-           * NOT applied to time). The consumed fraction along the segment is
-           * ease(τ); the visible pipe is the portion from fraction `e` to 1.
-           * Fully consumed (playhead reached B) → hidden. */
+          /* Curve-eased slide pipe (mirrors GameCanvas slide tube).
+           * The pipe CENTRELINE is a curve: x/y follow ease(τ), while the depth
+           * z follows the scroll-distance profile (linear in time when no
+           * speed_change sits inside the segment). So the pipe still connects
+           * nodes A and B exactly but BOWS along the travel direction — NOT a
+           * straight line. The visible pipe is the portion from the playhead
+           * (τ = linear time fraction) to node B, clamped to [spawnLimit, 0].
+           * CRITICAL: easing must NOT touch z (time) — only x/y. */
+          var ex = nodeB.x - nodeA.x, ey = nodeB.y - nodeA.y;
           var dz = zB - zA;
           var segDur = Math.max(1e-4, nodeB.timeSec - nodeA.timeSec);
           var tau = (curTime - nodeA.timeSec) / segDur;
           if (tau < 0) tau = 0; else if (tau > 1) tau = 1;
-          var easeFn = EASING_FNS[nodeB.easing || 'linear'] || EASING_FNS.linear;
-          var e = easeFn(tau);
+          /* Gate on TIME, not eased position: for sine-out etc. ease(τ) hits
+           * ~0.999 well before τ=1, which would hide a long tail too early. */
           if (tau >= 0.999) continue;
+          var easeFn = EASING_FNS[nodeB.easing || 'linear'] || EASING_FNS.linear;
 
-          /* Endpoints on the A→B segment (fraction `e` consumed from A, node B at
-           * 1), clamped to the visible z-band by slicing at the judge/far plane.
-           * Because the start fraction follows the easing, the pipe visibly erodes
-           * from A toward B — the 2D equivalent of the 3D eased consumption. */
-          var ps = slideSegPoint(nodeA, nodeB, zA, zB, spawnLimit, e);
-          var pe = slideSegPoint(nodeA, nodeB, zA, zB, spawnLimit, 1);
+          /* A speed_change strictly between A and B makes z(τ) non-linear; sample
+           * the real scroll-distance profile so the pipe length / playhead honour
+           * the speed change (mirrors GameCanvas's zAt). Otherwise cheap linear. */
+          var spArr = game.speedPoints;
+          var midSpeed = false;
+          for (var si = 0; si < spArr.length; si++) {
+            if (spArr[si].timeSec > nodeA.timeSec && spArr[si].timeSec < nodeB.timeSec) { midSpeed = true; break; }
+          }
+          var scrollDistA = midSpeed ? getScrollDistance(nodeA.timeSec, spArr) : 0;
+          function zAtTau(tt) {
+            if (!midSpeed) return zA + tt * dz;
+            return zA - (getScrollDistance(nodeA.timeSec + tt * segDur, spArr) - scrollDistA) * baseSpeed;
+          }
 
-          var pA = project(ps.x, ps.y, ps.z, spawnLimit);
-          var pB = project(pe.x, pe.y, pe.z, spawnLimit);
-          if (!pA || !pB) continue;
-          var fadeA = Math.max(.1, Math.min(1, (ps.z - spawnLimit) / FADE_ZONE));
-          var fadeB = Math.max(.1, Math.min(1, (pe.z - spawnLimit) / FADE_ZONE));
+          /* Visible z-band τ-range (z ∈ [spawnLimit, 0]). Linear case solves
+           * directly; midSpeed scans (z monotonic for non-negative speeds). */
+          var tauBandLo, tauBandHi;
+          if (!midSpeed) {
+            if (Math.abs(dz) > 1e-6) {
+              var tf = (spawnLimit - zA) / dz;   /* z = spawnLimit (far plane) */
+              var tj = (0 - zA) / dz;            /* z = 0 (judge plane) */
+              tauBandLo = Math.min(tf, tj);
+              tauBandHi = Math.max(tf, tj);
+            } else {
+              tauBandLo = -Infinity; tauBandHi = Infinity;
+            }
+          } else {
+            var blo = Infinity, bhi = -Infinity;
+            for (var bq = 0; bq <= 24; bq++) {
+              var bzq = zAtTau(bq / 24);
+              if (bzq >= spawnLimit && bzq <= 0) {
+                if (bq / 24 < blo) blo = bq / 24;
+                if (bq / 24 > bhi) bhi = bq / 24;
+              }
+            }
+            if (blo === Infinity) continue;
+            tauBandLo = blo; tauBandHi = bhi;
+          }
+          /* Intersect band with [0,1] and with [τ,1] (nothing before playhead). */
+          var visLo = Math.max(tau, tauBandLo, 0);
+          var visHi = Math.min(1, tauBandHi);
+          if (visLo >= visHi) continue;
 
-          /* --- Slide pipe color/brightness effects (mirrors GameCanvas.tsx
-           *   L1220-1230) ---
-           * 1. Red: destination node has redWarn (pointer left zone) or
-           *    missLocked (pointer released early) → pipe turns SLIDE_RED.
-           * 2. Holding: ANY bound pointer is down AND within the square hit zone of
-           *    the judge-plane cross-section → pipe brightens (~2.3×). */
+          /* Sample the eased curve within the visible band. */
+          var SEGS = 16;
+          var samples = [];
+          for (var sk = 0; sk <= SEGS; sk++) {
+            var tt = visLo + (visHi - visLo) * (sk / SEGS);
+            var wx = nodeA.x + easeFn(tt) * ex;
+            var wy = nodeA.y + easeFn(tt) * ey;
+            var wz = zAtTau(tt);
+            var p = project(wx, wy, wz, spawnLimit);
+            if (!p) continue;
+            var a = Math.max(0.1, Math.min(1, (wz - spawnLimit) / FADE_ZONE));
+            samples.push({ x: p.x, y: p.y, scale: p.scale, alpha: a });
+          }
+          if (samples.length < 2) continue;
+
+          /* --- Slide pipe color/brightness effects (mirrors GameCanvas.tsx) ---
+           * 1. Red: destination node has redWarn / missLocked → SLIDE_RED.
+           * 2. Holding: ANY bound pointer is down AND within the hit zone of the
+           *    judge-plane cross-section (curve point at z=0, not the chord). */
           var slideRt = getSlideRt(note.id, allNodes.length);
           var nextNodeRt = slideRt.nodes[pi + 1];
           var isRed = !!nextNodeRt && (nextNodeRt.missLocked || nextNodeRt.redWarn) && !judgedB;
           var isHolding = false;
           if (!isRed) {
             var hasAnyBound = false;
+            var straddles = (zA > 0 && zB < 0) || (zA < 0 && zB > 0);
+            var tCross = null;
+            if (straddles) {
+              if (!midSpeed) {
+                tCross = (0 - zA) / dz;
+              } else {
+                /* Bisection for the τ where z(τ)=0 (z monotonic for non-neg speed). */
+                var ca = 0, cb = 1;
+                for (var bi = 0; bi < 20; bi++) {
+                  var bm = (ca + cb) / 2;
+                  if ((zAtTau(bm) > 0) === (zA > 0)) ca = bm; else cb = bm;
+                }
+                tCross = (ca + cb) / 2;
+              }
+            }
             for (var hbpid in slideRt.boundPointerIds) {
               if (!slideRt.boundPointerIds.hasOwnProperty(hbpid)) continue;
               hasAnyBound = true;
               var hbp = game.pointers[hbpid];
-              if (hbp && hbp.down) {
-                /* Check if pointer is near the judge-plane cross-section.
-                 * Cross-section exists when pipe crosses z=0 (one end >0, other <0). */
-                var crossesPlane = (zA > 0 && zB < 0) || (zA < 0 && zB > 0);
-                if (crossesPlane && Math.abs(dz) > 0.001) {
-                  var tCross = (0 - zA) / dz;
-                  var cx = nodeA.x + tCross * (nodeB.x - nodeA.x);
-                  var cy = nodeA.y + tCross * (nodeB.y - nodeA.y);
-                  if (Math.abs(hbp.x - cx) < SLIDE_HIT_HALF && Math.abs(hbp.y - cy) < SLIDE_HIT_HALF) {
-                    isHolding = true;
-                    break;
-                  }
+              if (hbp && hbp.down && tCross !== null) {
+                var cx = nodeA.x + easeFn(tCross) * ex;
+                var cy = nodeA.y + easeFn(tCross) * ey;
+                if (Math.abs(hbp.x - cx) < SLIDE_HIT_HALF && Math.abs(hbp.y - cy) < SLIDE_HIT_HALF) {
+                  isHolding = true;
+                  break;
                 }
               }
             }
@@ -503,13 +559,26 @@
           if (isHolding) brightness = isRed ? 2.7 : 2.3;
           else if (isRed) brightness = 1.7;
           var pipeColor = isRed ? SLIDE_RED : nc;
-          drawPipe(pA, pB, pipeColor, fadeA, fadeB, Math.max(pA.scale, pB.scale), brightness);
+          drawPipeCurve(samples, pipeColor, brightness);
 
-          /* Draw caps at judge-plane cross-sections — filled diamonds (no
-           * wireframe) that make the cut pipe look 3D. Only at z=0 cuts,
-           * not far-plane cuts (those just fade out). */
-          if (ps.z === 0) drawPipeCap(pA, pipeColor, fadeA, pA.scale);
-          if (pe.z === 0) drawPipeCap(pB, pipeColor, fadeB, pB.scale);
+          /* Cross-section caps at the pipe ENDS (playhead edge + node B), fading
+           * in smoothly as each end nears the judge plane (z≈0). Drawing the cap at
+           * the *ends* — a fixed node position, or the smoothly-moving playhead —
+           * (instead of a point that slides along the curve at z=0) is what removes
+           * the previous cross-section flicker. Cap alpha ∝ 1-|z|/capZ so it eases
+           * in/out with no pop. */
+          var capZ = 0.4;
+          var wz0 = zAtTau(visLo), wzN = zAtTau(visHi);
+          var capA0 = Math.max(0, 1 - Math.abs(wz0) / capZ);
+          var capAN = Math.max(0, 1 - Math.abs(wzN) / capZ);
+          if (capA0 > 0.01) {
+            var cp0 = project(nodeA.x + easeFn(visLo) * ex, nodeA.y + easeFn(visLo) * ey, wz0, spawnLimit);
+            if (cp0) drawPipeCap(cp0, pipeColor, capA0 * Math.min(1, brightness), cp0.scale);
+          }
+          if (capAN > 0.01) {
+            var cpN = project(nodeA.x + easeFn(visHi) * ex, nodeA.y + easeFn(visHi) * ey, wzN, spawnLimit);
+            if (cpN) drawPipeCap(cpN, pipeColor, capAN * Math.min(1, brightness), cpN.scale);
+          }
         }
         /* Slide nodes + projection guides */
         for (var nj = 0; nj < allNodes.length; nj++) {
@@ -756,11 +825,9 @@
     return rt;
   }
 
-  /* Point on the slide segment A→B at fraction f∈[0,1], clamped to the visible
-   * z-band [spawnLimit, 0]. When the raw z leaves the band, slice the A→B line
-   * at the judge plane (z=0) or far plane (z=spawnLimit) so the pipe follows the
-   * path exactly (mirrors the Lite cross-section approach). Used by the eased
-   * pipe-consumption drawing below. */
+  /* Point on the slide segment A→B at fraction f∈[0,1] — kept for reference /
+   * potential editor use. The gameplay pipe now samples the eased curve
+   * directly (see the slide-pipe block in render()), so this is unused there. */
   function slideSegPoint(nodeA, nodeB, zA, zB, spawnLimit, f) {
     var z = zA + f * (zB - zA);
     var x = nodeA.x + f * (nodeB.x - nodeA.x);
