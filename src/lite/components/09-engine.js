@@ -439,41 +439,32 @@
           if (zA < spawnLimit && zB < spawnLimit) continue;
           if (zA > 0 && zB > 0) continue;
 
-          /* Clamp render z to [spawnLimit, 0]: judged/past-plane → 0,
-           * beyond-far → spawnLimit. */
-          var rZA = (judgedA || zA > 0) ? 0 : zA;
-          var rZB = (judgedB || zB > 0) ? 0 : zB;
-          if (rZA < spawnLimit) rZA = spawnLimit;
-          if (rZB < spawnLimit) rZB = spawnLimit;
-
-          /* Interpolate x/y at the clamped z along the A→B segment.
-           * Parametric: P(t) = A + t*(B-A), where t = (z - zA) / (zB - zA).
-           * This gives the cross-section coordinate — like slicing the pipe. */
-          var pxA = nodeA.x, pyA = nodeA.y;
-          var pxB = nodeB.x, pyB = nodeB.y;
+          /* Eased consumption (mirrors GameCanvas slide tube): the pipe is
+           * consumed from node A toward node B following the eased progress.
+           * τ = normalized TIME within [tA, tB] (advances linearly; easing is
+           * NOT applied to time). The consumed fraction along the segment is
+           * ease(τ); the visible pipe is the portion from fraction `e` to 1.
+           * Fully consumed (playhead reached B) → hidden. */
           var dz = zB - zA;
-          if (Math.abs(dz) > 0.001) {
-            if (rZA !== zA) {
-              var tA = (rZA - zA) / dz;
-              pxA = nodeA.x + tA * (nodeB.x - nodeA.x);
-              pyA = nodeA.y + tA * (nodeB.y - nodeA.y);
-            }
-            if (rZB !== zB) {
-              var tB = (rZB - zA) / dz;
-              pxB = nodeA.x + tB * (nodeB.x - nodeA.x);
-              pyB = nodeA.y + tB * (nodeB.y - nodeA.y);
-            }
-          }
+          var segDur = Math.max(1e-4, nodeB.timeSec - nodeA.timeSec);
+          var tau = (curTime - nodeA.timeSec) / segDur;
+          if (tau < 0) tau = 0; else if (tau > 1) tau = 1;
+          var easeFn = EASING_FNS[nodeB.easing || 'linear'] || EASING_FNS.linear;
+          var e = easeFn(tau);
+          if (tau >= 0.999) continue;
 
-          var pA = project(pxA, pyA, rZA, spawnLimit);
-          var pB = project(pxB, pyB, rZB, spawnLimit);
+          /* Endpoints on the A→B segment (fraction `e` consumed from A, node B at
+           * 1), clamped to the visible z-band by slicing at the judge/far plane.
+           * Because the start fraction follows the easing, the pipe visibly erodes
+           * from A toward B — the 2D equivalent of the 3D eased consumption. */
+          var ps = slideSegPoint(nodeA, nodeB, zA, zB, spawnLimit, e);
+          var pe = slideSegPoint(nodeA, nodeB, zA, zB, spawnLimit, 1);
+
+          var pA = project(ps.x, ps.y, ps.z, spawnLimit);
+          var pB = project(pe.x, pe.y, pe.z, spawnLimit);
           if (!pA || !pB) continue;
-          /* Per-end fade: when the next node is beyond the far plane it is
-           * clamped to spawnLimit → fadeB hits 0. drawPipe builds a gradient
-           * from fadeA→fadeB so the pipe stays visible at the in-view end and
-           * fades toward the clamped end, instead of vanishing entirely. */
-          var fadeA = Math.max(.1, Math.min(1, (rZA - spawnLimit) / FADE_ZONE));
-          var fadeB = Math.max(.1, Math.min(1, (rZB - spawnLimit) / FADE_ZONE));
+          var fadeA = Math.max(.1, Math.min(1, (ps.z - spawnLimit) / FADE_ZONE));
+          var fadeB = Math.max(.1, Math.min(1, (pe.z - spawnLimit) / FADE_ZONE));
 
           /* --- Slide pipe color/brightness effects (mirrors GameCanvas.tsx
            *   L1220-1230) ---
@@ -516,11 +507,9 @@
 
           /* Draw caps at judge-plane cross-sections — filled diamonds (no
            * wireframe) that make the cut pipe look 3D. Only at z=0 cuts,
-           * not far-plane cuts (those just fade out). Caps sit at the judge
-           * plane (z=0) where fade is always ~1, so reusing fadeA/fadeB
-           * here is safe — they are 1 at this end. */
-          if (rZA !== zA && rZA === 0) drawPipeCap(pA, pipeColor, fadeA, pA.scale);
-          if (rZB !== zB && rZB === 0) drawPipeCap(pB, pipeColor, fadeB, pB.scale);
+           * not far-plane cuts (those just fade out). */
+          if (ps.z === 0) drawPipeCap(pA, pipeColor, fadeA, pA.scale);
+          if (pe.z === 0) drawPipeCap(pB, pipeColor, fadeB, pB.scale);
         }
         /* Slide nodes + projection guides */
         for (var nj = 0; nj < allNodes.length; nj++) {
@@ -765,6 +754,30 @@
       game.slideStates[noteId] = rt;
     }
     return rt;
+  }
+
+  /* Point on the slide segment A→B at fraction f∈[0,1], clamped to the visible
+   * z-band [spawnLimit, 0]. When the raw z leaves the band, slice the A→B line
+   * at the judge plane (z=0) or far plane (z=spawnLimit) so the pipe follows the
+   * path exactly (mirrors the Lite cross-section approach). Used by the eased
+   * pipe-consumption drawing below. */
+  function slideSegPoint(nodeA, nodeB, zA, zB, spawnLimit, f) {
+    var z = zA + f * (zB - zA);
+    var x = nodeA.x + f * (nodeB.x - nodeA.x);
+    var y = nodeA.y + f * (nodeB.y - nodeA.y);
+    var dz = zB - zA;
+    if (z > 0) {
+      var t0 = dz !== 0 ? (0 - zA) / dz : 0;
+      x = nodeA.x + t0 * (nodeB.x - nodeA.x);
+      y = nodeA.y + t0 * (nodeB.y - nodeA.y);
+      z = 0;
+    } else if (z < spawnLimit) {
+      var t1 = dz !== 0 ? (spawnLimit - zA) / dz : 1;
+      x = nodeA.x + t1 * (nodeB.x - nodeA.x);
+      y = nodeA.y + t1 * (nodeB.y - nodeA.y);
+      z = spawnLimit;
+    }
+    return { x: x, y: y, z: z };
   }
 
   /* Per-frame slide judgment — faithful port of GameCanvas.processSlide.

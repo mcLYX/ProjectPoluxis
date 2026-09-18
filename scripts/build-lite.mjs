@@ -31,8 +31,10 @@ const minify = process.env.LITE_MINIFY !== 'false';
  *    - gameplaySpec.ts : gameplay *spec* constants (judge windows, scoring, …)
  *    - chartSchema.ts   : chart validation / normalization (one rule set for both)
  *    - demoCharts.ts    : built-in demo charts (one dataset for both)
+ *    - beatTime.ts      : chart *resolution* (beat→sec, slide/node expansion, …)
+ *    - easing.ts        : EASING_FNS (slide pipe easing)
  *    Order only affects readability; all are in scope before the components run. */
-const SHARED_FILES = ['gameplaySpec.ts', 'chartSchema.ts', 'demoCharts.ts'];
+const SHARED_FILES = ['gameplaySpec.ts', 'chartSchema.ts', 'demoCharts.ts', 'beatTime.ts', 'easing.ts'];
 let sharedFragment = '';
 for (const f of SHARED_FILES) {
   const res = await transform(fs.readFileSync(path.join(root, 'src', 'shared', f), 'utf8'), {
