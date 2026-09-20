@@ -40,6 +40,12 @@ import {
 
 const MARKER_LIFETIME_MS = 1150;
 
+/**
+ * 判定回传节流间隔（ms）：HUD / stats 的刷新频率上限（~30Hz）。
+ * 只影响 UI 刷新时机，不影响判定与计分（缓冲按原顺序批量应用）。
+ */
+const JUDGEMENT_FLUSH_MS = 33;
+
 // =============== HUD color helpers (driven by per-chart bgScheme) ===============
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const clean = hex.replace('#', '');
@@ -305,6 +311,13 @@ export function App() {
   const markerCleanTimerRef = useRef<number | null>(null);
   const [timingMarkers, setTimingMarkers] = useState<TimingMarker[]>([]);
   const [comboBurst, setComboBurst] = useState<{ key: number; value: number } | null>(null);
+  // 判定回传节流：判定结果先进缓冲，再按固定间隔（~30Hz）批量提交。
+  // 原实现「每个音符判定 → 一次 setStats + setTimingMarkers」≈60 次/秒全树重渲染
+  // （Lite 版 0 次 React 渲染，这是完整版 2D 比 Lite 卡的主因）。节流只改变
+  // HUD 的刷新时机，不改变判定与计分：缓冲按原顺序逐条应用，最终状态逐位一致。
+  const judgementQueueRef = useRef<JudgementFeedback[]>([]);
+  const judgementFlushRafRef = useRef<number | null>(null);
+  const lastJudgementFlushRef = useRef(0);
   // Ambient background is driven imperatively (ref + direct DOM writes inside
   // the HUD rAF) instead of React state. Pushing it every frame via setState
   // forced a full 60fps App reconciliation that saturated one CPU core on
@@ -542,6 +555,8 @@ export function App() {
       });
       setTimingMarkers([]);
       setComboBurst(null);
+      // 丢弃上一局可能尚未 flush 的判定缓冲，避免开局后被追加到新一局的 stats 上。
+      judgementQueueRef.current.length = 0;
       setResultInfo(null);
       if (songId && scoreKey && diffName) {
         setCurrentSongInfo({ songId, scoreKey, diffName });
@@ -616,6 +631,8 @@ export function App() {
       });
       setTimingMarkers([]);
       setComboBurst(null);
+      // 同上：重开试玩时丢弃残留缓冲。
+      judgementQueueRef.current.length = 0;
       setGameTime(startTimeSec);
       setPlaySession((s) => s + 1);
       setIsPlayTestMode(true);
@@ -929,7 +946,70 @@ export function App() {
     }
   }, [currentChart, editorTarget, t, showAppToast]);
 
+  /** 把单条判定应用到 stats / markers（原 handleJudgementStable 的函数体）。
+   *  纯状态更新，不含节流逻辑，便于节流层按顺序批量调用。 */
+  const applyJudgement = useCallback((fb: JudgementFeedback) => {
+    setStats((prev) => {
+      const isHit = fb.type !== 'Miss';
+      const newCombo = isHit ? prev.combo + 1 : 0;
+      const newMaxCombo = Math.max(prev.maxCombo, newCombo);
+      const sCount = prev.sPerfectCount + (fb.type === 'S-Perfect' ? 1 : 0);
+      const pCount = prev.perfectCount + (fb.type === 'Perfect' ? 1 : 0);
+      const gCount = prev.goodCount + (fb.type === 'Good' ? 1 : 0);
+      const mCount = prev.missCount + (fb.type === 'Miss' ? 1 : 0);
+      // early/late 拆分：deltaT<0 为 early（偏早命中），>=0 为 late。
+      // 仅计入 Perfect 与 Good 档；S-Perfect（±40ms 临界）不参与 early/late 拆分。
+      const isEarly = fb.deltaT < 0;
+      const pEarly = prev.perfectEarly + (fb.type === 'Perfect' && isEarly ? 1 : 0);
+      const pLate = prev.perfectLate + (fb.type === 'Perfect' && !isEarly ? 1 : 0);
+      const gEarly = prev.goodEarly + (fb.type === 'Good' && isEarly ? 1 : 0);
+      const gLate = prev.goodLate + (fb.type === 'Good' && !isEarly ? 1 : 0);
+      const newScore = prev.score + fb.scoreGained;
+      const judgedTotal = sCount + pCount + gCount + mCount;
+      const newAcc = judgedTotal > 0 ? ((sCount + pCount + gCount * 0.5) / judgedTotal) * 100 : 100;
+
+      if (newCombo > 0 && newCombo % 10 === 0) {
+        setComboBurst({ key: Date.now(), value: newCombo });
+      }
+
+      return {
+        ...prev, score: newScore, combo: newCombo, maxCombo: newMaxCombo,
+        sPerfectCount: sCount, perfectCount: pCount, goodCount: gCount, missCount: mCount,
+        perfectEarly: pEarly, perfectLate: pLate, goodEarly: gEarly, goodLate: gLate,
+        accuracy: newAcc, rank: calculateRank(newScore),
+      };
+    });
+
+    const marker: TimingMarker = { id: `${fb.id}-${fb.createdAt}`, dt: fb.deltaT, type: fb.type };
+    // 内嵌到期时间戳（不进 TimingBar 接口，仅本地清理用）。
+    (marker as TimingMarker & { expiresAt: number }).expiresAt = performance.now() + MARKER_LIFETIME_MS;
+    setTimingMarkers((prev) => [...prev.slice(-24), marker]);
+    // 单一批量清理 timer：任意时刻至多一个，到期后移除全部过期 marker。
+    if (markerCleanTimerRef.current === null) {
+      markerCleanTimerRef.current = window.setTimeout(() => {
+        markerCleanTimerRef.current = null;
+        const now = performance.now();
+        setTimingMarkers((prev) => prev.filter((m) => (m as TimingMarker & { expiresAt: number }).expiresAt > now));
+      }, MARKER_LIFETIME_MS);
+    }
+  }, []);
+
+  /** 立即排空判定缓冲（结算 / 暂停等需要读到最新 stats 的时刻调用）。 */
+  const flushJudgements = useCallback(() => {
+    if (judgementFlushRafRef.current !== null) {
+      cancelAnimationFrame(judgementFlushRafRef.current);
+      judgementFlushRafRef.current = null;
+    }
+    const q = judgementQueueRef.current;
+    if (q.length === 0) return;
+    judgementQueueRef.current = [];
+    lastJudgementFlushRef.current = performance.now();
+    for (let i = 0; i < q.length; i++) applyJudgement(q[i]);
+  }, [applyJudgement]);
+
   const handleSongEnd = useCallback(() => {
+    // 结算要读最新 stats：先把节流缓冲里残留的判定立即应用掉。
+    flushJudgements();
     if (gameState !== 'editor') {
       // Lock pause IMMEDIATELY — no pause-overlay insertion while we are
       // running the clear-banner / fade-out sequence (otherwise the state
@@ -1015,7 +1095,7 @@ export function App() {
         }
       }
     }
-  }, [gameState, isPlayTestMode, currentSongInfo, autoPlay, currentChart]);
+  }, [gameState, isPlayTestMode, currentSongInfo, autoPlay, currentChart, flushJudgements]);
 
   // 账号：具备平台账号能力的构建，每次启动（且用户未手动登出）尝试拉取平台身份
   // 刷新头像与昵称。公开版 getIdentity() 恒返回 null，天然走本地账号分支；失败静默回落。
@@ -1050,57 +1130,39 @@ export function App() {
       .catch(() => {});
   }, []);
 
+  /**
+   * 判定回传（节流版）：只入缓冲 + 预约一次按帧的批量提交。
+   *
+   * 高刷屏（120/144Hz）下判定可能一帧多次，原实现每次都触发 App 全树重渲染；
+   * 这里把刷新频率钉在 ~30Hz，把「每判定一次全树重渲染」降为固定频率。
+   * 判定与计分语义完全不变（缓冲按到达顺序逐条应用）。
+   */
   const handleJudgementStable = useCallback((fb: JudgementFeedback) => {
-    setStats((prev) => {
-      const isHit = fb.type !== 'Miss';
-      const newCombo = isHit ? prev.combo + 1 : 0;
-      const newMaxCombo = Math.max(prev.maxCombo, newCombo);
-      const sCount = prev.sPerfectCount + (fb.type === 'S-Perfect' ? 1 : 0);
-      const pCount = prev.perfectCount + (fb.type === 'Perfect' ? 1 : 0);
-      const gCount = prev.goodCount + (fb.type === 'Good' ? 1 : 0);
-      const mCount = prev.missCount + (fb.type === 'Miss' ? 1 : 0);
-      // early/late 拆分：deltaT<0 为 early（偏早命中），>=0 为 late。
-      // 仅计入 Perfect 与 Good 档；S-Perfect（±40ms 临界）不参与 early/late 拆分。
-      const isEarly = fb.deltaT < 0;
-      const pEarly = prev.perfectEarly + (fb.type === 'Perfect' && isEarly ? 1 : 0);
-      const pLate = prev.perfectLate + (fb.type === 'Perfect' && !isEarly ? 1 : 0);
-      const gEarly = prev.goodEarly + (fb.type === 'Good' && isEarly ? 1 : 0);
-      const gLate = prev.goodLate + (fb.type === 'Good' && !isEarly ? 1 : 0);
-      const newScore = prev.score + fb.scoreGained;
-      const judgedTotal = sCount + pCount + gCount + mCount;
-      const newAcc = judgedTotal > 0 ? ((sCount + pCount + gCount * 0.5) / judgedTotal) * 100 : 100;
-
-      if (newCombo > 0 && newCombo % 10 === 0) {
-        setComboBurst({ key: Date.now(), value: newCombo });
+    judgementQueueRef.current.push(fb);
+    if (judgementFlushRafRef.current !== null) return;
+    const tick = () => {
+      judgementFlushRafRef.current = null;
+      const now = performance.now();
+      if (now - lastJudgementFlushRef.current < JUDGEMENT_FLUSH_MS) {
+        // 还没到刷新间隔 —— 继续等下一帧，避免高刷屏上退化成 120Hz 刷新。
+        judgementFlushRafRef.current = requestAnimationFrame(tick);
+        return;
       }
-
-      return {
-        ...prev, score: newScore, combo: newCombo, maxCombo: newMaxCombo,
-        sPerfectCount: sCount, perfectCount: pCount, goodCount: gCount, missCount: mCount,
-        perfectEarly: pEarly, perfectLate: pLate, goodEarly: gEarly, goodLate: gLate,
-        accuracy: newAcc, rank: calculateRank(newScore),
-      };
-    });
-
-    const marker: TimingMarker = { id: `${fb.id}-${fb.createdAt}`, dt: fb.deltaT, type: fb.type };
-    // 内嵌到期时间戳（不进 TimingBar 接口，仅本地清理用）。
-    (marker as TimingMarker & { expiresAt: number }).expiresAt = performance.now() + MARKER_LIFETIME_MS;
-    setTimingMarkers((prev) => [...prev.slice(-24), marker]);
-    // 单一批量清理 timer：任意时刻至多一个，到期后移除全部过期 marker。
-    if (markerCleanTimerRef.current === null) {
-      markerCleanTimerRef.current = window.setTimeout(() => {
-        markerCleanTimerRef.current = null;
-        const now = performance.now();
-        setTimingMarkers((prev) => prev.filter((m) => (m as TimingMarker & { expiresAt: number }).expiresAt > now));
-      }, MARKER_LIFETIME_MS);
-    }
-  }, []);
+      lastJudgementFlushRef.current = now;
+      const q = judgementQueueRef.current;
+      judgementQueueRef.current = [];
+      for (let i = 0; i < q.length; i++) applyJudgement(q[i]);
+    };
+    judgementFlushRafRef.current = requestAnimationFrame(tick);
+  }, [applyJudgement]);
 
   // Pause / Resume with 3s countdown
   const handleTogglePause = () => {
     // Never allow pausing after the song has ended — the game is already in
     // the fade-out / clear-banner phase and about to transition to menu.
     if (songEndedRef.current) return;
+    // 暂停浮层会显示当前成绩：先把节流缓冲里的判定应用掉，避免显示滞后。
+    flushJudgements();
     // If playing, pause instantly and cancel any existing countdowns
     if (gameState === 'playing') {
       globalAudio.pause();
@@ -1311,7 +1373,12 @@ export function App() {
 
         const inEditorPreview = gameState === 'editor';
 
-        if (quality.qualityMode !== 'low') {
+        // 环境光晕只对「有渐变背景层」的档位有意义：low / lite 渲染的是**纯色层**，
+        // ambientBgRef 为 null —— 这段（含每 16ms 一次的 FFT 采样与秒→拍换算）
+        // 算出的结果会被直接丢弃。这里显式跳过，省掉 2D/Lite 档的纯浪费 CPU。
+        // 画面表现零变化（纯色层本来就不吃这两个值）。
+        const ambientGlowEnabled = quality.qualityMode !== 'low' && quality.qualityMode !== 'lite';
+        if (ambientGlowEnabled) {
           // Pump current BPM into the audio clock (~60fps) so the pulse stays
           // tempo-synced across BPM shifts. Derived from the LIVE audio time
           // (not React state) to avoid stale-beat drift.

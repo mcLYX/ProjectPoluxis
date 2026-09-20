@@ -171,6 +171,10 @@ export interface ResolvedSlideNode extends SlideNodeData {
   angle: number;
   /** Effective (resolved) easing for the segment leading into this node. */
   easing: EasingType;
+  /** 预计算的滚动距离：等价于 getScrollDistance(timeSec, speedPoints)，
+   *  由 `utils/chartRuntime.buildChartRuntime` 一次性填充。运行期只读，
+   *  避免每帧对变速点做线性扫描。未填充时为 undefined（调用方需回退）。 */
+  scrollDist?: number;
 }
 
 /** A rectangular hit region (axis-aligned) in note-space, used by the
@@ -194,6 +198,10 @@ export interface ResolvedNote extends NoteData {
   /** Extra hit regions (besides the note's own TAP_HIT_HALF box) gained from
    *  consuming other overlapping same-time taps. Runtime-only, reset per play. */
   extraHitRegions?: HitRegion[];
+  /** 预计算的滚动距离：等价于 getScrollDistance(timeSec, speedPoints)，由
+   *  `utils/chartRuntime.buildChartRuntime` 一次性填充（slide 的 resolvedNodes
+   *  同样会填）。运行期只读；未填充时为 undefined（调用方需回退现算）。 */
+  scrollDist?: number;
 }
 
 /** Runtime-resolved event with absolute time in seconds */

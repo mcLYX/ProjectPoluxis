@@ -4,7 +4,8 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, QualityMode, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { evaluateJudgement } from '../utils/scoring';
-import { resolveChart, resolveEvents, extractSpeedPoints, getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
+import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
+import { getChartRuntime, scrollDistanceAt } from '../utils/chartRuntime';
 import { EASING_FNS } from '../utils/easing';
 import { WORLD_UNITS_PER_SECOND, withinHitWindow } from '../systems/judge';
 import { expandRing, type RingPt } from '../systems/geometry';
@@ -126,6 +127,42 @@ const _vTubeEnd = new THREE.Vector3();
 // Reused per-frame inside tick() so slide-note Z lists don't allocate a new
 // array on every frame (GC churn is amplified ~2.4x at 144Hz displays).
 const _slideZs: number[] = [];
+
+/**
+ * Ultra 动态光源池的「最小 |z| 前 N 名」选择槽位。
+ *
+ * 原实现每帧为每个候选 new 一个对象再 `Array.sort`（带比较器闭包）——
+ * 超长谱面下候选可达数百，等于每帧数百次分配 + 一次 O(C log C) 排序。
+ * 这里改用固定 N 槽位（N = 灯数，恒定 8）的插入式选择：
+ *  - 只保留 |z| 最小的 N 个，语义与原 sort 完全一致（含并列时的稳定性：
+ *    仅当严格更小才前移，等价于稳定排序）；
+ *  - 零分配、O(C·N) 且 N 恒为 8。
+ */
+const _lightAZ: number[] = [];   // |z|
+const _lightZ: number[] = [];
+const _lightX: number[] = [];
+const _lightY: number[] = [];
+const _lightC: (THREE.Color | null)[] = [];
+
+/**
+ * 颜色字符串 → THREE.Color 缓存。
+ *
+ * `Color.set('#rrggbb')` 走 `setStyle()`：每次都要跑正则/字符串解析。原来每个可见
+ * 音符每帧要做 3~4 次（fill / innerWire / outerWire / 投影），而谱面颜色在一局内
+ * 基本不变。这里把解析结果缓存住，运行期改用 `Color.copy()` —— 只写 3 个 float，
+ * 不再解析字符串。判定与画面语义完全不变。
+ */
+const _colorCache = new Map<string, THREE.Color>();
+function cachedColor(hex: string): THREE.Color {
+  let c = _colorCache.get(hex);
+  if (!c) {
+    // 动态颜色（如逐帧变化的亮度）可能让缓存无界增长，做个上限保护。
+    if (_colorCache.size > 256) _colorCache.clear();
+    c = new THREE.Color(hex);
+    _colorCache.set(hex, c);
+  }
+  return c;
+}
 
 /**
  * Per-slide-note cache of the combined "all nodes" array (head + children).
@@ -763,7 +800,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     baseScale: number;
   }>>([]);
 
-  const resolvedNotes = useMemo(() => resolveChart(chart), [chart]);
+  // 谱面运行时预处理层（见 utils/chartRuntime）：一次完成解析 + 预计算
+  //  · 每个音符 / slide 子节点的滚动距离（替代每帧逐音符线性扫描变速点）
+  //  · 变速点前缀和（使任意时刻的滚动距离可 O(log N) 求得）
+  //  · 窗口所需的 hasNegativeSpeed / minSpeed / totalNotes / lastNoteTime / maxSlideSpan
+  // 同一谱面重复进入（重试）命中 WeakMap 缓存，零重算；不做持久化。
+  const chartRuntime = useMemo(() => getChartRuntime(chart), [chart]);
+  const runtimeRef = useRef(chartRuntime);
+  useEffect(() => { runtimeRef.current = chartRuntime; }, [chartRuntime]);
+
+  const resolvedNotes = chartRuntime.notes;
   const resolvedRef = useRef(resolvedNotes);
   // id → ResolvedNote 索引（P2-6）：把编辑器 gizmo 每帧的 O(N) notes.find 改为 O(1) 查表。
   // 仅在 resolvedNotes 变化时重建；in-place 编辑改的是同一 note 对象引用，Map 取到的是最新值。
@@ -775,14 +821,15 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     noteIndexRef.current = idx;
   }, [resolvedNotes]);
 
-  const resolvedEvents = useMemo(() => resolveEvents(chart), [chart]);
+  const resolvedEvents = chartRuntime.events;
   const eventsRef = useRef(resolvedEvents);
   useEffect(() => { eventsRef.current = resolvedEvents; }, [resolvedEvents]);
 
   // Pre-computed speed change points for scroll distance calculation.
   // This ensures note spacing is visually correct BEFORE a speed change
   // reaches the judge line (no teleportation artifacts).
-  const speedPoints = useMemo(() => extractSpeedPoints(chart), [chart]);
+  // （取自预处理层：传已解析的 events，避免 extractSpeedPoints 内部再解析一遍全谱。）
+  const speedPoints = chartRuntime.speedPoints;
   const speedPointsRef = useRef(speedPoints);
 
   const chartRef = useRef(chart);
@@ -2064,7 +2111,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // Notes sit at fixed scroll distances — as the playhead advances, notes
     // appear to flow toward the judge line. This keeps note spacing correct
     // even before a speed change is reached (no teleportation).
-    const curScrollDist = getScrollDistance(curTime, speedPointsRef.current);
+    const curScrollDist = scrollDistanceAt(runtimeRef.current, curTime);
     const globalSpeed = speedRef.current;
     const unitPerSecond = WORLD_UNITS_PER_SECOND * globalSpeed; // scale: 1 "1x-second" = 36 world units * globalSpeed
     const notes = resolvedRef.current;
@@ -2227,8 +2274,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     //   (a note with smaller timeSec can be farther away due to reverse scroll),
     //   so the time-window optimisation is invalid — fall back to all notes.
     const sp = speedPointsRef.current;
-    let hasNegativeSpeed = false;
-    for (const p of sp) { if (p.speed < 0) { hasNegativeSpeed = true; break; } }
+    // 预处理层已算好（原实现每帧全扫两遍 speedPoints）。
+    const hasNegativeSpeed = runtimeRef.current.hasNegativeSpeed;
 
     let firstIdx = 0;
     let lastIdx = notes.length;
@@ -2250,8 +2297,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       // For variable scroll speed, use the minimum speed across the entire chart
       // to compute a conservative future time window — this ensures we never
       // miss notes that are about to enter render distance.
-      let minSpeed = 1;
-      for (const p of sp) { if (p.speed < minSpeed) minSpeed = p.speed; }
+      const minSpeed = runtimeRef.current.minSpeed;
       const futureBuffer = -spawnLimit / (36 * globalSpeed * minSpeed) + 0.3;
       const pastThreshold = curTime - pastBuffer;
       const futureThreshold = curTime + futureBuffer;
@@ -2302,7 +2348,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           for (let i = start; i < lw.lastIdx; i++) hideNoteMeshes(notes[i]);
         }
       }
-      lastWindowRef.current = { firstIdx, lastIdx, notes };
+      // 原地改字段：原实现每帧 new 一个对象（120fps 下 GC 压力放大约 2.4×）。
+      const lwNow = lastWindowRef.current;
+      lwNow.firstIdx = firstIdx;
+      lwNow.lastIdx = lastIdx;
+      lwNow.notes = notes;
     }
 
     for (let noteIdx = firstIdx; noteIdx < lastIdx; noteIdx++) {
@@ -2327,7 +2377,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
         _slideZs.length = 0;
         for (let i = 0; i < allNodes.length; i++) {
-          const nodeScrollDist = getScrollDistance(allNodes[i].timeSec, speedPointsRef.current);
+          // 预处理层已按 timeSec 预计算滚动距离；缺失时回退现算（保持数值一致）。
+          // allNodes 由 getAllNodes 构造，元素类型不含 scrollDist，故按需取可选字段。
+          const nd = (allNodes[i] as { scrollDist?: number }).scrollDist;
+          const nodeScrollDist = nd !== undefined ? nd : getScrollDistance(allNodes[i].timeSec, speedPointsRef.current);
           const z = JUDGE_Z - (nodeScrollDist - curScrollDist) * unitPerSecond;
           _slideZs.push(z);
           const key = `${note.id}#${i}`;
@@ -2354,10 +2407,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             // +, but we want +angle = clockwise (matching the 2D editor), so negate.
             nm.group.rotation.z = -(allNodes[i].angle ?? 0);
             if (nm.proj) nm.proj.rotation.z = -(allNodes[i].angle ?? 0);
-            nm.fill.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
+            nm.fill.color.copy(cachedColor(isRed ? SLIDE_RED : noteEffectiveColor));
             // 内框跟随音符色；外框使用可自定义颜色（不随音符色变化）。
-            nm.innerWire?.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
-            nm.outerWire?.color.set(defaultSkinOuterColorRef.current);
+            nm.innerWire?.color.copy(cachedColor(isRed ? SLIDE_RED : noteEffectiveColor));
+            nm.outerWire?.color.copy(cachedColor(defaultSkinOuterColorRef.current));
 
             // Smooth fade-in animation as note enters the render distance
             const fadeZone = 12;
@@ -2384,7 +2437,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             nm.proj.visible = vis && po > 0;
             nm.proj.position.set(allNodes[i].x, allNodes[i].y, JUDGE_Z + 0.01);
             nm.proj.scale.set(vScale, vScale, 1);
-            nm.projMat.color.set(noteEffectiveColor);
+            nm.projMat.color.copy(cachedColor(noteEffectiveColor));
             nm.projMat.opacity = po;
             nm.projMat.opacity = po;
           }
@@ -2610,7 +2663,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
           const nodeRt = rt?.nodes[i + 1];
           const isRed = !!nodeRt && (nodeRt.missLocked || nodeRt.redWarn) && !nextJudged;
-          pipe.mat.color.set(isRed ? SLIDE_RED : noteEffectiveColor);
+          pipe.mat.color.copy(cachedColor(isRed ? SLIDE_RED : noteEffectiveColor));
           const pipeFadeAlpha = isEditorModeRef.current
             ? 1
             : THREE.MathUtils.clamp((Math.max(naturalA.z, naturalB.z) - spawnLimit) / 12, 0, 1);
@@ -2625,7 +2678,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       }
 
       // ---------- TAP / TOUCH ----------
-      const noteScrollDist = getScrollDistance(note.timeSec, speedPointsRef.current);
+      // 预处理层已按 timeSec 预计算滚动距离；缺失时回退现算（保持数值一致）。
+      const nsd = note.scrollDist;
+      const noteScrollDist = nsd !== undefined ? nsd : getScrollDistance(note.timeSec, speedPointsRef.current);
       const nz = JUDGE_Z - (noteScrollDist - curScrollDist) * unitPerSecond;
       const judged = judgedNotesRef.current.has(note.id);
       // Respsect "音符渲染距离" in both gameplay and editor mode.
@@ -2664,7 +2719,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
               const m = child.material;
               if (m instanceof THREE.MeshBasicMaterial || m instanceof THREE.LineBasicMaterial) {
                 // 内框：颜色恒等于音符色，由开关控制显示。
-                m.color.set(noteEffectiveColor);
+                m.color.copy(cachedColor(noteEffectiveColor));
                 m.opacity = defaultSkinInnerEnabledRef.current ? 0.85 * fadeInAlpha : 0;
               }
             }
@@ -2673,12 +2728,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
               const m = child.material;
               if (m instanceof THREE.MeshBasicMaterial || m instanceof THREE.LineBasicMaterial) {
                 // 外框：使用可自定义颜色与透明度，由开关控制显示。
-                m.color.set(defaultSkinOuterColorRef.current);
+                m.color.copy(cachedColor(defaultSkinOuterColorRef.current));
                 m.opacity = defaultSkinOuterEnabledRef.current ? defaultSkinOuterAlphaRef.current * fadeInAlpha : 0;
               }
             }
           } else if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-            child.material.color.set(noteEffectiveColor);
+            child.material.color.copy(cachedColor(noteEffectiveColor));
             // 皮肤贴图整块显示（不透明）；默认填充保持半透明（defaultFill 标记区分）。
             child.material.opacity = child.material.map && !child.userData.defaultFill ? fadeInAlpha : (note.type === 'tap' ? 0.18 : 0.22) * fadeInAlpha;
           }
@@ -2700,7 +2755,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const material = (c as THREE.Mesh).material as THREE.MeshBasicMaterial | null;
           if (!material) return;
           // 判定框（投影引导）颜色恒等于音符色，不可修改，仅粗细可调。
-          material.color.set(noteEffectiveColor);
+          material.color.copy(cachedColor(noteEffectiveColor));
           material.opacity = po;
         });
       } else if (entry) { entry.group.visible = false; entry.projectionGroup.visible = false; }
@@ -2750,8 +2805,37 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // pool light each; park the rest far away with intensity 0.
     const pool = ultraLightPoolRef.current;
     if (pool.length > 0) {
-      // Collect candidates: { z, x, y, color }
-      const candidates: Array<{ z: number; x: number; y: number; color: THREE.Color }> = [];
+      // Collect candidates into the fixed slots (no per-candidate allocation).
+      const cap = pool.length;
+      let cnt = 0;
+      const consider = (z: number, x: number, y: number, color: THREE.Color): void => {
+        const az = Math.abs(z);
+        if (cnt < cap) {
+          let k = cnt;
+          while (k > 0 && _lightAZ[k - 1] > az) {
+            _lightAZ[k] = _lightAZ[k - 1];
+            _lightZ[k] = _lightZ[k - 1];
+            _lightX[k] = _lightX[k - 1];
+            _lightY[k] = _lightY[k - 1];
+            _lightC[k] = _lightC[k - 1];
+            k--;
+          }
+          _lightAZ[k] = az; _lightZ[k] = z; _lightX[k] = x; _lightY[k] = y; _lightC[k] = color;
+          cnt++;
+          return;
+        }
+        if (az >= _lightAZ[cap - 1]) return; // 不够近，丢弃（等价于 sort 后被截断）
+        let k = cap - 1;
+        while (k > 0 && _lightAZ[k - 1] > az) {
+          _lightAZ[k] = _lightAZ[k - 1];
+          _lightZ[k] = _lightZ[k - 1];
+          _lightX[k] = _lightX[k - 1];
+          _lightY[k] = _lightY[k - 1];
+          _lightC[k] = _lightC[k - 1];
+          k--;
+        }
+        _lightAZ[k] = az; _lightZ[k] = z; _lightX[k] = x; _lightY[k] = y; _lightC[k] = color;
+      };
       noteMeshesRef.current.forEach((entry) => {
         if (!entry.group.visible) return;
         // Read current world position (group.position is local; group has no parent transform).
@@ -2783,14 +2867,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             }
           });
         }
-        if (color) candidates.push({ z: p.z, x: p.x, y: p.y, color });
+        if (color) consider(p.z, p.x, p.y, color);
       });
       // Slide nodes also contribute — iterate slideMeshesRef.
       slideMeshesRef.current.forEach((sm) => {
         sm.nodes.forEach((nd) => {
           if (!nd.group.visible) return;
           const p = nd.group.position;
-          candidates.push({ z: p.z, x: p.x, y: p.y, color: nd.fill.color });
+          consider(p.z, p.x, p.y, nd.fill.color);
         });
         // Slide PIPES also contribute light candidates — a long arc segment
         // is itself a colored body and should illuminate the walls along its
@@ -2799,20 +2883,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           if (!pp.mesh.visible) return;
           _vLightMid.copy(pp.mid);
           const mat = pp.mat as THREE.MeshBasicMaterial;
-          candidates.push({ z: _vLightMid.z, x: _vLightMid.x, y: _vLightMid.y, color: mat.color });
+          consider(_vLightMid.z, _vLightMid.x, _vLightMid.y, mat.color);
         });
       });
-      // Sort by |z| ascending — closest to judge plane first.
-      candidates.sort((a, b) => Math.abs(a.z) - Math.abs(b.z));
-      // Assign pool lights.
-      for (let i = 0; i < pool.length; i++) {
+      // Assign pool lights — 槽位已按 |z| 升序排好（closest to judge plane first）。
+      for (let i = 0; i < cap; i++) {
         const pl = pool[i];
-        const c = candidates[i];
-        if (c) {
-          pl.position.set(c.x, c.y, c.z);
-          pl.color.copy(c.color);
+        if (i < cnt) {
+          const cz = _lightZ[i];
+          const cc = _lightC[i];
+          pl.position.set(_lightX[i], _lightY[i], cz);
+          if (cc) pl.color.copy(cc);
           // Brighter when closer to judge plane.
-          pl.intensity = Math.max(0, 4.5 - Math.abs(c.z) * 0.18);
+          pl.intensity = Math.max(0, 4.5 - Math.abs(cz) * 0.18);
         } else {
           pl.position.set(0, 0, -1000);
           pl.intensity = 0;

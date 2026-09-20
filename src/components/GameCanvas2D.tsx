@@ -16,7 +16,7 @@
  * 性能：DPR 固定为 1（低负载优先），指针移动走每帧合并缓冲（弱机多指不炸）。
  */
 
-import { useEffect, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import type {
   ChartData,
   EasingType,
@@ -29,14 +29,11 @@ import type {
 } from '../types/game';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import {
-  countPlayableNotes,
-  extractSpeedPoints,
   getScrollDistance,
-  resolveChart,
-  resolveEvents,
   secondsToBeatMultiBpm,
   type SpeedPoint,
 } from '../utils/beatTime';
+import { getChartRuntime, scrollDistanceAt, type ChartRuntime } from '../utils/chartRuntime';
 import { calculateNoteScore, evaluateJudgement } from '../utils/scoring';
 import { EASING_FNS } from '../shared/easing';
 import { JUDGE_COLORS, JUDGE_SCALE } from '../shared/gameplaySpec';
@@ -158,7 +155,7 @@ export interface GameCanvas2DProps {
   defaultSkinJudgeWidth?: number;
 }
 
-export function GameCanvas2D(props: GameCanvas2DProps) {
+function GameCanvas2DImpl(props: GameCanvas2DProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** 始终指向最新 props，供 rAF 闭包读取（避免重建 effect）。 */
   const propsRef = useRef(props);
@@ -179,6 +176,9 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
 
     /* ---------------- 视图 / 投影 ---------------- */
     const view = { w: 0, h: 0, aspect: 1, cd: 4.96, dpr: 1, pxPerUnit: 0 };
+    /** 按需渲染的脏标记：任何「画面内容已变」的来源（尺寸 / 谱面 / 时间 / 选中）
+     *  都会置位，主循环据此决定是否真的重画一帧。 */
+    const renderState = { dirty: true };
 
     function fitCameraDistance(aspect: number): number {
       const dV = FIT_HALF / TAN_HALF_FOV;
@@ -201,6 +201,7 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
         canvas!.width = nw;
         canvas!.height = nh;
         ctx!.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+        renderState.dirty = true; // 画布被清空，必须补画一帧
       }
     }
     window.addEventListener('resize', resize);
@@ -227,13 +228,15 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
     const now = (): number => performance.now();
 
     /* ---------------- 颜色工具 ---------------- */
-    /** 从 '#rrggbb' 拆出 rgb 分量（slide 管道渐变用）。 */
+    /** 从 '#rrggbb' 拆出 rgb 分量（slide 管道渐变用）。
+     *  复用同一个三元组：原实现每个 slide 段每帧都 new 一个数组。
+     *  调用方必须立即使用（解构），不要长期持有该引用。 */
+    const _rgbParts: [number, number, number] = [0, 0, 0];
     function rgbParts(color: string): [number, number, number] {
-      return [
-        parseInt(color.substr(1, 2), 16),
-        parseInt(color.substr(3, 2), 16),
-        parseInt(color.substr(5, 2), 16),
-      ];
+      _rgbParts[0] = parseInt(color.substr(1, 2), 16);
+      _rgbParts[1] = parseInt(color.substr(3, 2), 16);
+      _rgbParts[2] = parseInt(color.substr(5, 2), 16);
+      return _rgbParts;
     }
 
     /* ---------------- 皮肤（默认内外框 + 自定义贴图） ----------------
@@ -603,6 +606,8 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
     /* ---------------- 运行时状态（全部在闭包里，不进 React） ---------------- */
     const game = {
       chart: null as ChartData | null,
+      /** 谱面运行时预处理结果（滚动距离 / 变速前缀和 / 统计量）。 */
+      runtime: null as ChartRuntime | null,
       notes: [] as ResolvedNote[],
       events: [] as ResolvedEventEntry[],
       speedPoints: [] as SpeedPoint[],
@@ -638,34 +643,31 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
     };
 
     function resetGame(chart: ChartData): void {
+      // 谱面 / 局次变化 → 画面内容变了，按需渲染需补画一帧。
+      renderState.dirty = true;
       const md = chart.metadata as ChartData['metadata'] & {
         noteColor?: string;
         bgScheme?: { gradientStart?: string; gradientEnd?: string; accentColor?: string };
       };
       game.chart = chart;
-      game.notes = resolveChart(chart);
-      game.events = resolveEvents(chart) as ResolvedEventEntry[];
-      game.speedPoints = extractSpeedPoints(game.events);
+      // 谱面运行时预处理层（见 utils/chartRuntime）：解析 + 预计算滚动距离 /
+      // 变速前缀和 / 统计量。同一谱面重复进入（重试）命中 WeakMap 缓存，零重算。
+      const rt = getChartRuntime(chart);
+      game.runtime = rt;
+      game.notes = rt.notes;
+      game.events = rt.events as ResolvedEventEntry[];
+      game.speedPoints = rt.speedPoints;
       game.nextEventIdx = 0;
       game.currentSpeedMul = 1;
       game.currentNoteColor = null;
       game.currentText = null;
       game.currentTextTimeout = 0;
-      game.totalNotes = countPlayableNotes(chart);
-      game.lastNoteTime = 0;
+      game.totalNotes = rt.totalNotes;
+      game.lastNoteTime = rt.lastNoteTime;
       /* maxSlideSpan：slide 头离开窗口 pastBuffer 后，其子节点仍可能未判定 →
-       * 用最大 slide 跨度扩展过去窗口，避免子节点被漏判（移植自完整版 9f04e42）。 */
-      let maxSlideSpan = 0;
-      for (const n of game.notes) {
-        if (n.timeSec > game.lastNoteTime) game.lastNoteTime = n.timeSec;
-        if (n.resolvedNodes && n.resolvedNodes.length > 0) {
-          const lastChildT = n.resolvedNodes[n.resolvedNodes.length - 1].timeSec;
-          for (const c of n.resolvedNodes) if (c.timeSec > game.lastNoteTime) game.lastNoteTime = c.timeSec;
-          const span = lastChildT - n.timeSec;
-          if (span > maxSlideSpan) maxSlideSpan = span;
-        }
-      }
-      game.maxSlideSpan = maxSlideSpan;
+       * 用最大 slide 跨度扩展过去窗口，避免子节点被漏判（移植自完整版 9f04e42）。
+       * 已由预处理层一并算好。 */
+      game.maxSlideSpan = rt.maxSlideSpan;
       game.judged = {};
       game.judgedCount = 0;
       game.score = 0;
@@ -831,22 +833,42 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
       return { first, last: lo };
     }
 
-    function noteZPos(noteTimeSec: number, curTime: number, baseSpeed: number): number {
-      const noteDist = getScrollDistance(noteTimeSec, game.speedPoints);
-      const curDist = getScrollDistance(curTime, game.speedPoints);
-      return JUDGE_Z - (noteDist - curDist) * baseSpeed;
+    /**
+     * 音符 z（透视深度）。
+     * `noteDist` 传入预处理层算好的滚动距离（可省去对变速点的线性扫描）；
+     * 缺失时回退现算，保证数值一致。当前时刻的滚动距离走前缀和二分。
+     */
+    function noteZPos(noteTimeSec: number, curTime: number, baseSpeed: number, noteDist?: number): number {
+      const nd = noteDist !== undefined ? noteDist : getScrollDistance(noteTimeSec, game.speedPoints);
+      const curDist = game.runtime ? scrollDistanceAt(game.runtime, curTime) : getScrollDistance(curTime, game.speedPoints);
+      return JUDGE_Z - (nd - curDist) * baseSpeed;
     }
 
     /* ---------------- slide 运行态助手 ---------------- */
-    function getAllSlideNodes(note: ResolvedNote): { x: number; y: number; timeSec: number; angle: number; easing?: EasingType }[] {
-      const nodes: { x: number; y: number; timeSec: number; angle: number; easing?: EasingType }[] = [
-        { x: note.x, y: note.y, timeSec: note.timeSec, angle: note.angle ?? 0, easing: note.easing },
+    /** slide 节点视图（head + 子节点）。自带 `scrollDist`（预处理层预计算的滚动距离），
+     *  使 noteZPos 不必再对每个节点线性扫描变速点。 */
+    type SlideNodeView = { x: number; y: number; timeSec: number; angle: number; easing?: EasingType; scrollDist?: number };
+
+    /**
+     * 节点视图缓存：原实现每帧调用两次（processSlide + render），每次为
+     * 每个 slide 重新构造 N+1 个对象 → 密集 slide 谱面下 GC 压力大。
+     * 以 note 对象为键缓存（WeakMap）：谱面被替换（切歌 / 编辑器改动生成新对象）
+     * 时自然失效，返回的是最新值。与 3D 侧 `getAllNodes` 的缓存策略一致。
+     */
+    const slideNodesCache = new WeakMap<ResolvedNote, SlideNodeView[]>();
+
+    function getAllSlideNodes(note: ResolvedNote): SlideNodeView[] {
+      const cached = slideNodesCache.get(note);
+      if (cached) return cached;
+      const nodes: SlideNodeView[] = [
+        { x: note.x, y: note.y, timeSec: note.timeSec, angle: note.angle ?? 0, easing: note.easing, scrollDist: note.scrollDist },
       ];
       if (note.resolvedNodes) {
         for (const rn of note.resolvedNodes) {
-          nodes.push({ x: rn.x, y: rn.y, timeSec: rn.timeSec, angle: rn.angle ?? 0, easing: rn.easing });
+          nodes.push({ x: rn.x, y: rn.y, timeSec: rn.timeSec, angle: rn.angle ?? 0, easing: rn.easing, scrollDist: rn.scrollDist });
         }
       }
+      slideNodesCache.set(note, nodes);
       return nodes;
     }
 
@@ -1055,7 +1077,9 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
       /* 4) 红警：绑定的指针都不在节点上，但有其它按下的指针在节点上 */
       cns.redWarn = false;
       if (!cns.judged && boundCount > 0 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
-        for (const pid2 of Object.keys(game.pointers)) {
+        // for...in 而非 Object.keys：避免每个 slide 节点每帧分配一个键数组
+        // （对齐 Lite 版 `09-engine.js` 的写法）。
+        for (const pid2 in game.pointers) {
           if (rt.boundPointerIds[pid2]) continue;
           const p3 = game.pointers[pid2];
           if (!p3.down) continue;
@@ -1233,8 +1257,8 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
           for (let pi = 0; pi < allNodes.length - 1; pi++) {
             const nodeA = allNodes[pi];
             const nodeB = allNodes[pi + 1];
-            const zA = noteZPos(nodeA.timeSec, curTime, baseSpeed);
-            const zB = noteZPos(nodeB.timeSec, curTime, baseSpeed);
+            const zA = noteZPos(nodeA.timeSec, curTime, baseSpeed, nodeA.scrollDist);
+            const zB = noteZPos(nodeB.timeSec, curTime, baseSpeed, nodeB.scrollDist);
             const judgedA = !!game.judged[note.id + '#' + pi];
             const judgedB = !!game.judged[note.id + '#' + (pi + 1)];
             if (judgedA && judgedB) continue;
@@ -1369,7 +1393,7 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
           /* slide 节点 + 落地投影引导 */
           for (let nj = 0; nj < allNodes.length; nj++) {
             if (game.judged[note.id + '#' + nj]) continue;
-            const nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed);
+            const nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist);
             const np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
             if (np) {
               toDraw.push({
@@ -1394,7 +1418,7 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
           }
         } else {
           if (game.judged[note.id]) continue;
-          const tz = noteZPos(note.timeSec, curTime, baseSpeed);
+          const tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist);
           const tp = project(note.x, note.y, tz, spawnLimit);
           if (tp) {
             toDraw.push({
@@ -1556,7 +1580,8 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
     /* 每帧合并的指针移动缓冲（IE11/弱机多指不炸主线程）。 */
     const pendingMoves: Record<string, { sx: number; sy: number; down: boolean; active: boolean; type: string }> = {};
     function flushPointerMoves(): void {
-      for (const pid of Object.keys(pendingMoves)) {
+      // for...in：避免每帧分配键数组（对齐 Lite 版写法）。
+      for (const pid in pendingMoves) {
         const pm = pendingMoves[pid];
         const w = screenToWorld(pm.sx, pm.sy);
         const ex = game.pointers[pid];
@@ -1803,8 +1828,14 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
     resetGame(propsRef.current.chart);
 
     let raf = 0;
+    let lastRenderedTime = Number.NaN;
+    let lastRenderedSelection: string | null = null;
+    let lastRenderedMode = '';
+
     function loop(): void {
       const p = propsRef.current;
+      const renderDirty = renderState.dirty;
+      const modeTag = p.isPlaying ? 'play' : p.isPaused ? 'pause' : p.isEditorMode ? 'edit' : 'idle';
       if (p.viewportActive === false) {
         raf = requestAnimationFrame(loop);
         return;
@@ -1821,15 +1852,39 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
       skin.outerColor = p.defaultSkinOuterColor ?? '#22d3ee';
       skin.outerAlpha = p.defaultSkinOuterAlpha ?? 1;
       skin.judgeWidth = p.defaultSkinJudgeWidth ?? 0.05;
+      /* ---- 按需渲染（对齐 Lite：只有画面真的会变时才重画）----
+       * 原实现在暂停态 / 编辑器静态预览下仍以 60fps 全速重绘，而画面是静止的；
+       * 这些帧全部是纯浪费。Lite 版仅在 STATE.PLAYING 渲染（09-engine.js:686）。
+       * 这里保留「播放中满帧」，非播放态改为：进入该状态时画一帧，
+       * 之后仅在输入（时间轴 / 选中项 / 尺寸）变化时补画。
+       */
+      let needRender = false;
+      let timeSource: number;
       if (p.isEditorMode) {
-        /* 编辑器：始终渲染（未播放时按 gameTime 静态预览，播放时跟音频时钟）。 */
-        game.curTime = p.isPlaying ? globalAudio.getCurrentTime() : (p.gameTime ?? 0);
-        render();
-      } else if (p.isPlaying) {
-        game.curTime = globalAudio.getCurrentTime();
-        flushPointerMoves();
-        render();
-      } else if (p.isPaused) {
+        timeSource = p.isPlaying ? globalAudio.getCurrentTime() : (p.gameTime ?? 0);
+      } else {
+        timeSource = p.isPlaying ? globalAudio.getCurrentTime() : game.curTime;
+      }
+
+      if (p.isPlaying) {
+        needRender = true;
+      } else if (timeSource !== lastRenderedTime) {
+        needRender = true; // 编辑器拖动时间轴 / 试玩定位
+      } else if (p.selectedNoteId !== lastRenderedSelection) {
+        needRender = true; // 编辑器选中高亮变化
+      } else if (renderDirty) {
+        needRender = true; // 尺寸变化等外部请求
+      } else if (modeTag !== lastRenderedMode) {
+        needRender = true; // 刚进入暂停 / 编辑器：补一帧
+      }
+
+      if (needRender) {
+        game.curTime = timeSource;
+        lastRenderedTime = timeSource;
+        lastRenderedSelection = p.selectedNoteId ?? null;
+        lastRenderedMode = modeTag;
+        renderState.dirty = false;
+        if (p.isPlaying) flushPointerMoves();
         render();
       }
       raf = requestAnimationFrame(loop);
@@ -1847,3 +1902,26 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
 
   return <canvas ref={canvasRef} className="block h-full w-full touch-none" data-renderer="2d" />;
 }
+
+/**
+ * Memoized export（与 GameCanvas 的 arePropsEqual 同范式）。
+ *
+ * 原实现没有 memo：判定回传触发 App 重渲染时，即便判定已被节流到 ~30Hz，
+ * GameCanvas2D 的函数体（含 render / noteZPos 等一大堆闭包定义）仍会每帧重建
+ * 并走一遍 reconciliation。Lite 版根本不存在 React，这是完整版 2D 多出的开销。
+ *
+ * 播放期间 `gameTime` 由 `globalAudio.getCurrentTime()` 直读（见 loop），
+ * 故跳过该 prop 比较，避免父级时间更新穿透。
+ */
+const areProps2DEqual = (prev: GameCanvas2DProps, next: GameCanvas2DProps): boolean => {
+  // 播放/暂停状态变化必须重渲染（主循环据此切换时间源）。
+  if (prev.isPlaying !== next.isPlaying || prev.isPaused !== next.isPaused) return false;
+  const playing = next.isPlaying && !next.isPaused;
+  for (const key of Object.keys(next) as Array<keyof GameCanvas2DProps>) {
+    if (playing && key === 'gameTime') continue;
+    if (prev[key] !== next[key]) return false;
+  }
+  return true;
+};
+
+export const GameCanvas2D = React.memo(GameCanvas2DImpl, areProps2DEqual);
