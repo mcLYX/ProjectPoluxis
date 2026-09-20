@@ -1030,7 +1030,7 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
           }
           commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
           globalAudio.playHitSound('slide');
-          spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
+          spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
         } else if (!cns.arrivalChecked) {
           cns.arrivalChecked = true;
           if (onNodePids.length > 0) {
@@ -1038,7 +1038,7 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
             for (const pid of onNodePids) rt.boundPointerIds[pid] = true;
             commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
             globalAudio.playHitSound('slide');
-            spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
+            spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
           }
         } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
           const j2 = evaluateJudgement(dt);
@@ -1153,7 +1153,7 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
       const md = (game.chart && game.chart.metadata) as
         | (ChartData['metadata'] & { effectToggles?: { projection?: boolean } })
         | null;
-      const toggles = (md && md.effectToggles) || {};
+      const toggles: { projection?: boolean } = (md && md.effectToggles) || {};
       if (toggles.projection === false) return;
       const leadMs = propsRef.current.projectionLeadMs;
       if (leadMs <= 0) return;
@@ -1697,10 +1697,14 @@ export function GameCanvas2D(props: GameCanvas2DProps) {
           const ev = e as PointerEvent;
           const p = offset(ev);
           const pr = propsRef.current;
-          /* 编辑器拖拽：仅发起拖拽的那个指针可移动选中音符。 */
+          /* 编辑器拖拽：仅发起拖拽的那个指针可移动选中音符。
+           * 与 3D 版一致（GameCanvas.tsx 的 drag 分支）：x/y 钳制到
+           * ±NOTE_X_RANGE / ±NOTE_Y_RANGE 并按 0.1 取整，防止把音符拖出判定平面范围。 */
           if (pr.isEditorMode && editorDragging && editorDragPid === String(ev.pointerId) && editorDragTargetId) {
             const w = screenToWorld(p.x, p.y);
-            pr.onMoveEditorNote?.(editorDragTargetId, w.x, w.y);
+            const cx = Math.round(Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, w.x)) * 10) / 10;
+            const cy = Math.round(Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, w.y)) * 10) / 10;
+            pr.onMoveEditorNote?.(editorDragTargetId, cx, cy);
             return;
           }
           const prev = pendingMoves[String(ev.pointerId)];

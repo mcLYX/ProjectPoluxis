@@ -5,12 +5,11 @@
  * 遮罩覆盖全部 UI、阻断交互，玩家必须旋转设备到横屏（提示自动消失）或主动点击
  * 「继续竖屏」关闭（关闭后本次会话内即便再转回竖屏也不再打扰，仍可正常游玩）。
  *
- * 注：Toy SDK 的 `setContainerMode({orientation:'landscape'})` 仅是向宿主容器发起的
- * 「请求」，是否被采纳由宿主 App 决定——实测安卓端 B 站 Toy 不会强制横屏，因此这里
+ * 注：平台 SDK 的 `setContainerMode({orientation:'landscape'})` 仅是向宿主容器发起的
+ * 「请求」，是否被采纳由宿主 App 决定——实测安卓端宿主不会强制横屏，因此这里
  * 依赖真实朝向（matchMedia）来显隐，而非指望 SDK 主动旋转。
  */
 import { useEffect, useState } from 'react';
-import { RotateCw } from 'lucide-react';
 import { useI18n } from '../i18n';
 
 function isPortrait(): boolean {
@@ -43,7 +42,26 @@ export function OrientationHint() {
 
   return (
     <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center gap-7 bg-black/90 backdrop-blur-sm px-8 text-center">
-      <RotateCw size={88} className="text-cyan-300 animate-spin" />
+      {/* 手机「竖屏 → 横屏」循环动画（纯 CSS，见 index.css 的 phoneRotate）。
+          外层方形容器保证旋转成横屏后也不会被裁切。 */}
+      <div className="grid h-[92px] w-[92px] place-items-center">
+        <svg
+          viewBox="0 0 46 80"
+          className="phone-rotate h-[80px] w-[46px] text-cyan-300"
+          fill="none"
+          aria-hidden
+        >
+          <rect
+            x="2" y="2" width="42" height="76" rx="8"
+            fill="rgba(34,211,238,0.10)" stroke="currentColor" strokeWidth="2.5"
+          />
+          <rect x="8" y="10.5" width="30" height="58" rx="3" fill="rgba(34,211,238,0.18)" />
+          <line
+            x1="17" y1="72.5" x2="29" y2="72.5"
+            stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+          />
+        </svg>
+      </div>
       <div className="space-y-3">
         <div className="text-2xl short:text-xl font-black font-orbitron tracking-wide text-white drop-shadow-lg">
           {t('orientation.hint')}

@@ -1,5 +1,8 @@
-import { useState } from 'react';
-import { Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette,
+  User, Upload, Trash2, LogIn, LogOut,
+} from 'lucide-react';
 import type { QualityMode } from '../types/game';
 import { useI18n, LANGS } from '../i18n';
 import { NetworkSettings } from './NetworkSettings';
@@ -7,6 +10,12 @@ import { DocContent } from './DocModal';
 import SkinManager from './SkinManager';
 // R4-6: quality 渲染设置改由模块级 qualityStore 承载（不再经 App props 传递）。
 import { qualityStore, useQuality } from '../qualityStore';
+// 账号切片：模块级 accountStore（与 qualityStore 同范式），避免经 App props 透传。
+import { accountStore, getDisplayAccount, normalizeNickname, MAX_NICKNAME_LENGTH, useAccount } from '../accountStore';
+import { storeAvatar, validateAvatarFile, type AvatarReject } from '../utils/avatar';
+import { useAvatarUrl } from '../hooks/useAvatarUrl';
+import { usePlatform } from '../platform/PlatformContext';
+import { hasPlatformIdentity } from '../platform';
 
 /** 自定义档位下的单项开关（抗锯齿 / Bloom / 粒子）。 */
 const QualityToggle: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({
@@ -64,7 +73,7 @@ interface SettingsModalProps {
   setDefaultSkinJudgeWidth: (value: number) => void;
 }
 
-type SettingsTab = 'graphics' | 'skin' | 'sound' | 'language' | 'network' | 'about';
+type SettingsTab = 'graphics' | 'skin' | 'account' | 'sound' | 'language' | 'network' | 'about';
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
@@ -98,6 +107,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [tab, setTab] = useState<SettingsTab>('graphics');
   // R4-6: quality 切片从 qualityStore 订阅（仅本组件重渲染）。
   const quality = useQuality();
+  /* ---- 账号切片（必须在 isOpen 早退之前声明，保证 hook 顺序稳定） ---- */
+  const account = useAccount();
+  const display = getDisplayAccount(account);
+  const avatarUrl = useAvatarUrl(display.avatar);
+  const { platform } = usePlatform();
+  /** 当前构建是否支持绑定平台账号（公开版恒为 false）。 */
+  const canLink = hasPlatformIdentity();
+  /** 已绑定平台身份时，头像/昵称只读，需先登出。 */
+  const readOnly = account.linked;
+  const [nameDraft, setNameDraft] = useState(display.nickname);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarError, setAvatarError] = useState<AvatarReject | 'generic' | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    setNameDraft(display.nickname);
+  }, [display.nickname]);
+
   if (!isOpen) return null;
 
   const sliderClass = 'w-full accent-cyan-400 cursor-pointer';
@@ -111,8 +137,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const tabs: { key: SettingsTab; label: string; icon: typeof Sliders }[] = [
     { key: 'graphics', label: t('settings.tab.graphics'), icon: Sliders },
     { key: 'skin', label: t('settings.tab.skin'), icon: Palette },
+    { key: 'account', label: t('settings.tab.account'), icon: User },
     { key: 'sound', label: t('settings.tab.sound'), icon: Volume2 },
-    { key: 'network', label: t('settings.tab.network'), icon: Globe },
+    // 「网络」（自选服务器）仅在非平台版提供；平台版由平台侧统一托管内容。
+    ...(canLink ? [] : [{ key: 'network' as SettingsTab, label: t('settings.tab.network'), icon: Globe }]),
     { key: 'language', label: t('settings.tab.language'), icon: Languages },
     { key: 'about', label: t('settings.tab.about'), icon: Info },
   ];
@@ -397,6 +425,184 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     </div>
   );
 
+  /* ---- 账号板块的操作 ---- */
+  const handlePickAvatar = (): void => fileInputRef.current?.click();
+
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // 允许重复选择同一个文件
+    if (!file) return;
+    const reason = validateAvatarFile(file);
+    if (reason) {
+      setAvatarError(reason);
+      return;
+    }
+    setAvatarError(null);
+    setAvatarBusy(true);
+    try {
+      const ref = await storeAvatar(file);
+      await accountStore.setAvatar(ref);
+    } catch (err) {
+      console.error('avatar upload failed', err);
+      setAvatarError('generic');
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleRemoveAvatar = (): void => {
+    setAvatarError(null);
+    void accountStore.setAvatar(null).catch((err) => {
+      console.error('avatar remove failed', err);
+      setAvatarError('generic');
+    });
+  };
+
+  const commitNickname = (): void => {
+    if (readOnly) return;
+    const next = normalizeNickname(nameDraft);
+    setNameDraft(next);
+    accountStore.setNickname(next);
+  };
+
+  const handleLogin = async (): Promise<void> => {
+    setAvatarError(null);
+    setAvatarBusy(true);
+    try {
+      accountStore.setOptOut(false);
+      const identity = await platform?.getIdentity();
+      if (identity) {
+        accountStore.linkPlatform({
+          id: identity.id,
+          nickname: identity.nickname,
+          avatar: identity.avatar ?? null,
+        });
+      }
+    } catch (err) {
+      console.error('platform login failed', err);
+      setAvatarError('generic');
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleLogout = (): void => {
+    accountStore.logoutPlatform();
+  };
+
+  const avatarErrorText = avatarError
+    ? avatarError === 'notImage'
+      ? t('settings.account.err.notImage')
+      : avatarError === 'tooLarge'
+        ? t('settings.account.err.tooLarge')
+        : t('settings.account.err.generic')
+    : null;
+
+  const accountContent = (
+    <div className="space-y-5">
+      <section className="space-y-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-bold text-cyan-300">
+            <User size={16} /> {t('settings.account.title')}
+          </div>
+          <p className="mt-1 text-[11px] text-white/50 leading-relaxed">{t('settings.account.desc')}</p>
+        </div>
+
+        {/* 头像预览 + 上传 / 移除 */}
+        <div className="flex items-center gap-4">
+          <div
+            className="relative h-24 w-24 shrink-0 overflow-hidden rounded-full grid place-items-center
+                       ring-1 ring-white/30 bg-gradient-to-br from-cyan-400/35 via-sky-500/25 to-amber-300/25"
+            style={{ boxShadow: '0 0 18px rgba(34,211,238,0.28), inset 0 1px 0 rgba(255,255,255,0.2)' }}
+          >
+            {avatarUrl ? (
+              <img src={avatarUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+            ) : (
+              <User size={34} className="text-white/80" />
+            )}
+          </div>
+          <div className="flex flex-col gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleAvatarFile}
+            />
+            <button
+              type="button"
+              disabled={readOnly || avatarBusy}
+              onClick={handlePickAvatar}
+              className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold
+                         disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Upload size={14} /> {t('settings.account.upload')}
+            </button>
+            <button
+              type="button"
+              disabled={readOnly || avatarBusy || !account.custom.avatarRef}
+              onClick={handleRemoveAvatar}
+              className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold
+                         disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Trash2 size={14} /> {t('settings.account.remove')}
+            </button>
+          </div>
+        </div>
+
+        {/* 用户名 */}
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-white/80">{t('settings.account.nickname')}</label>
+          <input
+            type="text"
+            value={nameDraft}
+            disabled={readOnly}
+            maxLength={MAX_NICKNAME_LENGTH}
+            placeholder={t('settings.account.nicknamePlaceholder')}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onBlur={commitNickname}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            className="w-full rounded-xl border border-white/15 bg-white/[0.06] px-3 py-2 text-sm text-white
+                       outline-none transition-colors placeholder:text-white/30
+                       focus:border-cyan-300/70 focus:bg-white/[0.09]
+                       disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+        </div>
+
+        {avatarErrorText && <p className="text-[11px] text-red-400">{avatarErrorText}</p>}
+
+        {/* 平台分支：支持平台账号的构建提供登录 / 登出；公开版为纯本地账号 */}
+        <div className="space-y-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+          <p className="text-[11px] text-white/60 leading-relaxed">
+            {canLink && readOnly ? t('settings.account.linkedHint') : t('settings.account.notLinkedHint')}
+          </p>
+          {canLink &&
+            (readOnly ? (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
+              >
+                <LogOut size={14} /> {t('settings.account.logout')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={avatarBusy || !platform}
+                onClick={handleLogin}
+                className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold
+                           disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <LogIn size={14} /> {t('settings.account.login')}
+              </button>
+            ))}
+        </div>
+      </section>
+    </div>
+  );
+
   const soundContent = (
     <div className="space-y-6">
       <section className="space-y-1.5">
@@ -502,8 +708,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-5 sm:p-6">
             {tab === 'graphics' && graphicsContent}
             {tab === 'skin' && skinContent}
+            {tab === 'account' && accountContent}
             {tab === 'sound' && soundContent}
-            {tab === 'network' && <NetworkSettings />}
+            {tab === 'network' && !canLink && <NetworkSettings />}
             {tab === 'language' && languageContent}
             {tab === 'about' && <DocContent />}
           </div>

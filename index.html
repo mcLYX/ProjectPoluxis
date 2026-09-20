@@ -22,6 +22,15 @@
           if (e.touches && e.touches.length > 1) e.preventDefault();
         }, { passive: false });
       })();
+      // iOS（Safari / WKWebView）捏合缩放兜底：body 的 touch-action: pan-x pan-y
+      // 已禁 pinch，但 WebView 自身的 pinch 手势仍可能缩放整页。Safari 专有
+      // gesturestart/change/end 事件可被 preventDefault 拦下；其它内核不派发这些
+      // 事件，加了无副作用。
+      (function () {
+        ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (t) {
+          document.addEventListener(t, function (e) { e.preventDefault(); }, { passive: false });
+        });
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

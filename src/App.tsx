@@ -13,7 +13,7 @@ import { TimingBar, TimingMarker } from './components/TimingBar';
 import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
-import { resolveBeatmapUrl, resolveCoverUrl, parseDifficultyMeta } from './data/beatmapLoader';
+import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
@@ -25,8 +25,9 @@ import { safeStorage } from './utils/storage';
 import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
 import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
 import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats, getAllHighScores, mergeCloudHighScores, type HighScoreMap } from './utils/scoreStore';
-import { getPlatform } from './platform';
-import { composeResultCard } from './utils/resultCard';
+import { getPlatform, hasPlatformIdentity } from './platform';
+import { usePlatform } from './platform/PlatformContext';
+import { accountStore } from './accountStore';
 import { globalAudio } from './audio/AudioManager';
 import { useI18n } from './i18n';
 import { applyDslToNote, loadEditorDsl, saveEditorDsl } from './utils/editorRules';
@@ -142,6 +143,7 @@ function saveSettings(settings: typeof DEFAULT_SETTINGS) {
 
 export function App() {
   const { t } = useI18n();
+  const { platform, ready } = usePlatform();
   const initialSettings = loadSettings();
   // R4-6: quality 渲染设置切片下沉到模块级 qualityStore（App 根 state 之外）。
   // 幂等初始化；SettingsModal/App 经 useQuality 订阅，GameCanvas 仍以 props 接收。
@@ -954,7 +956,7 @@ export function App() {
           isNewB = result?.isNewBadge ?? false;
         }
 
-        // 平台上报：Toy 端提交排行榜 + 云镜像进度；web 端为空操作 / 本地。
+        // 平台上报：支持排行榜 / 云存储的构建提交并镜像进度；否则为空操作 / 本地。
         // 不阻塞结算展示（fire-and-forget）。
         if (currentSongInfo && !autoPlay) {
           getPlatform()
@@ -972,9 +974,6 @@ export function App() {
             .catch(() => {});
         }
 
-        // 结算后游戏画面已清空，分享图不以游戏 canvas 为底；改为专辑图（无则强调色
-        // 渐变）作背景，异步合成一张带完整结算信息的成绩卡片用于分享。
-        // 封面优先取曲目 cover（idb:// 需异步读库转 blob URL），回退到谱面 jacket。
         const meta = {
           title: currentChart.metadata.title,
           artist: currentChart.metadata.artist,
@@ -982,66 +981,65 @@ export function App() {
           bpm: currentChart.metadata.bpm,
         };
 
-        findSongById(currentSongInfo?.songId ?? '')
-          .then((songItem) => resolveCoverUrl(currentChart.metadata.jacket || songItem?.cover || ''))
-          .then((jacketUrl) => {
-            const info: ResultInfo = {
-              stats: statsRef.current,
-              image: undefined,
-              badge,
-              isNewHighScore: isNewScore,
-              isNewBadge: isNewB,
-              songId: currentSongInfo?.songId ?? null,
-              diffName: currentSongInfo?.diffName ?? null,
-              meta,
-            };
+        const info: ResultInfo = {
+          stats: statsRef.current,
+          badge,
+          isNewHighScore: isNewScore,
+          isNewBadge: isNewB,
+          songId: currentSongInfo?.songId ?? null,
+          diffName: currentSongInfo?.diffName ?? null,
+          meta,
+        };
 
-            composeResultCard({
-              stats: statsRef.current,
-              badge,
-              isNewHighScore: isNewScore,
-              meta,
-              jacket: jacketUrl || null,
-              accentColor: currentChart.metadata.bgScheme.accentColor,
-              isAutoplay: autoPlay,
-            })
-              .then((card) => {
-                if (!card) return;
-                info.image = card;
-                // 若结算卡片已展示则刷新；否则等 showResult 里 setResultInfo(info) 生效
-                setResultInfo((prev) => (prev === info ? { ...info } : prev));
-              })
-              .catch(() => {});
+        // Back to song select in "result card" mode (bars hidden, enlarged card)
+        const showResult = () => {
+          setResultInfo(info);
+          setGameState('menu');
+          setTransitionPhase('fade-in');
+          transitionTimerRef.current = window.setTimeout(() => {
+            setTransitionPhase('idle');
+            transitionTimerRef.current = null;
+          }, 300);
+        };
 
-            // Back to song select in "result card" mode (bars hidden, enlarged card)
-            const showResult = () => {
-              setResultInfo(info);
-              setGameState('menu');
-              setTransitionPhase('fade-in');
-              transitionTimerRef.current = window.setTimeout(() => {
-                setTransitionPhase('idle');
-                transitionTimerRef.current = null;
-              }, 300);
-            };
-
-            // Show clear banner (FC / AP / AP+) first if earned
-            if (badge) {
-              setClearBanner(badge);
-              window.setTimeout(() => {
-                setClearBanner(null);
-                showResult();
-              }, 1800);
-            } else {
-              // No badge — wait for audio fade-out (1s) then show result
-              window.setTimeout(showResult, 1000);
-            }
-          })
-          .catch(() => {});
+        // Show clear banner (FC / AP / AP+) first if earned
+        if (badge) {
+          setClearBanner(badge);
+          window.setTimeout(() => {
+            setClearBanner(null);
+            showResult();
+          }, 1800);
+        } else {
+          // No badge — wait for audio fade-out (1s) then show result
+          window.setTimeout(showResult, 1000);
+        }
       }
     }
   }, [gameState, isPlayTestMode, currentSongInfo, autoPlay, currentChart]);
 
-  // 启动时从平台拉回跨设备进度（Toy 端为云存储；web 端本地，无网络）。
+  // 账号：具备平台账号能力的构建，每次启动（且用户未手动登出）尝试拉取平台身份
+  // 刷新头像与昵称。公开版 getIdentity() 恒返回 null，天然走本地账号分支；失败静默回落。
+  useEffect(() => {
+    if (!ready || !hasPlatformIdentity()) return;
+    if (accountStore.getSnapshot().optOut) return;
+    let cancelled = false;
+    platform
+      ?.getIdentity()
+      .then((identity) => {
+        if (cancelled || !identity) return;
+        accountStore.linkPlatform({
+          id: identity.id,
+          nickname: identity.nickname,
+          avatar: identity.avatar ?? null,
+        });
+      })
+      .catch((e) => console.error('failed to load platform identity', e));
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, platform]);
+
+  // 启动时从平台拉回跨设备进度（支持云存储的构建走云端；否则本地，无网络）。
   // 合并策略只升不降，不影响本地已有更好成绩。失败静默。
   useEffect(() => {
     getPlatform()
@@ -1176,8 +1174,10 @@ export function App() {
     }
   };
 
-  const handleSeekBeat = (beat: number) => {
-    const snappedBeat = Math.round(beat / snapSubdivision) * snapSubdivision;
+  const handleSeekBeat = (beat: number, opts?: { snap?: boolean }) => {
+    /* 拖动 scrub 时 `snap:false` —— 过程中不吸附（大节拍步进下会「跳格」难以微调），
+     * 松手时再以默认（吸附）调用一次。 */
+    const snappedBeat = opts?.snap === false ? beat : Math.round(beat / snapSubdivision) * snapSubdivision;
     // No lower clamp: the editor must be able to represent and display beats
     // before 0 (e.g. negative-offset lead-in or notes placed before beat 0), so
     // the various beat read-outs correctly show negative values.

@@ -2,13 +2,13 @@
  * 平台适配器动态加载器。
  *
  * 通过 `virtual:toy-platform` 这个 virtual 模块切换实现：
- *  - web 构建：vite.config.ts 把该 virtual 别名到公共占位桩 `adapters/__toy_stub.ts`
- *    （= web 适配器，零 B站代码），web 构建产物永远不含真实 Toy 代码。
- *  - toy 构建：vite.toy.config.ts 把该 virtual 别名到私有 `adapters/toy.ts`
- *    （封装 window.toy），仅私有工作副本中存在，不进入公开仓库。
+ *  - 默认构建：对应构建配置把该 virtual 别名到公共占位桩 `adapters/__toy_stub.ts`
+ *    （= 公开默认适配器，零平台私有代码），构建产物永远不含私有平台代码。
+ *  - 平台构建：对应构建配置把该 virtual 别名到私有适配器（封装宿主注入的 SDK），
+ *    仅私有工作副本中存在，不进入公开仓库。
  *
- * 这样公开仓库（clean-main）始终零 Toy 残留，且 web 构建不会因缺 toy.ts 而失败；
- * Toy 差异收敛在单个 private 文件里，普通版与 Toy 版共享同一套游戏代码。
+ * 这样公开仓库始终零平台私有残留，且默认构建不会因缺私有适配器而失败；
+ * 平台差异收敛在单个 private 文件里，各构建风味共享同一套游戏代码。
  */
 import type { GamePlatform } from './adapter';
 
@@ -28,9 +28,19 @@ async function loadToy(): Promise<GamePlatform> {
     const mod = await import('virtual:toy-platform');
     return mod.default;
   } catch {
-    console.warn('[platform] toy adapter unavailable, falling back to web');
+    console.warn('[platform] platform adapter unavailable, falling back to default');
     return loadWeb();
   }
+}
+
+/**
+ * 当前构建是否具备「平台账号」能力（即非纯 web 的公开版）。
+ *
+ * 公开版恒为 false。能力差异全部收敛在私有适配器内部，
+ * 业务代码只问「有没有平台账号能力」，不出现任何平台专有名词。
+ */
+export function hasPlatformIdentity(): boolean {
+  return getPlatformName() !== 'web';
 }
 
 export async function loadPlatform(): Promise<GamePlatform> {

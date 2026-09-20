@@ -1,7 +1,7 @@
 import { unzip } from 'fflate';
 // 仅类型导入，避免把 three 拽入首屏主链；运行时按需动态 import('three')。
 import type * as THREE from 'three';
-import type { SkinMaps, SkinMeta, SkinTextureSet } from '../types/game';
+import type { SkinMaps, SkinMeta, SkinTextureSet, SkinImageSet } from '../types/game';
 
 /** Translation function injected by the caller (keeps this module React-free). */
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;

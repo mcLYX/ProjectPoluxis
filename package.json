@@ -1,12 +1,13 @@
 {
   "name": "poluxis",
   "private": true,
-  "version": "0.0.4.3",
+  "version": "0.0.4.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run build:lite && vite build",
     "build:lite": "node scripts/build-lite.mjs",
+    "build:lite:toy": "node scripts/build-lite.mjs --no-pwa --no-server",
     "split:lite": "node scripts/split-lite.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
@@ -14,7 +15,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "dev:toy": "vite --config vite.toy.config.ts --mode toy",
-    "build:toy": "vite build --config vite.toy.config.ts --mode toy"
+    "build:toy": "npm run build:lite:toy && vite build --config vite.toy.config.ts --mode toy"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.2",

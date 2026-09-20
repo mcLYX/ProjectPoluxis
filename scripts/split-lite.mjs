@@ -91,6 +91,19 @@ let tpl = html;
 tpl = tpl.replace(/<style>[\s\S]*?<\/style>/, '<!--LITE_BASE_CSS-->');
 tpl = tpl.replace(/<!--\[if IE 9\]>[\s\S]*?<!\[endif\]-->/, '<!--LITE_IE9_CSS-->');
 tpl = tpl.replace(/<script>[\s\S]*?<\/script>/, '<!--LITE_APP_JS-->');
+/* Optional blocks (filled by build-lite.mjs; dropped for platform builds). */
+tpl = tpl.replace(
+  /[ \t]*<!--\s*PWA manifest[\s\S]*?<link rel="manifest"[^>]*>/,
+  '  <!--LITE_PWA_MANIFEST-->',
+);
+tpl = tpl.replace(
+  /[ \t]*<!--\s*Register the PWA service worker[\s\S]*?<script type="module" src="[^"]*registerSW\.js"><\/script>/,
+  '<!--LITE_PWA_SW-->',
+);
+tpl = tpl.replace(
+  /[ \t]*<!--\s*Server connection[\s\S]*?<\/div>\s*\n[ \t]*(?=<div class="modal-actions">)/,
+  '      <!--LITE_SERVER-->\n      ',
+);
 fs.writeFileSync(TPL, tpl);
 
 console.log('split:lite complete');

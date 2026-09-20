@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BeatmapsManifest, BeatmapItem, AlbumItem, SongItem, DifficultyEntry, EditorLaunchInfo } from '../types/beatmap';
 import { SongCard } from './SongCard';
 import FloatingActionBar, { ClipboardItem } from './FloatingActionBar';
+import { AccountMenu } from './AccountMenu';
 import { ChartData, GameStats } from '../types/game';
 import type { ClearBadge } from '../utils/scoreStore';
 import { getScoreKey } from '../utils/scoreStore';
@@ -40,7 +41,7 @@ import { importZip, importLooseFiles, parseChartMeta, resolveDifficulty } from '
 import { onServersChanged } from '../data/onlineServers';
 import { globalAudio } from '../audio/AudioManager';
 import { useI18n } from '../i18n';
-import { ArrowLeft, Home, ClipboardPaste, Loader2, Sliders, FileCode, Smartphone, Tv } from 'lucide-react';
+import { ArrowLeft, Home, ClipboardPaste, Loader2, Tv } from 'lucide-react';
 
 /** Default accent color used when a beatmap item defines none. */
 const DEFAULT_ACCENT = '#0ea5e9';
@@ -71,8 +72,6 @@ export interface ResultInfo {
   badge: ClearBadge | null;
   isNewHighScore: boolean;
   isNewBadge: boolean;
-  /** 结算瞬间抓取的游戏画面（PNG dataURL），用于分享/截图；无可用画面时为 undefined。 */
-  image?: string;
   /** null → played a custom chart (file manager / not in manifest) */
   songId: string | null;
   diffName: string | null;
@@ -172,6 +171,40 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   const [albumAnimDir, setAlbumAnimDir] = useState<'in' | 'out'>('in'); // 'in' = going into album, 'out' = going back
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  /* PC 鼠标滚轮横向滚动卡片轮播：原生 `overflow-x-auto` 只响应横向滚轮/横向拖拽，
+   * 竖向滚轮默认不会滚动它；且 React 的 onWheel 是 passive 监听，无法 preventDefault。
+   * 故挂原生非 passive 监听：把竖向滚轮映射为横向滚动；若指针落在可纵向滚动的子元素
+   * （如展开卡片内部的信息区）内则让位给它。 */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent): void => {
+      if (e.ctrlKey) return; // 触控板缩放手势，不拦截
+      if (el.scrollWidth <= el.clientWidth + 1) return; // 没有横向可滚动内容
+      let node = e.target as HTMLElement | null;
+      while (node && node !== el) {
+        const style = getComputedStyle(node);
+        if (
+          (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+          node.scrollHeight > node.clientHeight + 1
+        ) {
+          return; // 该子元素自己能纵向滚动 → 交给它
+        }
+        node = node.parentElement;
+      }
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!delta) return;
+      e.preventDefault();
+      // 临时关掉 scroll-smooth，避免每个滚轮事件都触发一次平滑动画（手感发黏）。
+      const prevBehavior = el.style.scrollBehavior;
+      el.style.scrollBehavior = 'auto';
+      el.scrollLeft += delta;
+      el.style.scrollBehavior = prevBehavior;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
   const audioInitializedRef = useRef(false);
   // When set (briefly) after leaving result mode, sibling cards animate in.
   const [justExitedResult, setJustExitedResult] = useState(false);
@@ -893,20 +926,6 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap pointer-events-auto">
-          <button
-            onClick={onOpenEditor}
-            className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-          >
-            <FileCode size={15} /> {t('songselect.edit')}
-          </button>
-          <button
-            onClick={onSwitchLite}
-            className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-          >
-            <Smartphone size={14} /> {t('songselect.lite')}
-          </button>
-        </div>
       </div>
       )}
 
@@ -1069,7 +1088,14 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       {/* Bottom Bar (hidden in result mode) */}
       {!result && (
       <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-wrap items-center justify-between gap-4 py-4 pointer-events-none" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 0px))', paddingLeft: 'max(1.5rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1.5rem, env(safe-area-inset-right, 0px))' }}>
-        <div className="flex items-center gap-6 text-xs text-white/70 pointer-events-auto">
+        <div className="flex items-center gap-4 text-xs text-white/70 pointer-events-auto">
+          {/* 左下角账号入口（Auto-Play 左侧）：点击向上展开「设置 / 编辑器 / Lite 版」下拉列表 */}
+          <AccountMenu
+            placement="bottom-left"
+            onOpenSettings={onOpenSettings}
+            onOpenEditor={onOpenEditor}
+            onSwitchLite={onSwitchLite}
+          />
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -1081,12 +1107,6 @@ export const SongSelect: React.FC<SongSelectProps> = ({
               <Tv size={14} className="text-amber-400" /> Auto-Play
             </span>
           </label>
-          <button
-            onClick={onOpenSettings}
-            className="glass-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold"
-          >
-            <Sliders size={14} /> {t('songselect.settings')}
-          </button>
           {syncingOnline && (
             <span className="flex items-center gap-1.5 text-white/60 text-xs font-medium">
               <Loader2 size={13} className="animate-spin text-cyan-300" />

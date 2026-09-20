@@ -2,6 +2,21 @@
 
 html, body {
   background: #0a0d12;
+  /* iOS (WKWebView / Safari) treats the page as a scrollable, zoomable document:
+     the menu screens could be dragged up/down past the viewport and pinch-zoomed,
+     whereas gameplay stayed fixed (its canvas has touch-action: none). Android
+     never did this. Pinning html/body to the viewport removes the document-level
+     scroll area entirely — all real scrollers in the app are inner elements
+     (song carousel, settings modal body, editor sidebar, ...). */
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
   /* Disable iOS Safari double-tap zoom + the text-selection loupe/magnifier
      that appears when gameplay taps register as text selection. The
      user-scalable=no in the viewport <meta> is ignored by modern Safari, so
@@ -85,6 +100,14 @@ html, body {
   --glass-blur: 16px;
   --glass-blur-lg: 22px;
 
+  /* Opaque base fill for glass surfaces. backdrop-filter is NOT rendered on some
+     Android WebViews / older kernels; without this layer the panel keeps only the
+     ~7% white wash above and reads as "completely transparent". Baking a dark base
+     in makes every glass surface legible with or without blur — same philosophy as
+     the Lite build's CSS ("backdrop-filter is progressive enhancement"). */
+  --glass-fill: rgba(13, 17, 24, 0.62);
+  --glass-fill-strong: rgba(14, 18, 26, 0.78);
+
   /* Text hierarchy (white at decreasing alpha) */
   --text-1: rgba(255, 255, 255, 0.92);
   --text-2: rgba(255, 255, 255, 0.70);
@@ -98,14 +121,18 @@ html, body {
 
 /* ---- Reusable glass utility classes ---------------------------------- */
 .glass-panel {
-  background: var(--surface-1);
+  /* Dark base (always painted) + white wash on top; blur is pure enhancement. */
+  background-color: var(--glass-fill);
+  background-image: linear-gradient(var(--surface-1), var(--surface-1));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow), var(--glass-rim);
 }
 .glass-panel-strong {
-  background: var(--surface-2);
+  /* Same layering as .glass-panel, with the stronger (more opaque) base. */
+  background-color: var(--glass-fill-strong);
+  background-image: linear-gradient(var(--surface-2), var(--surface-2));
   backdrop-filter: blur(var(--glass-blur-lg)) saturate(150%);
   -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(150%);
   border: 1px solid var(--glass-border-strong);
@@ -236,6 +263,24 @@ canvas {
   30% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
   70% { transform: translate(-50%, -50%) scale(1); opacity: 0.95; }
   100% { transform: translate(-50%, -50%) scale(0.75); opacity: 0; }
+}
+
+/* 横屏提示：手机由竖屏转到横屏的循环动画（OrientationHint）。
+   0–15% 竖屏停顿 → 45% 转到位 → 65% 保持片刻 → 100% 转回竖屏。
+   想改成顺时针，把 -90deg 换成 90deg 即可。 */
+@keyframes phoneRotate {
+  0%, 15% { transform: rotate(0deg); }
+  45%, 65% { transform: rotate(-90deg); }
+  100% { transform: rotate(0deg); }
+}
+
+.phone-rotate {
+  transform-origin: 50% 50%;
+  animation: phoneRotate 2.6s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phone-rotate { animation-duration: 6s; }
 }
 
 /* Combo milestone burst ring (every 10 combo) */

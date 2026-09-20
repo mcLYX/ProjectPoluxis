@@ -4,8 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0b1120">
-  <!-- PWA manifest (relative so it works under a sub-path like /poluxis/lite/) -->
-  <link rel="manifest" href="../manifest.webmanifest">
+  <!--LITE_PWA_MANIFEST-->
   <title>Project:Poluxis (Lite)</title>
   <!--LITE_BASE_CSS-->
   <!--LITE_IE9_CSS-->
@@ -107,13 +106,7 @@
           <button type="button" data-lang="ja">日本語</button>
         </div>
       </div>
-      <!-- Server connection (IE9-compatible, no persistence). Address = beatmaps dir. -->
-      <div class="modal-row" style="align-items:center;">
-        <label data-i18n="srvLabel" style="margin-right:8px;">服务器</label>
-        <input type="text" id="srv-url" placeholder="https://host/beatmaps" spellcheck="false"
-               style="-ms-flex:1 1 auto;flex:1 1 auto;min-width:0;padding:6px 8px;background:#05070d;border:1px solid rgba(6,182,212,0.3);border-radius:6px;color:#e2e8f0;font-family:inherit;font-size:12px;">
-        <button type="button" class="btn-tool" id="btn-srv-connect" data-i18n="srvConnect" style="margin-left:8px;">连接</button>
-      </div>
+      <!--LITE_SERVER-->
       <div class="modal-actions">
         <button class="btn-tool" id="btn-settings-close" data-i18n="setClose">关闭</button>
       </div>
@@ -145,8 +138,7 @@
   </div>
 </div>
 
-<!-- Register the PWA service worker (relative path so it works under a sub-path like /poluxis/lite/) -->
-<script type="module" src="../registerSW.js"></script>
+<!--LITE_PWA_SW-->
 
 <!--LITE_APP_JS-->
 </body>

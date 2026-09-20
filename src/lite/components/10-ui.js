@@ -633,7 +633,9 @@
       if (srvBtn) { srvBtn.textContent = L('srvConnect'); srvBtn.style.color = ''; srvBtn.disabled = false; }
     };
   }
-  document.getElementById('btn-srv-connect').onclick = function () {
+  /* 服务器入口可能在构建期被剔除（平台构建），故此处必须做空值守卫。 */
+  var srvConnectBtn = document.getElementById('btn-srv-connect');
+  if (srvConnectBtn) srvConnectBtn.onclick = function () {
     var url = (srvUrlInput && srvUrlInput.value) ? srvUrlInput.value.replace(/^\s+|\s+$/g, '') : '';
     if (!url) url = defaultServerBaseUrl(); /* 留空 = 默认 */
     connectServer(url);

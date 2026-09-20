@@ -53,7 +53,9 @@ interface Editor2DCanvasProps {
   /** Move/resize a note or slide child node. beat may be undefined to keep it. */
   onMoveNote: (id: string, x: number, y: number, beat: number) => void;
   onSelectNote: (id: string | null) => void;
-  onSeekBeat: (beat: number) => void;
+  /** Seek the playhead to `beat`. `opts.snap === false` seeks WITHOUT beat snapping
+   *  (used while drag-scrubbing; the snap is applied once on release). */
+  onSeekBeat: (beat: number, opts?: { snap?: boolean }) => void;
   /** 覆盖式设置多选集合（null = 清空）。 */
   onSelectNotes: (ids: string[] | null) => void;
   /** 按当前 marqueeMode 合并框选命中的 note id 到多选集合。 */
@@ -193,6 +195,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     y0: number;
     lastPy: number;
     moved: boolean;
+    /** Scrub: last (unsnapped) target beat reported during the drag; snapped on release. */
+    lastScrubBeat?: number;
     /** Marquee start pixel (for drawing the selection rectangle). */
     mx0: number;
     my0: number;
@@ -755,7 +759,10 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // Drag down = forward through the chart (playhead advances).
       const dBeat = (dy / pxPerBeat);
       const curBeat = timeToBeat(curTime, segsRef.current);
-      onSeekRef.current(curBeat + dBeat);
+      /* 拖动过程中不做节拍吸附（大节拍步进下会「跳格」，难以微调），松手时再吸附。 */
+      const targetBeat = round9(curBeat + dBeat);
+      drag.lastScrubBeat = targetBeat;
+      onSeekRef.current(targetBeat, { snap: false });
       drag.moved = true;
       return;
     }
@@ -803,7 +810,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     // incremental commits, so deltas can never accumulate.
     if (drag.isMultiDrag && drag.multiSnapshot) {
       const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-      const grabBeat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
+      /* 拖动过程中不吸附节拍，松手时统一吸附（见 onPointerUp）。 */
+      const grabBeat = round9(timeToBeat(t - drag.offBeat, segsRef.current));
       const grabX = round9(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1)));
       // Delta from the grabbed note's original position.
       const grabSnap = drag.multiSnapshot.find((s) => s.id === drag.multiGrabId);
@@ -827,7 +835,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
     if (!drag.id) return;
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    const beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
+    /* 拖动过程中不吸附节拍（大节拍步进下会「跳格」），松手时再吸附（见 onPointerUp）。 */
+    const beat = round9(timeToBeat(t - drag.offBeat, segsRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     const x = round9(snap(worldX - drag.offX, xStep));
     drag.moved = true;
@@ -850,6 +859,15 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   const onPointerUp = (e: React.PointerEvent) => {
     (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
     const drag = dragRef.current;
+
+    // Scrub: 松手时把最终拍数吸附到网格（拖动过程中不吸附，见 onPointerMove）。
+    if (drag && drag.isScrub) {
+      if (drag.moved && drag.lastScrubBeat != null) {
+        onSeekRef.current(drag.lastScrubBeat, { snap: true });
+      }
+      dragRef.current = null;
+      return;
+    }
 
     // Marquee: collect hit notes and apply via onMarqueeSelect.
     if (drag && drag.isMarquee && marqueeRectRef.current) {
@@ -895,8 +913,12 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       if (drag.moved) {
         const liveMap = multiLiveRef.current;
         if (liveMap) {
+          /* 松手吸附：以被抓取音符的最终位置为准吸附节拍，并对全部选中项施加同一增量，
+           * 保持多选之间的相对间距不变。 */
+          const grabLive = drag.multiGrabId ? liveMap.get(drag.multiGrabId) : undefined;
+          const dBeat = grabLive ? round9(snap(grabLive.beat, snapRef.current)) - grabLive.beat : 0;
           const positions: Array<{ id: string; x: number; y: number; beat: number }> = [];
-          for (const [id, p] of liveMap) positions.push({ id, x: p.x, y: p.y, beat: p.beat });
+          for (const [id, p] of liveMap) positions.push({ id, x: p.x, y: p.y, beat: round9(p.beat + dBeat) });
           if (positions.length > 0) onMoveNotesRef.current(positions);
         }
         multiLiveRef.current = null;
@@ -911,8 +933,10 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       return;
     }
 
-    // Single-note drag: commit the final dragged position once and clear live override.
+    // Single-note drag: 松手时吸附节拍，然后提交最终位置并清除 live override。
     if (dragLiveRef.current) {
+      const m = dragLiveRef.current;
+      dragLiveRef.current = { ...m, beat: round9(snap(m.beat, snapRef.current)) };
       commitMove();
       dragLiveRef.current = null;
       liveDragStore.clear();
