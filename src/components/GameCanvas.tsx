@@ -6,6 +6,8 @@ import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, Qu
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt } from '../utils/chartRuntime';
+import { createFrameGate } from '../utils/frameLimiter';
+import { qualityStore } from '../qualityStore';
 import { EASING_FNS } from '../utils/easing';
 import { WORLD_UNITS_PER_SECOND, withinHitWindow } from '../systems/judge';
 import { expandRing, type RingPt } from '../systems/geometry';
@@ -1601,12 +1603,17 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // force-restart (watchdog / viewport re-activate) cannot accumulate
     // duplicate rAF chains, which previously multiplied tick() work every time
     // it fired (cause of the progressive frame-rate drop on iOS).
+    // 帧率上限门控（设置-图形）：被跳过的帧不执行 tick()（省下真正的渲染/逻辑
+    // 工作），但 rAF 链保持不断。60fps 上限下判定/音符运动精度充足
+    // （最小判定窗口 ±40ms，远大于 16.7ms 帧步）。
+    const frameGate = createFrameGate();
     const loop = () => {
       if (!viewportActiveRef.current || !runningRef.current) {
         runningRef.current = false;
         return;
       }
       animIdRef.current = requestAnimationFrame(loop);
+      if (!frameGate(performance.now(), qualityStore.getSnapshot().maxFps)) return;
       tick();
     };
     // Re-arm the loop. Idempotent: a live chain never triggers a second one.

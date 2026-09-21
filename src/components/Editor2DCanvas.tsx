@@ -267,7 +267,13 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
-    const ctx = canvas.getContext('2d');
+    // 同 GameCanvas2D：全屏 2D canvas 走低延迟呈现路径，减少每帧的合成器提交
+    // 成本（编辑器在拖动/播放预览时同样是逐帧重绘）。不支持的浏览器会忽略。
+    //
+    // 注意：这里**不能**加 `alpha: false` —— 编辑器预览模式靠 clearRect + 半透明
+    // 遮罩让背后的 3D 舞台透出来（见下方 render 里的 preview 分支），一旦画布变为
+    // 不透明，预览就看不到 3D 舞台了。
+    const ctx = canvas.getContext('2d', { desynchronized: true });
     if (!ctx) return;
 
     let raf = 0;

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette,
-  User, Upload, Trash2, LogIn, LogOut,
+  User, Upload, Trash2, LogIn, LogOut, Gauge,
 } from 'lucide-react';
 import type { QualityMode } from '../types/game';
 import { useI18n, LANGS } from '../i18n';
@@ -131,6 +131,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const qualityIdx: Record<QualityMode, number> = { lite: 0, low: 1, standard: 2, high: 3, ultra: 4, custom: 5 };
   const qualityOrder: QualityMode[] = ['lite', 'low', 'standard', 'high', 'ultra', 'custom'];
+  // 帧率上限选项（0 = 不限帧）。
+  const MAX_FPS_OPTIONS = [30, 60, 90, 120, 0];
   const qualityLabel = (q: QualityMode) => t(`settings.quality.${q}`);
   const qualityDesc = (q: QualityMode) => t(`settings.quality.desc.${q}`);
 
@@ -163,6 +165,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <span>{qualityLabel('lite')}</span><span>{qualityLabel('low')}</span><span>{qualityLabel('standard')}</span><span>{qualityLabel('high')}</span><span>{qualityLabel('ultra')}</span><span>{qualityLabel('custom')}</span>
         </div>
         <p className="text-[11px] text-white/50 leading-relaxed">{qualityDesc(quality.qualityMode)}</p>
+      </section>
+
+      <section className="space-y-1.5">
+        <div className="flex justify-between">
+          <label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Gauge size={16} /> {t('settings.maxFps')}</label>
+          <span className={valueClass}>{quality.maxFps === 0 ? '∞' : `${quality.maxFps} fps`}</span>
+        </div>
+        <input
+          type="range"
+          min="0" max="4" step="1"
+          value={Math.max(0, MAX_FPS_OPTIONS.indexOf(quality.maxFps))}
+          onChange={(e) => qualityStore.set({ maxFps: MAX_FPS_OPTIONS[Number(e.target.value)] })}
+          className={sliderClass}
+        />
+        <div className="flex justify-between text-[11px] text-white/40 font-mono">
+          <span>30</span><span>60</span><span>90</span><span>120</span><span>∞</span>
+        </div>
+        <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.maxFpsHint')}</p>
       </section>
 
       {quality.qualityMode === 'custom' && (

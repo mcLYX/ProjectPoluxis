@@ -21,6 +21,12 @@ export interface QualityState {
   customDynamicLighting: boolean;
   customHitEffects: boolean;
   customRenderScale: number;
+  /**
+   * 渲染帧率上限（0 = 不限帧）。高刷屏（90/120/144Hz）上把绘制帧数限制到
+   * 目标值可显著降低功耗（实测手机端功耗明显下降），且音符流视觉平滑度
+   * 影响很小。由各 rAF 渲染循环经 utils/frameLimiter 的相位累加器统一执行。
+   */
+  maxFps: number;
 }
 
 const DEFAULT_QUALITY: QualityState = {
@@ -31,6 +37,7 @@ const DEFAULT_QUALITY: QualityState = {
   customDynamicLighting: false,
   customHitEffects: true,
   customRenderScale: 1.0,
+  maxFps: 60,
 };
 
 let state: QualityState = { ...DEFAULT_QUALITY };

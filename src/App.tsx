@@ -9,7 +9,7 @@ const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => 
 import type { EditorTool, BatchSelection, QuickCreateDelta, MarqueeMode } from './components/VisualChartEditor';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
 import { OrientationHint } from './components/OrientationHint';
-import { TimingBar, TimingMarker } from './components/TimingBar';
+import { TimingBar, type TimingBarHandle } from './components/TimingBar';
 import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
@@ -22,6 +22,7 @@ import type { EditorLaunchInfo, SongItem } from './types/beatmap';
 import { calculateNoteScore, calculateRank } from './utils/scoring';
 import { clampInt } from './utils/math';
 import { safeStorage } from './utils/storage';
+import { createFrameGate } from './utils/frameLimiter';
 import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
 import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
 import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats, getAllHighScores, mergeCloudHighScores, type HighScoreMap } from './utils/scoreStore';
@@ -37,8 +38,6 @@ import {
   RotateCcw,
   ArrowLeft,
 } from 'lucide-react';
-
-const MARKER_LIFETIME_MS = 1150;
 
 /**
  * 判定回传节流间隔（ms）：HUD / stats 的刷新频率上限（~30Hz）。
@@ -82,6 +81,8 @@ const DEFAULT_SETTINGS = {
   customDynamicLighting: true,
   customHitEffects: true,
   customRenderScale: 1.0,
+  // 渲染帧率上限（0 = 不限帧）。默认 60：高刷屏上省电明显，视觉影响很小。
+  maxFps: 60,
   musicVolume: 0.8,
   effectVolume: 0.9,
   // 兼容模式（HarmonyOS 弱设备音频时钟停滞时）：谱面走墙钟、音频跟随谱面校准。
@@ -147,6 +148,29 @@ function saveSettings(settings: typeof DEFAULT_SETTINGS) {
   } catch (e) { /* ignore quota / private mode errors */ }
 }
 
+/**
+ * 进度条改用 `transform: scaleX()` 驱动，不再写 `width`。
+ *
+ * 为什么（Performance 面板实测：Lite / 2D 渲染 + CPU 4x 限速）：
+ *  - `width` 是**布局属性**，每次写入都要样式重算 + 布局；
+ *  - 原先还叠了 `transition-all duration-100`，而写入间隔约 33ms（30Hz），
+ *    **短于过渡时长** → 过渡永远处于进行中，每个渲染帧都要重算 width；
+ *  - 实测 `UpdateLayoutTree` 303 次 / 18.73s（几乎每帧一次），
+ *    平均 5.9ms、最长 72ms，约占单帧预算的 12%。
+ *
+ * transform 过渡由合成器执行，不进入样式重算 / 布局；且 30Hz 的写入会被
+ * 100ms 的过渡插值成连续动画，平滑度反而比原来更好。
+ *
+ * 注意：`background` 里的 90deg 渐变是相对**元素自身盒**定义的，所以
+ * `width` 与 `scaleX()` 的渐变映射完全一致，不会改变观感；唯一差异是填充
+ * 右端的圆角被横向压成椭圆（4px 高的条上约 2px→1px，肉眼基本不可见）。
+ */
+function setProgressScale(el: HTMLElement | null, ratio: number): void {
+  if (!el) return;
+  const safe = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
+  el.style.transform = `scaleX(${safe})`;
+}
+
 export function App() {
   const { t } = useI18n();
   const { platform, ready } = usePlatform();
@@ -161,6 +185,7 @@ export function App() {
     customDynamicLighting: initialSettings.customDynamicLighting,
     customHitEffects: initialSettings.customHitEffects,
     customRenderScale: initialSettings.customRenderScale,
+    maxFps: initialSettings.maxFps,
   });
   const quality = useQuality();
   // 当前正在进行的谱面加载请求（用于防快速切歌覆盖 / 卸载取消，P2-9）。
@@ -305,11 +330,10 @@ export function App() {
     statsRef.current = stats;
   }, [stats]);
 
-  // 判定精度条 marker：原实现每判定一个 setTimeout 到期移除，高频连击时 timer 累积。
-  // 改为单一清理 timer + marker 内嵌 expiresAt，到期批量移除所有过期项——任意时刻
-  // 至多 1 个活跃 timer，减轻 HarmonyOS 平板点击停顿（见性能修复）。
-  const markerCleanTimerRef = useRef<number | null>(null);
-  const [timingMarkers, setTimingMarkers] = useState<TimingMarker[]>([]);
+  // 判定精度条 marker 现由 TimingBar 组件内部维护（经 ref 的命令式接口 push），
+  // 不再经过 App 的 React state —— 否则每 ~33ms 一次 setTimingMarkers 仍会让
+  // App 全树重渲染（见下方 P0 说明）。comboBurst 每 10 连击才变一次，频率极低，
+  // 继续留在 React state。
   const [comboBurst, setComboBurst] = useState<{ key: number; value: number } | null>(null);
   // 判定回传节流：判定结果先进缓冲，再按固定间隔（~30Hz）批量提交。
   // 原实现「每个音符判定 → 一次 setStats + setTimingMarkers」≈60 次/秒全树重渲染
@@ -324,7 +348,10 @@ export function App() {
   // mobile; the rAF now mutates the DOM node directly while keeping the exact
   // same gradient, so visuals are unchanged but React never re-renders.
   const ambientBgRef = useRef<HTMLDivElement | null>(null);
-  const bgSchemeRef = useRef<any>(null);
+  // P2：光晕脉搏改由「顶层预渲染渐变的 opacity」驱动（见 HUD rAF 与下方 JSX）。
+  // 原先每帧重写 style.background（全屏径向渐变重新栅格化）代价很高；现改为两层
+  // 静态渐变叠加，只动顶层 opacity —— 纯合成器操作，不触发样式重算/重绘。
+  const ambientGlowRef = useRef<HTMLDivElement | null>(null);
   // Live mirror of the current chart so editor callbacks can read fresh notes
   // without adding `currentChart` to their dependency arrays (which would make
   // the place handler stale between rapid placements).
@@ -332,8 +359,54 @@ export function App() {
   currentChartRef.current = currentChart;
   // Gameplay HUD is driven imperatively (no React re-render during play):
   const progressRef = useRef<HTMLDivElement | null>(null);
+  // P0：连击 / 分数 / 精度+排名 也改为 ref 直写（原先绑定 React state，导致每次
+  // 判定回传 setStats 都会让 App 全树重渲染 —— 这是完整版 2D 比 Lite 更耗电的主因）。
+  const comboNumRef = useRef<HTMLDivElement | null>(null);
+  const comboWrapRef = useRef<HTMLDivElement | null>(null);
+  const scoreRef = useRef<HTMLDivElement | null>(null);
+  const accRankRef = useRef<HTMLDivElement | null>(null);
+  const timingBarRef = useRef<TimingBarHandle | null>(null);
+  /** HUD rAF 的帧率上限门控（见 utils/frameLimiter）。 */
+  const hudGateRef = useRef(createFrameGate());
   const chartDurationRef = useRef(0);
   const gameTimerRef = useRef<number | null>(null);
+
+  /**
+   * 把 statsRef 的最新数值直写进 HUD DOM（带变更守卫，避免无谓的样式/布局）。
+   *
+   * P0：这些元素（连击 / 分数 / ACC+RANK）原先绑定 React state，每次判定回传
+   * setStats 都会触发 App 全树重渲染 —— 完整版 2D 比 Lite 更耗电的主因。
+   * 现改为游玩热路径零 React：判定只写 statsRef，本函数在 HUD rAF（~30fps）
+   * 里刷新 DOM；暂停前再补写一次（用于暂停浮层显示最新成绩）。
+   */
+  const writeHudFromStats = useCallback(() => {
+    const s = statsRef.current;
+    const wrap = comboWrapRef.current;
+    if (wrap && comboNumRef.current) {
+      if (s.combo > 0) {
+        const txt = String(s.combo);
+        if (comboNumRef.current.textContent !== txt) comboNumRef.current.textContent = txt;
+        if (wrap.style.visibility !== 'visible') wrap.style.visibility = 'visible';
+      } else if (wrap.style.visibility !== 'hidden') {
+        wrap.style.visibility = 'hidden';
+      }
+    }
+    const scoreEl = scoreRef.current;
+    if (scoreEl) {
+      const txt = Math.round(s.score).toLocaleString().padStart(8, '0');
+      if (scoreEl.textContent !== txt) scoreEl.textContent = txt;
+    }
+    const accEl = accRankRef.current;
+    if (accEl) {
+      const judged = s.sPerfectCount + s.perfectCount + s.goodCount + s.missCount;
+      const remaining = Math.max(0, s.totalNotes - judged);
+      const rank = calculateRank(
+        s.score + remaining * calculateNoteScore('S-Perfect', Math.max(1, s.totalNotes))
+      );
+      const txt = `ACC: ${s.accuracy.toFixed(2)}% | RANK: ${rank}`;
+      if (accEl.textContent !== txt) accEl.textContent = txt;
+    }
+  }, []);
   // Set to true the instant the song finishes (handleSongEnd fires). This
   // prevents any subsequent ESC / pause-button presses from triggering the
   // paused overlay while the clear-banner / audio fade-out is running (which
@@ -456,7 +529,7 @@ export function App() {
     saveSettings({
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
       noteSizeScale, qualityMode: quality.qualityMode, customAntialias: quality.customAntialias, customBloom: quality.customBloom,
-      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, musicVolume, effectVolume, compatMode,
+      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, maxFps: quality.maxFps, musicVolume, effectVolume, compatMode,
       selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
   }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, compatMode, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
@@ -553,7 +626,6 @@ export function App() {
         score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0, perfectEarly: 0, perfectLate: 0, goodEarly: 0, goodLate: 0,
         goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(chartData), accuracy: 100, rank: calculateRank(0),
       });
-      setTimingMarkers([]);
       setComboBurst(null);
       // 丢弃上一局可能尚未 flush 的判定缓冲，避免开局后被追加到新一局的 stats 上。
       judgementQueueRef.current.length = 0;
@@ -629,7 +701,6 @@ export function App() {
         score: 0, combo: 0, maxCombo: 0, sPerfectCount: 0, perfectCount: 0, perfectEarly: 0, perfectLate: 0, goodEarly: 0, goodLate: 0,
         goodCount: 0, missCount: 0, totalNotes: countPlayableNotes(currentChart), accuracy: 100, rank: calculateRank(0),
       });
-      setTimingMarkers([]);
       setComboBurst(null);
       // 同上：重开试玩时丢弃残留缓冲。
       judgementQueueRef.current.length = 0;
@@ -949,49 +1020,40 @@ export function App() {
   /** 把单条判定应用到 stats / markers（原 handleJudgementStable 的函数体）。
    *  纯状态更新，不含节流逻辑，便于节流层按顺序批量调用。 */
   const applyJudgement = useCallback((fb: JudgementFeedback) => {
-    setStats((prev) => {
-      const isHit = fb.type !== 'Miss';
-      const newCombo = isHit ? prev.combo + 1 : 0;
-      const newMaxCombo = Math.max(prev.maxCombo, newCombo);
-      const sCount = prev.sPerfectCount + (fb.type === 'S-Perfect' ? 1 : 0);
-      const pCount = prev.perfectCount + (fb.type === 'Perfect' ? 1 : 0);
-      const gCount = prev.goodCount + (fb.type === 'Good' ? 1 : 0);
-      const mCount = prev.missCount + (fb.type === 'Miss' ? 1 : 0);
-      // early/late 拆分：deltaT<0 为 early（偏早命中），>=0 为 late。
-      // 仅计入 Perfect 与 Good 档；S-Perfect（±40ms 临界）不参与 early/late 拆分。
-      const isEarly = fb.deltaT < 0;
-      const pEarly = prev.perfectEarly + (fb.type === 'Perfect' && isEarly ? 1 : 0);
-      const pLate = prev.perfectLate + (fb.type === 'Perfect' && !isEarly ? 1 : 0);
-      const gEarly = prev.goodEarly + (fb.type === 'Good' && isEarly ? 1 : 0);
-      const gLate = prev.goodLate + (fb.type === 'Good' && !isEarly ? 1 : 0);
-      const newScore = prev.score + fb.scoreGained;
-      const judgedTotal = sCount + pCount + gCount + mCount;
-      const newAcc = judgedTotal > 0 ? ((sCount + pCount + gCount * 0.5) / judgedTotal) * 100 : 100;
+    // P0：游玩热路径完全不触碰 React state。判定结果直接写进 statsRef，
+    // HUD（连击/分数/精度+排名）由 HUD rAF 从 statsRef 直读并直写 DOM。
+    const prev = statsRef.current;
+    const isHit = fb.type !== 'Miss';
+    const newCombo = isHit ? prev.combo + 1 : 0;
+    const newMaxCombo = Math.max(prev.maxCombo, newCombo);
+    const sCount = prev.sPerfectCount + (fb.type === 'S-Perfect' ? 1 : 0);
+    const pCount = prev.perfectCount + (fb.type === 'Perfect' ? 1 : 0);
+    const gCount = prev.goodCount + (fb.type === 'Good' ? 1 : 0);
+    const mCount = prev.missCount + (fb.type === 'Miss' ? 1 : 0);
+    // early/late 拆分：deltaT<0 为 early（偏早命中），>=0 为 late。
+    // 仅计入 Perfect 与 Good 档；S-Perfect（±40ms 临界）不参与 early/late 拆分。
+    const isEarly = fb.deltaT < 0;
+    const pEarly = prev.perfectEarly + (fb.type === 'Perfect' && isEarly ? 1 : 0);
+    const pLate = prev.perfectLate + (fb.type === 'Perfect' && !isEarly ? 1 : 0);
+    const gEarly = prev.goodEarly + (fb.type === 'Good' && isEarly ? 1 : 0);
+    const gLate = prev.goodLate + (fb.type === 'Good' && !isEarly ? 1 : 0);
+    const newScore = prev.score + fb.scoreGained;
+    const judgedTotal = sCount + pCount + gCount + mCount;
+    const newAcc = judgedTotal > 0 ? ((sCount + pCount + gCount * 0.5) / judgedTotal) * 100 : 100;
 
-      if (newCombo > 0 && newCombo % 10 === 0) {
-        setComboBurst({ key: Date.now(), value: newCombo });
-      }
+    statsRef.current = {
+      ...prev, score: newScore, combo: newCombo, maxCombo: newMaxCombo,
+      sPerfectCount: sCount, perfectCount: pCount, goodCount: gCount, missCount: mCount,
+      perfectEarly: pEarly, perfectLate: pLate, goodEarly: gEarly, goodLate: gLate,
+      accuracy: newAcc, rank: calculateRank(newScore),
+    };
 
-      return {
-        ...prev, score: newScore, combo: newCombo, maxCombo: newMaxCombo,
-        sPerfectCount: sCount, perfectCount: pCount, goodCount: gCount, missCount: mCount,
-        perfectEarly: pEarly, perfectLate: pLate, goodEarly: gEarly, goodLate: gLate,
-        accuracy: newAcc, rank: calculateRank(newScore),
-      };
-    });
-
-    const marker: TimingMarker = { id: `${fb.id}-${fb.createdAt}`, dt: fb.deltaT, type: fb.type };
-    // 内嵌到期时间戳（不进 TimingBar 接口，仅本地清理用）。
-    (marker as TimingMarker & { expiresAt: number }).expiresAt = performance.now() + MARKER_LIFETIME_MS;
-    setTimingMarkers((prev) => [...prev.slice(-24), marker]);
-    // 单一批量清理 timer：任意时刻至多一个，到期后移除全部过期 marker。
-    if (markerCleanTimerRef.current === null) {
-      markerCleanTimerRef.current = window.setTimeout(() => {
-        markerCleanTimerRef.current = null;
-        const now = performance.now();
-        setTimingMarkers((prev) => prev.filter((m) => (m as TimingMarker & { expiresAt: number }).expiresAt > now));
-      }, MARKER_LIFETIME_MS);
+    if (newCombo > 0 && newCombo % 10 === 0) {
+      setComboBurst({ key: Date.now(), value: newCombo });
     }
+
+    // 精度条 marker：命令式推给 TimingBar（其内部自管生命周期与清理 timer）。
+    timingBarRef.current?.push({ id: `${fb.id}-${fb.createdAt}`, dt: fb.deltaT, type: fb.type });
   }, []);
 
   /** 立即排空判定缓冲（结算 / 暂停等需要读到最新 stats 的时刻调用）。 */
@@ -1163,6 +1225,8 @@ export function App() {
     if (songEndedRef.current) return;
     // 暂停浮层会显示当前成绩：先把节流缓冲里的判定应用掉，避免显示滞后。
     flushJudgements();
+    // flushJudgements 只更新 statsRef；HUD rAF 在暂停时会停，这里补写一次 DOM。
+    writeHudFromStats();
     // If playing, pause instantly and cancel any existing countdowns
     if (gameState === 'playing') {
       globalAudio.pause();
@@ -1175,9 +1239,7 @@ export function App() {
       // Gameplay no longer updates gameTime every frame, so snapshot it here.
       const liveT = globalAudio.getCurrentTime();
       setGameTime(liveT);
-      if (progressRef.current) {
-        progressRef.current.style.width = `${Math.min(100, (liveT / (chartDurationRef.current || 1)) * 100)}%`;
-      }
+      setProgressScale(progressRef.current, liveT / (chartDurationRef.current || 1));
       setGameState('paused');
     }
     // If paused, we can toggle countdown resume
@@ -1333,27 +1395,35 @@ export function App() {
 
   useEffect(() => {
     if (gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)) {
-      // Throttle HUD state updates to ~20fps (frame % 3). The 3D canvas
-      // (GameCanvas) reads audio time DIRECTLY from globalAudio in its
-      // own 60fps rAF, so it is completely independent of this throttle.
-      // Only the React-rendered HUD (combo, score, progress bar, ambient bg)
-      // is driven by this state — 20fps is plenty for those non-motion UI
-      // elements and avoids burning 1/3 of the frame budget on React
-      // reconciliation every frame.
+      // Throttle HUD updates to ~20fps. The 3D canvas (GameCanvas) reads audio
+      // time DIRECTLY from globalAudio in its own rAF, so it is completely
+      // independent of this throttle.
+      // Everything the HUD shows is written imperatively here (progress bar,
+      // combo, score, ACC/RANK, ambient bg) — no React state involved, so App
+      // does not reconcile during play. ~30fps is plenty for these non-motion
+      // elements. (Lite has no React at all; this is what closes the gap.)
       // Time-based throttling replaces the old frame%3 counter. On a 144Hz
       // display the rAF fires ~144x/sec, so a frame-count throttle silently
-      // became ~48fps of React reconciliation — the main mobile CPU hog.
+      // became ~48fps of updates — the main mobile CPU hog.
       //   glow/BPM pulse → ~60fps (keeps the 12ms attack visible)
       //   progress bar   → ~30fps (imperative DOM write, no React re-render)
-      // During pure gameplay we never call setGameTime, so App never reconciles
-      // while playing. Editor preview still needs reactive time for its timeline.
+      //   combo/score/ACC/RANK → ~30fps (imperative DOM writes from statsRef)
+      // During pure gameplay we never call setGameTime/setStats, so App never
+      // reconciles while playing. Editor preview still needs reactive time for
+      // its timeline. The rAF is additionally gated by the user's frame cap.
       let lastGlow = 0;
       let lastHud = 0;
       // 兼容模式校准：每 5000ms 检测一次谱面墙钟与音频真实位置的偏差。
       // 节流到 5s 保持音频完整性——只有持续落后才重建 buffer，避免频繁 seek 噪声。
       let lastCompatCheck = 0;
+
       const tick = () => {
         const nowMs = performance.now();
+        // 帧率上限（设置-图形）：超出的帧直接跳过，但 rAF 链继续。
+        if (!hudGateRef.current(nowMs, quality.maxFps)) {
+          gameTimerRef.current = requestAnimationFrame(tick);
+          return;
+        }
         const doGlow = nowMs - lastGlow >= 16;
         const doHud = nowMs - lastHud >= 33;
         if (doGlow) lastGlow = nowMs;
@@ -1374,7 +1444,7 @@ export function App() {
         const inEditorPreview = gameState === 'editor';
 
         // 环境光晕只对「有渐变背景层」的档位有意义：low / lite 渲染的是**纯色层**，
-        // ambientBgRef 为 null —— 这段（含每 16ms 一次的 FFT 采样与秒→拍换算）
+        // ambientGlowRef 为 null —— 这段（含每 16ms 一次的 FFT 采样与秒→拍换算）
         // 算出的结果会被直接丢弃。这里显式跳过，省掉 2D/Lite 档的纯浪费 CPU。
         // 画面表现零变化（纯色层本来就不吃这两个值）。
         const ambientGlowEnabled = quality.qualityMode !== 'low' && quality.qualityMode !== 'lite';
@@ -1392,11 +1462,12 @@ export function App() {
             );
             globalAudio.setCurrentBpm(getBpmAtBeat(beat, currentChart.metadata.bpm, currentChart.metadata.bpmlist));
             const f = globalAudio.getAudioFrequencyData();
-            const bg = bgSchemeRef.current;
-            if (bg && ambientBgRef.current) {
-              const glowExtent = 18 + f.loudness * 18 + f.beatPulse * 22;
-              ambientBgRef.current.style.background =
-                `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} ${glowExtent}%, ${bg.gradientStart} 90%)`;
+            // 光晕脉搏 = 顶层渐变（峰值形态）的 opacity：t=0 → 基准渐变(18%)，
+            // t=1 → 峰值渐变(58%)，与原先 extent 18~58 的端点一一对应；中间由
+            // 两层不透明渐变按 alpha 线性混合，视觉与原「改变 extent」几乎一致。
+            if (ambientGlowRef.current) {
+              const t = (f.loudness * 18 + f.beatPulse * 22) / 40;
+              ambientGlowRef.current.style.opacity = String(t < 0 ? 0 : t > 1 ? 1 : t);
             }
           }
         }
@@ -1404,9 +1475,8 @@ export function App() {
         if (doHud) {
           const t = globalAudio.getCurrentTime();
           if (inEditorPreview) setGameTime(t);
-          if (progressRef.current) {
-            progressRef.current.style.width = `${Math.min(100, (t / (chartDurationRef.current || 1)) * 100)}%`;
-          }
+          setProgressScale(progressRef.current, t / (chartDurationRef.current || 1));
+          writeHudFromStats();
         }
 
         gameTimerRef.current = requestAnimationFrame(tick);
@@ -1701,12 +1771,6 @@ export function App() {
 
   const chartDuration = getChartDuration(currentChart);
   chartDurationRef.current = chartDuration;
-  const judgedCount = stats.sPerfectCount + stats.perfectCount + stats.goodCount + stats.missCount;
-  const remainingNotes = Math.max(0, stats.totalNotes - judgedCount);
-  const potentialRank = calculateRank(
-    stats.score + remainingNotes * calculateNoteScore('S-Perfect', Math.max(1, stats.totalNotes))
-  );
-
   // =========================================================================
   // Per-chart HUD color palette (driven by currentChart.metadata.bgScheme).
   // We compute a handful of derivatives (lightened/darkened/alpha variants)
@@ -1765,19 +1829,19 @@ export function App() {
   // Progress bar
   const progressGradient = `linear-gradient(90deg, ${hudAccentLight} 0%, ${hudAccentDark} 100%)`;
 
-  // Cache the live chart's bg scheme so the HUD rAF can build the ambient
-  // gradient every frame without going through React state.
-  bgSchemeRef.current = currentChart.metadata.bgScheme;
-
-  // Paint an initial ambient background for the current chart so it's correct
-  // before the first HUD frame (and while paused / not yet playing). The HUD
-  // rAF overwrites it each frame during play; because the element has no
-  // `style` prop, React never resets it on re-renders.
+  // Paint the two ambient layers for the current chart. Both gradients are
+  // STATIC (base = min extent 18%, peak = max extent 58%); the HUD rAF only
+  // animates the top layer's opacity during play. Because neither element has a
+  // `style` prop, React never resets these imperative writes on re-renders.
   useEffect(() => {
     const bg = currentChart.metadata.bgScheme;
     if (ambientBgRef.current) {
       ambientBgRef.current.style.background =
-        `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} 21.6%, ${bg.gradientStart} 90%)`;
+        `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} 18%, ${bg.gradientStart} 90%)`;
+    }
+    if (ambientGlowRef.current) {
+      ambientGlowRef.current.style.background =
+        `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} 58%, ${bg.gradientStart} 90%)`;
     }
   }, [currentChart]);
 
@@ -1805,10 +1869,12 @@ export function App() {
       {quality.qualityMode === 'low' || quality.qualityMode === 'lite' ? (
         <div className="absolute inset-0 bg-[#0e1218] pointer-events-none z-0" />
       ) : (
-        <div
-          ref={ambientBgRef}
-          className="absolute inset-0 pointer-events-none opacity-75"
-        />
+        /* P2：两层静态径向渐变叠加，只动顶层 opacity（合成器完成，零重绘）。
+           base 层 = 最小光晕(18%)，glow 层 = 峰值光晕(58%)，opacity 0~1 由 HUD rAF 驱动。 */
+        <div className="absolute inset-0 pointer-events-none opacity-75">
+          <div ref={ambientBgRef} className="absolute inset-0" />
+          <div ref={ambientGlowRef} className="absolute inset-0 opacity-0" />
+        </div>
       )}
 
       {/* 3D Viewport — mounted lazily: only when entering the editor or a chart,
@@ -2037,19 +2103,23 @@ export function App() {
         >
           {/* Background-layer Combo (large, semi-transparent, behind notes) */}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            {stats.combo > 0 && (
-              <div className="flex flex-col items-center select-none">
-                <div
-                  className="text-[12rem] leading-none font-black font-orbitron text-white/[0.07] tracking-tighter"
-                  style={{ textShadow: 'none' }}
-                >
-                  {stats.combo}
-                </div>
-                <div className="text-sm font-bold uppercase tracking-[0.4em] text-white/[0.12] -mt-6">
-                  COMBO
-                </div>
+            {/* 连击数由 HUD rAF 直写（ref），初始隐藏，combo>0 时显示。 */}
+            <div
+              ref={comboWrapRef}
+              className="flex flex-col items-center select-none"
+              style={{ visibility: 'hidden' }}
+            >
+              <div
+                ref={comboNumRef}
+                className="text-[12rem] leading-none font-black font-orbitron text-white/[0.07] tracking-tighter"
+                style={{ textShadow: 'none' }}
+              >
+                0
               </div>
-            )}
+              <div className="text-sm font-bold uppercase tracking-[0.4em] text-white/[0.12] -mt-6">
+                COMBO
+              </div>
+            </div>
             {comboBurst && (
               <div
                 key={comboBurst.key}
@@ -2068,7 +2138,7 @@ export function App() {
 
           {/* Top HUD overlay */}
           <div className="absolute inset-x-0 top-0 z-10 pointer-events-none bg-gradient-to-b from-black/55 via-black/15 to-transparent">
-            <TimingBar markers={timingMarkers} accentColor={accent} />
+            <TimingBar ref={timingBarRef} key={playSession} accentColor={accent} />
 
             <div className="flex items-start justify-between px-4 pt-2">
               <div>
@@ -2094,11 +2164,11 @@ export function App() {
               </div>
               <div className="text-right">
                 <div className="text-[10px] font-bold uppercase tracking-widest text-white/50">Score</div>
-                <div className="text-3xl font-black font-orbitron tracking-tight gradient-text" style={{ backgroundImage: `linear-gradient(90deg, #ffffff 0%, ${hudAccentBright} 55%, #fcd34d 100%)` }}>
-                  {Math.round(stats.score).toLocaleString().padStart(8, '0')}
+                <div ref={scoreRef} className="text-3xl font-black font-orbitron tracking-tight gradient-text" style={{ backgroundImage: `linear-gradient(90deg, #ffffff 0%, ${hudAccentBright} 55%, #fcd34d 100%)` }}>
+                  00000000
                 </div>
-                <div style={{ color: hudAccentLight }} className="text-xs font-mono">
-                  ACC: {stats.accuracy.toFixed(2)}% | RANK: {potentialRank}
+                <div ref={accRankRef} style={{ color: hudAccentLight }} className="text-xs font-mono">
+                  ACC: 100.00% | RANK: --
                 </div>
               </div>
             </div>
@@ -2216,12 +2286,17 @@ export function App() {
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1)',
               }}
             >
+              {/* 由 transform: scaleX() 驱动（见 setProgressScale 的说明）：
+                  只过渡 transform，避免 width 触发布局 + transition-all 让过渡
+                  永远处于进行中。will-change-transform 让它独立成合成层，
+                  过渡期间完全不进入主线程样式重算。 */}
               <div
                 ref={progressRef}
-                className="h-full transition-all duration-100 rounded-full"
+                className="h-full w-full origin-left rounded-full transition-transform duration-100 ease-linear will-change-transform"
                 style={{
                   background: progressGradient,
                   boxShadow: `0 0 12px ${hudAccent60}`,
+                  transform: 'scaleX(0)',
                 }}
               />
             </div>

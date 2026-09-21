@@ -48,6 +48,8 @@ import {
   TOUCH_SIZE,
 } from '../shared/gameplaySpec';
 import { globalAudio } from '../audio/AudioManager';
+import { createFrameGate } from '../utils/frameLimiter';
+import { qualityStore } from '../qualityStore';
 
 /* ------------------------------------------------------------------ *
  * 相机 / 投影常量（镜像 Three.js PerspectiveCamera 与 GameCanvas）。
@@ -171,7 +173,29 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d', { alpha: false });
+    /*
+     * `desynchronized: true` —— 低延迟 canvas 呈现路径。
+     *
+     * 性能依据（Chrome trace，CPU 受限设备）：换到 2D 渲染器后 JS 只占墙钟
+     * 4.08%，但 `Commit`（把本帧图层内容交给合成线程）涨到 **8.17%**，且前 6 个
+     * 长任务里 89~97% 的时间是纯 Commit —— 其中三次达 190~224ms。全屏 canvas
+     * 每帧要搬约 10MB 位图，弱 SoC 的内存带宽扛不住。
+     *
+     * 该 hint 让 canvas 走自己的缓冲区直接呈现，绕过合成器那份拷贝，
+     * 正是给 canvas 游戏准备的路径（Chrome 支持；不支持的浏览器会忽略）。
+     * 与 `alpha: false`（不透明，省一次混合）配合效果最好。
+     *
+     * 代价：低延迟呈现可能带来轻微撕裂（tearing）。如真机观察到撕裂，
+     * 把 desynchronized 去掉即可回到原行为（其余优化不受影响）。
+     */
+    //  调试开关：URL 加 `?nodesync=1` 可临时关掉低延迟路径，便于同机 A/B 对比，
+    //  无需改代码重新构建（默认开启）。
+    const desyncDisabled =
+      typeof window !== 'undefined' && /[?&]nodesync=1/.test(window.location.search);
+    const ctx = canvas.getContext('2d', {
+      alpha: false,
+      desynchronized: !desyncDisabled,
+    });
     if (!ctx) return;
 
     /* ---------------- 视图 / 投影 ---------------- */
@@ -595,11 +619,21 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       ctx!.restore();
     }
 
+    /* 背景渐变缓存：渐变只随画布高度（resize）与两端颜色变化，原实现每帧都
+     * createLinearGradient + 两个 addColorStop，全屏栅格化一次。缓存后每帧仅
+     * 一次 fillRect。键含 view.h 与两端色，任一变化才重建。 */
+    let bgGrad: CanvasGradient | null = null;
+    let bgGradKey = '';
     function drawBackground(): void {
-      const g = ctx!.createLinearGradient(0, 0, 0, view.h);
-      g.addColorStop(0, game.bgStart);
-      g.addColorStop(1, game.bgEnd);
-      ctx!.fillStyle = g;
+      const key = `${view.h}|${game.bgStart}|${game.bgEnd}`;
+      if (!bgGrad || bgGradKey !== key) {
+        const g = ctx!.createLinearGradient(0, 0, 0, view.h);
+        g.addColorStop(0, game.bgStart);
+        g.addColorStop(1, game.bgEnd);
+        bgGrad = g;
+        bgGradKey = key;
+      }
+      ctx!.fillStyle = bgGrad;
       ctx!.fillRect(0, 0, view.w, view.h);
     }
 
@@ -1831,12 +1865,19 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     let lastRenderedTime = Number.NaN;
     let lastRenderedSelection: string | null = null;
     let lastRenderedMode = '';
+    // 帧率上限门控（设置-图形）：绘制工作量按目标帧率线性下降。
+    const frameGate = createFrameGate();
 
     function loop(): void {
       const p = propsRef.current;
       const renderDirty = renderState.dirty;
       const modeTag = p.isPlaying ? 'play' : p.isPaused ? 'pause' : p.isEditorMode ? 'edit' : 'idle';
       if (p.viewportActive === false) {
+        raf = requestAnimationFrame(loop);
+        return;
+      }
+      // 帧率上限：跳过超出的帧，rAF 链继续。
+      if (!frameGate(performance.now(), qualityStore.getSnapshot().maxFps)) {
         raf = requestAnimationFrame(loop);
         return;
       }
