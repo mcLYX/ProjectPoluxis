@@ -103,7 +103,10 @@
     ctx.fill();
     ctx.globalAlpha = p.alpha;
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    /* Head 2px / child 1px: the 2D pipe is a single flat ribbon, so child
+     * nodes need a thin outline to read as connected (3D is a solid mesh and
+     * needs none). */
+    ctx.lineWidth = isHead ? 2 : 1;
     ctx.stroke();
     ctx.restore();
   }

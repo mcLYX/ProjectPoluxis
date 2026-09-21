@@ -50,6 +50,40 @@
     game.notes = resolveChart(chart);
     game.events = resolveEvents(chart);
     game.speedPoints = extractSpeedPoints(game.events);
+    /* ---- 谱面预处理（一次性，镜像完整版 utils/chartRuntime）----
+     *  - 预计算每个音符 / slide 子节点的滚动距离（timeSec 一局内恒定）；
+     *  - 预计算 hasNegativeSpeed / minSpeed，省掉每帧对变速点的两遍全扫；
+     *  - 按滚动距离排序的音符索引 notesByDist + maxSlideScrollSpan，供负流速下
+     *    的「距离窗口」二分（时间窗口在负流速下不再连续）。 */
+    var _sp = game.speedPoints;
+    var _hasNeg = false;
+    var _minSpeed = 1;
+    for (var _si = 0; _si < _sp.length; _si++) {
+      if (_sp[_si].speed < 0) _hasNeg = true;
+      if (_sp[_si].speed < _minSpeed) _minSpeed = _sp[_si].speed;
+    }
+    game.hasNegativeSpeed = _hasNeg;
+    game.minSpeed = _minSpeed;
+    var _maxSlideScrollSpan = 0;
+    for (var _ni = 0; _ni < game.notes.length; _ni++) {
+      var _n = game.notes[_ni];
+      var _nd = getScrollDistance(_n.timeSec, _sp);
+      _n.scrollDist = _nd;
+      if (_n.resolvedNodes) {
+        for (var _ci = 0; _ci < _n.resolvedNodes.length; _ci++) {
+          var _cn = _n.resolvedNodes[_ci];
+          _cn.scrollDist = getScrollDistance(_cn.timeSec, _sp);
+          var _ds = _cn.scrollDist - _nd;
+          if (_ds < 0) _ds = -_ds;
+          if (_ds > _maxSlideScrollSpan) _maxSlideScrollSpan = _ds;
+        }
+      }
+    }
+    game.maxSlideScrollSpan = _maxSlideScrollSpan;
+    var _order = [];
+    for (var _oi = 0; _oi < game.notes.length; _oi++) _order.push(_oi);
+    _order.sort(function (a, b) { return game.notes[a].scrollDist - game.notes[b].scrollDist; });
+    game.notesByDist = _order;
     game.nextEventIdx = 0;
     game.currentSpeedMul = 1.0;
     game.currentNoteColor = null;
@@ -346,17 +380,10 @@
     ctx.restore();
   }
 
-  /* Binary search the visible window [firstIdx, lastIdx). Mirrors full version.
-   * Falls back to full range when negative speed events are present, because time
-   * order no longer matches spatial order (reverse scroll can make earlier
-   * notes appear farther away). */
+  /* Time window [firstIdx, lastIdx): notes are sorted by timeSec so a plain
+   * binary search suffices. Time-based ⇒ valid for ANY speed sign; used for
+   * judgement (miss / autoplay / hit-testing). Mirrors full version. */
   function findWindow(curTime, spawnLimit) {
-    var sp = game.speedPoints;
-    var hasNegativeSpeed = false;
-    for (var i = 0; i < sp.length; i++) { if (sp[i].speed < 0) { hasNegativeSpeed = true; break; } }
-    if (hasNegativeSpeed) {
-      return { first: 0, last: game.notes.length };
-    }
     var speed = game.speed * game.speedMul;
     var pastBuffer = 0.3 + (game.maxSlideSpan || 0), futureBuffer = -spawnLimit / speed + 0.3;
     var pastTh = curTime - pastBuffer, futureTh = curTime + futureBuffer;
@@ -367,13 +394,43 @@
     return { first: first, last: lo };
   }
 
+  /* Render window. Without negative speed events it is just the time window
+   * (order = null → iterate game.notes by index). With negative speed, S(t) is
+   * non-monotonic so the visible set is NOT a time interval; but z depends only
+   * on S(noteTime) - S(curTime), hence the visible set IS a contiguous interval
+   * in **scroll-distance** space → binary search the precomputed notesByDist.
+   * maxSlideScrollSpan widens the band so a slide whose head is outside but whose
+   * child is inside is still visited. Returns `order` (notesByDist) in that case. */
+  function renderWindow(curTime, spawnLimit) {
+    if (!game.hasNegativeSpeed) {
+      var w0 = findWindow(curTime, spawnLimit);
+      return { first: w0.first, last: w0.last, order: null };
+    }
+    var baseSpeed = game.speed * game.speedMul;
+    var curDist = game.curScrollDist;
+    /* z = JUDGE_Z - (nd - curDist) * baseSpeed; visible band z ∈ [spawnLimit, view.cd). */
+    var loD = (JUDGE_Z - view.cd) / baseSpeed;
+    var hiD = (JUDGE_Z - spawnLimit) / baseSpeed;
+    if (loD > hiD) { var tmp = loD; loD = hiD; hiD = tmp; }
+    var span = game.maxSlideScrollSpan || 0;
+    var dLo = curDist + loD - span, dHi = curDist + hiD + span;
+    var order = game.notesByDist, notes = game.notes;
+    var a = 0, b = order.length, mid2;
+    while (a < b) { mid2 = (a + b) >> 1; if (notes[order[mid2]].scrollDist < dLo) a = mid2 + 1; else b = mid2; }
+    var first2 = a; b = order.length;
+    while (a < b) { mid2 = (a + b) >> 1; if (notes[order[mid2]].scrollDist <= dHi) a = mid2 + 1; else b = mid2; }
+    return { first: first2, last: a, order: order };
+  }
+
   /* Compute z position using scroll distance integral (mirrors GameCanvas).
    * This ensures note spacing reflects speed changes before the event visually arrives,
-   * preventing teleportation artifacts when speed_change events trigger. */
-  function noteZPos(noteTimeSec, curTime, baseSpeed) {
-    var noteDist = getScrollDistance(noteTimeSec, game.speedPoints);
-    var curDist = getScrollDistance(curTime, game.speedPoints);
-    return JUDGE_Z - (noteDist - curDist) * baseSpeed;
+   * preventing teleportation artifacts when speed_change events trigger.
+   * `noteDist` is the note's precomputed scroll distance (see resetGame) — passing
+   * it avoids a per-note getScrollDistance() linear scan over speed points. */
+  function noteZPos(noteTimeSec, curTime, baseSpeed, noteDist) {
+    var nd = (noteDist === undefined || noteDist === null) ? getScrollDistance(noteTimeSec, game.speedPoints) : noteDist;
+    var curDist = (game.curScrollDist === undefined) ? getScrollDistance(curTime, game.speedPoints) : game.curScrollDist;
+    return JUDGE_Z - (nd - curDist) * baseSpeed;
   }
 
   function render() {
@@ -382,6 +439,8 @@
     var curTime = game.curTime;
     var baseSpeed = game.speed * game.speedMul;
     var spawnLimit = -game.renderDist;
+    /* 当前时刻的滚动距离：每帧只算一次（原实现 noteZPos 每音符都算一遍 → O(音符×变速点)）。 */
+    game.curScrollDist = getScrollDistance(curTime, game.speedPoints);
     var vScale = game.sizeScale;
     var colorHex = game.currentNoteColor || chart.metadata.noteColor || '#00f0ff';
 
@@ -403,12 +462,13 @@
     /* Combo number BEHIND everything (mirrors full version z-[1] layer). */
     drawCombo();
 
-    var win = findWindow(curTime, spawnLimit);
+    var win = renderWindow(curTime, spawnLimit);
+    var _ord = win.order;
 
     /* Two-pass: pipes + projections first (behind), then notes (front). */
     var toDrawNotes = [];
     for (var i = win.first; i < win.last; i++) {
-      var note = game.notes[i];
+      var note = _ord === null ? game.notes[i] : game.notes[_ord[i]];
       var nc = note.color || colorHex;
 
       if (note.type === 'slide') {
@@ -427,8 +487,8 @@
         for (var pi = 0; pi < allNodes.length - 1; pi++) {
           var nodeA = allNodes[pi];
           var nodeB = allNodes[pi + 1];
-          var zA = noteZPos(nodeA.timeSec, curTime, baseSpeed);
-          var zB = noteZPos(nodeB.timeSec, curTime, baseSpeed);
+          var zA = noteZPos(nodeA.timeSec, curTime, baseSpeed, nodeA.scrollDist);
+          var zB = noteZPos(nodeB.timeSec, curTime, baseSpeed, nodeB.scrollDist);
           var keyA = note.id + '#' + pi;
           var keyB = note.id + '#' + (pi + 1);
           var judgedA = !!game.judged[keyA];
@@ -508,7 +568,15 @@
             var wx = nodeA.x + easeFn(tt) * ex;
             var wy = nodeA.y + easeFn(tt) * ey;
             var wz = zAtTau(tt);
+            /* Tail node not yet visible → visible band ends exactly at the far
+             * plane (spawnLimit). Floating-point error makes zAtTau(visHi) fall
+             * marginally below spawnLimit on some frames, so project() rejects
+             * it and the sample count flickers 16↔17. That re-spaces the
+             * k/(n-1) gradient stops in drawPipeCurve → the whole pipe gradient
+             * twinkles. Clamp out-of-range samples to the plane (never skip) so
+             * the sample count — and the gradient — stays stable. */
             var p = project(wx, wy, wz, spawnLimit);
+            if (!p) p = project(wx, wy, Math.max(spawnLimit, wz), spawnLimit);
             if (!p) continue;
             var a = Math.max(0.1, Math.min(1, (wz - spawnLimit) / FADE_ZONE));
             samples.push({ x: p.x, y: p.y, scale: p.scale, alpha: a });
@@ -584,7 +652,7 @@
         for (var nj = 0; nj < allNodes.length; nj++) {
           var slideNodeKey = note.id + '#' + nj;
           if (game.judged[slideNodeKey]) continue;
-          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed);
+          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist);
           var np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
           if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj, angle: allNodes[nj].angle });
           /* Projection guide for slide head only (children inherit head's path). */
@@ -594,7 +662,7 @@
         /* tap / touch */
         var tkey = note.id;
         if (game.judged[tkey]) continue;
-        var tz = noteZPos(note.timeSec, curTime, baseSpeed);
+        var tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist);
         var tp = project(note.x, note.y, tz, spawnLimit);
         if (tp) {
           toDrawNotes.push({ p: tp, kind: note.type, color: nc, noteId: note.id, wx: note.x, wy: note.y, timeSec: note.timeSec, angle: note.angle });
@@ -805,7 +873,7 @@
 
   /* Slide chain state helpers — mirror GameCanvas slideStateRef. */
   function getAllSlideNodes(note) {
-    var nodes = [{ x: note.x, y: note.y, timeSec: note.timeSec }];
+    var nodes = [{ x: note.x, y: note.y, timeSec: note.timeSec, scrollDist: note.scrollDist }];
     if (note.resolvedNodes) for (var s = 0; s < note.resolvedNodes.length; s++) nodes.push(note.resolvedNodes[s]);
     return nodes;
   }

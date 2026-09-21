@@ -5,7 +5,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, QualityMode, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
-import { getChartRuntime, scrollDistanceAt } from '../utils/chartRuntime';
+import { getChartRuntime, scrollDistanceAt, scrollDistWindow } from '../utils/chartRuntime';
 import { createFrameGate } from '../utils/frameLimiter';
 import { qualityStore } from '../qualityStore';
 import { EASING_FNS } from '../utils/easing';
@@ -736,6 +736,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
    *  frame's window. The notes array identity is stored so a chart change
    *  (which clears meshes via resetPlayState) invalidates the stale window. */
   const lastWindowRef = useRef<{ firstIdx: number; lastIdx: number; notes: ResolvedNote[] | null }>({ firstIdx: 0, lastIdx: 0, notes: null });
+  /** 负流速：并集遍历的复用缓冲（每帧 reset，避免分配）。 */
+  const unionScratchRef = useRef<number[]>([]);
+  /** 负流速：并集去重的帧戳数组 + 当前帧号。 */
+  const unionStampRef = useRef<{ arr: Int32Array | null; frame: number }>({ arr: null, frame: 0 });
+  /** 负流速：上一帧访问过的音符下标（用于幽灵网格的帧戳差分清理）。 */
+  const lastVisitedRef = useRef<{ notes: ResolvedNote[] | null; list: number[] }>({ notes: null, list: [] });
   const touchTrackRef = useRef<Map<string, TouchTrackState>>(new Map());
   const slideStateRef = useRef<Map<string, SlideRt>>(new Map());
 
@@ -2284,8 +2290,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // 预处理层已算好（原实现每帧全扫两遍 speedPoints）。
     const hasNegativeSpeed = runtimeRef.current.hasNegativeSpeed;
 
+    // 迭代源：
+    //  - 非负流速：时间窗连续区间 [firstIdx, lastIdx)（原路径逐位不变）。
+    //  - 含负流速：时间窗 ∪ 距离窗 的并集（unionList）。判定是时间语义、渲染是
+    //    滚动距离语义，负流速下 S(t) 非单调使二者不再重合，任一方单独用都会漏
+    //    音符（判定漏 → 静默丢 Miss；渲染漏 → 音符不显示）。
     let firstIdx = 0;
     let lastIdx = notes.length;
+    let unionList: number[] | null = null;
 
     if (!hasNegativeSpeed) {
       // Sliding window: only iterate notes whose time falls within
@@ -2326,6 +2338,83 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         else hi = mid;
       }
       lastIdx = lo;
+    } else {
+      const rt = runtimeRef.current;
+
+      // ---- 时间窗（判定语义）----
+      // 判定只需覆盖命中窗 + slide 跨度。负速时 minSpeed 可能为负/极小，直接代入
+      // 会得到无效/超长窗口；这里用 |minSpeed| 且下限取 1，得到有限的保守窗口。
+      const pastBuffer = 0.3 + maxSlideSpanRef.current;
+      const speedMag = Math.max(1, Math.abs(rt.minSpeed));
+      const futureBuffer = -spawnLimit / (36 * globalSpeed * speedMag) + 0.3;
+      const pastThreshold = curTime - pastBuffer;
+      const futureThreshold = curTime + futureBuffer;
+      let lo = 0;
+      let hi = notes.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (notes[mid].timeSec < pastThreshold) lo = mid + 1;
+        else hi = mid;
+      }
+      const tFirst = lo;
+      lo = tFirst;
+      hi = notes.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (notes[mid].timeSec <= futureThreshold) lo = mid + 1;
+        else hi = mid;
+      }
+      const tLast = lo;
+
+      // ---- 距离窗（渲染语义）----
+      // z = JUDGE_Z - (nd - curScrollDist) * unitPerSecond；可见带 z ∈ [spawnLimit, 6]。
+      const span = rt.maxSlideScrollSpan;
+      let dLo = (JUDGE_Z - 6) / unitPerSecond;
+      let dHi = (JUDGE_Z - spawnLimit) / unitPerSecond;
+      if (dLo > dHi) {
+        const t = dLo;
+        dLo = dHi;
+        dHi = t;
+      }
+      const order = rt.notesByDist;
+      const dw = scrollDistWindow(rt, curScrollDist, dLo - span, dHi + span);
+
+      // ---- 并集 + 帧戳去重（零分配）----
+      const stampState = unionStampRef.current;
+      if (!stampState.arr || stampState.arr.length !== notes.length) {
+        stampState.arr = new Int32Array(notes.length);
+        stampState.frame = 0;
+      }
+      stampState.frame++;
+      const frameStamp = stampState.frame;
+      const stamp = stampState.arr;
+      const prevVisited = lastVisitedRef.current;
+      if (prevVisited.notes !== notes) {
+        // 谱面变化：上一帧的访问记录已失效（网格由 resetPlayState 重建）。
+        prevVisited.notes = notes;
+        prevVisited.list.length = 0;
+      }
+      const list = unionScratchRef.current;
+      list.length = 0;
+      for (let i = tFirst; i < tLast; i++) {
+        if (stamp[i] !== frameStamp) { stamp[i] = frameStamp; list.push(i); }
+      }
+      for (let k = dw.first; k < dw.last; k++) {
+        const i = order[k];
+        if (stamp[i] !== frameStamp) { stamp[i] = frameStamp; list.push(i); }
+      }
+      // 幽灵网格清理：上一帧访问过、本帧未访问的音符隐藏（帧戳差分，替代连续窗口差）。
+      const prevList = prevVisited.list;
+      for (let q = 0; q < prevList.length; q++) {
+        const idx = prevList[q];
+        if (stamp[idx] !== frameStamp) hideNoteMeshes(notes[idx]);
+      }
+      // 交换缓冲：本帧列表成为下一帧的「上一帧列表」，旧缓冲清空后复用（零分配）。
+      const recycled = prevVisited.list;
+      prevVisited.list = list;
+      unionScratchRef.current = recycled;
+      recycled.length = 0;
+      unionList = list;
     }
 
     // ---- Window cleanup: hide notes that were visible last frame but have
@@ -2340,9 +2429,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // old window (~visible count) only right after a seek, which is exactly
     // when we need to retire them.
     //
-    // When negative speed is present we iterate ALL notes every frame, so the
-    // cleanup pass is unnecessary — every note's visibility is refreshed each
-    // frame by the per-note `vis` check.
+    // 含负流速时改走上面的帧戳差分，故这里只处理非负路径。
     if (!hasNegativeSpeed) {
       const lw = lastWindowRef.current;
       if (lw.notes === notes && lw.lastIdx > lw.firstIdx) {
@@ -2362,7 +2449,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       lwNow.notes = notes;
     }
 
-    for (let noteIdx = firstIdx; noteIdx < lastIdx; noteIdx++) {
+    const iterTotal = unionList === null ? lastIdx - firstIdx : unionList.length;
+    for (let q = 0; q < iterTotal; q++) {
+      const noteIdx = unionList === null ? firstIdx + q : unionList[q];
       const note = notes[noteIdx];
       const noteEffectiveColor = note.color || colorHex;
 

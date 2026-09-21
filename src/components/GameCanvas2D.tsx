@@ -33,7 +33,7 @@ import {
   secondsToBeatMultiBpm,
   type SpeedPoint,
 } from '../utils/beatTime';
-import { getChartRuntime, scrollDistanceAt, type ChartRuntime } from '../utils/chartRuntime';
+import { getChartRuntime, scrollDistanceAt, scrollDistWindow, type ChartRuntime } from '../utils/chartRuntime';
 import { calculateNoteScore, evaluateJudgement } from '../utils/scoring';
 import { EASING_FNS } from '../shared/easing';
 import { JUDGE_COLORS, JUDGE_SCALE } from '../shared/gameplaySpec';
@@ -442,11 +442,12 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       ctx!.lineTo(-f, 0);
       ctx!.closePath();
       ctx!.fill();
-      /* 内框（仅头节点） */
-      if (isHead && skin.innerEnabled) {
+      /* 内框：头节点 2px、子节点 1px。2D 管道是一整片 ribbon，子节点若无描边
+       * 就看不出节点间的连接关系（3D 是立体 mesh，故不需要描边）。 */
+      if (skin.innerEnabled) {
         ctx!.globalAlpha = 0.85 * fade;
         ctx!.strokeStyle = color;
-        ctx!.lineWidth = 2;
+        ctx!.lineWidth = isHead ? 2 : 1;
         ctx!.beginPath();
         ctx!.moveTo(0, -half);
         ctx!.lineTo(half, 0);
@@ -833,16 +834,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     }
 
     /* ---------------- 窗口搜索 / z 推导（镜像 GameCanvas） ---------------- */
-    function findWindow(curTime: number, spawnLimit: number): { first: number; last: number } {
-      const sp = game.speedPoints;
-      let hasNegative = false;
-      for (const s of sp) {
-        if (s.speed < 0) {
-          hasNegative = true;
-          break;
-        }
-      }
-      if (hasNegative) return { first: 0, last: game.notes.length };
+    /**
+     * 时间窗（**判定语义**，与流速符号无关）：音符按 timeSec 升序 → 二分。
+     * 判定天然是时间事件（命中窗 / 迟 Miss / slide 跨度），故含负流速时也用它。
+     */
+    function timeWindow(curTime: number, spawnLimit: number): { first: number; last: number } {
       const speed = game.speed * game.speedMul;
       const pastBuffer = 0.3 + (game.maxSlideSpan || 0);
       const futureBuffer = -spawnLimit / speed + 0.3;
@@ -865,6 +861,43 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         else hi = mid;
       }
       return { first, last: lo };
+    }
+
+    /**
+     * 渲染窗。正常流速（无负速事件）沿用时间窗，`order` 为 null（按 notes 原序）。
+     *
+     * 含负流速时 timeSec 空间不再连续（S(t) 非单调，后出现的音符可能更近），
+     * 时间二分失效；但可见性 `z = JUDGE_Z - (S(noteTime) - S(curTime)) * baseSpeed`
+     * 只依赖 **S 的差值**，因此落在深度带 `z ∈ [spawnLimit, view.cd)` 的音符在**滚动
+     * 距离空间**上恒为一段连续区间。故改用 `notesByDist`（按 scrollDist 排序）二分，
+     * 并用 `maxSlideScrollSpan` 外扩以覆盖「slide 头在窗外、子节点在窗内」。
+     * 返回 `order = notesByDist`，调用方按 `notes[order[k]]` 取音符。
+     */
+    function renderWindow(
+      curTime: number,
+      spawnLimit: number
+    ): { first: number; last: number; order: Int32Array | null } {
+      const rt = game.runtime;
+      const baseSpeed = game.speed * game.speedMul;
+      if (!rt || !rt.hasNegativeSpeed) {
+        const w = timeWindow(curTime, spawnLimit);
+        return { first: w.first, last: w.last, order: null };
+      }
+      const curDist = scrollDistanceAt(rt, curTime);
+      // z = JUDGE_Z - (nd - curDist) * baseSpeed；可见带 z ∈ [spawnLimit, view.cd)。
+      // 注意：2D 的 tap/touch 仅经 project() 裁剪（z < spawnLimit 或 depth<=0.1 才隐藏），
+      // 没有 3D 那样的 z <= 6 上界，故下界取近平面 view.cd（slide 另有 z>0 双侧裁剪，
+      // 多纳入一些音符无害）。
+      let lo = (JUDGE_Z - view.cd) / baseSpeed;
+      let hi = (JUDGE_Z - spawnLimit) / baseSpeed;
+      if (lo > hi) {
+        const t = lo;
+        lo = hi;
+        hi = t;
+      }
+      const span = rt.maxSlideScrollSpan;
+      const w = scrollDistWindow(rt, curDist, lo - span, hi + span);
+      return { first: w.first, last: w.last, order: rt.notesByDist };
     }
 
     /**
@@ -1185,7 +1218,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     /* ---------------- 每帧判定遍历 ---------------- */
     function processAllNotes(curTime: number): void {
-      const win = findWindow(curTime, -game.renderDist);
+      // 判定用时间窗（与流速符号无关）。
+      const win = timeWindow(curTime, -game.renderDist);
       for (let i = win.first; i < win.last; i++) {
         const n = game.notes[i];
         if (n.type === 'slide') {
@@ -1270,7 +1304,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const toggles = ((chart.metadata as ChartData['metadata'] & { effectToggles?: { gridLines?: boolean } }).effectToggles) || {};
       if (toggles.gridLines !== false) drawTunnel(spawnLimit);
 
-      const win = findWindow(curTime, spawnLimit);
+      const win = renderWindow(curTime, spawnLimit);
+      const winOrder = win.order;
       const toDraw: {
         p: P2;
         kind: NoteType;
@@ -1282,8 +1317,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         angle: number;
       }[] = [];
 
-      for (let i = win.first; i < win.last; i++) {
-        const note = game.notes[i];
+      for (let k = win.first; k < win.last; k++) {
+        const note = winOrder === null ? game.notes[k] : game.notes[winOrder[k]];
         const nc = note.color || colorHex;
 
         if (note.type === 'slide') {
@@ -1360,7 +1395,13 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
               const wx = nodeA.x + easeFn(tt) * ex;
               const wy = nodeA.y + easeFn(tt) * ey;
               const wz = zAtTau(tt);
-              const p = project(wx, wy, wz, spawnLimit);
+              /* 尾节点尚未出现时，可见带上端止于远平面 spawnLimit；此处
+               * zAtTau(visHi) 的浮点误差会让样本(不)满足 nz<spawnLimit 而
+               * 被 project 拒掉 → 样本数在 16/17 间抖动 → drawPipeCurve 里
+               * 按 k/(n-1) 均布的渐变 stops 整体错位 → 整条管道渐变闪烁。
+               * 故越界样本夹到平面重投，保持样本数恒定（不 continue）。 */
+              let p = project(wx, wy, wz, spawnLimit);
+              if (!p) p = project(wx, wy, Math.max(spawnLimit, wz), spawnLimit);
               if (!p) continue;
               const a = Math.max(0.1, Math.min(1, (wz - spawnLimit) / FADE_ZONE));
               samples.push({ x: p.x, y: p.y, scale: p.scale, alpha: a });
@@ -1531,7 +1572,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     /** tap 命中（pointerdown 即时判定）；含同刻重叠合并（方案二）。 */
     function findHitTapNote(wx: number, wy: number, curTime: number): ResolvedNote | null {
       const overlapSet: ResolvedNote[] = [];
-      const win = findWindow(curTime, -game.renderDist);
+      // 命中判定用时间窗（与流速符号无关）。
+      const win = timeWindow(curTime, -game.renderDist);
       for (let i = win.first; i < win.last; i++) {
         const n = game.notes[i];
         if (n.type !== 'tap') continue;

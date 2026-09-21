@@ -294,6 +294,12 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
 
+    /** 按 beat 升序的音符下标索引缓存（key = chart.notes 数组身份；元数据编辑不会
+     *  改变该数组引用，因此不触发重建）。用于把每帧的全谱遍历换成二分窗口。 */
+    let orderCache: { notes: NoteData[]; order: Int32Array; maxSpan: number } | null = null;
+    /** 多选集合缓存（key = selectedIds 数组身份），避免每帧 `new Set`。 */
+    let multiSetCache: { ids: readonly string[]; set: Set<string> | null } = { ids: [], set: null };
+
     const draw = () => {
       const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
       const chart = chartRef.current;
@@ -478,7 +484,47 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       type Item = { id: string; type: NoteData['type']; beat: number; x: number; color: string; angle: number };
       const items: Item[] = [];
       const slideChains: Array<{ id: string; type: NoteData['type']; color: string; pts: Array<{ x: number; beat: number; easing: EasingType }> }> = [];
-      for (const n of chart.notes) {
+      // ---- 可见音符窗口（二分）----
+      // 原实现每帧 `for (const n of chart.notes)` 全谱遍历（裁剪只减少绘制、不减少
+      // 遍历量）；数千音符的谱面在编辑器里即数千次/帧 × 60fps。这里按 beat 建一次
+      // 排序索引，每帧二分 [winMin, winMax] 只遍历可见区间；并按最长 slide 跨度外扩，
+      // 保证「头在窗外、子节点在窗内」的 slide 仍被构建（与原逻辑等价）。
+      const notes = chart.notes;
+      if (orderCache === null || orderCache.notes !== notes) {
+        const m = notes.length;
+        const order = new Int32Array(m);
+        for (let i = 0; i < m; i++) order[i] = i;
+        order.sort((a, b) => notes[a].beat - notes[b].beat);
+        let maxSpan = 0;
+        for (let i = 0; i < m; i++) {
+          const nds = notes[i].nodes;
+          if (nds) {
+            for (let k = 0; k < nds.length; k++) {
+              const s = nds[k].beat - notes[i].beat;
+              if (s > maxSpan) maxSpan = s;
+            }
+          }
+        }
+        orderCache = { notes, order, maxSpan };
+      }
+      const order = orderCache.order;
+      const slideSpan = orderCache.maxSpan;
+      const loBeat = winMin - slideSpan;
+      const hiBeat = winMax + slideSpan;
+      let firstN = 0;
+      let lastN = order.length;
+      {
+        let lo = 0;
+        let hi = order.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (notes[order[mid]].beat < loBeat) lo = mid + 1; else hi = mid; }
+        firstN = lo;
+        lo = firstN;
+        hi = order.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (notes[order[mid]].beat <= hiBeat) lo = mid + 1; else hi = mid; }
+        lastN = lo;
+      }
+      for (let _k = firstN; _k < lastN; _k++) {
+        const n = notes[order[_k]];
         const color = n.color || noteColor;
         const headAngle = n.angle ?? 0;
         const mp = multiPos(n.id);
@@ -578,7 +624,10 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
       // Draw notes (future first so near-line notes draw on top)
       const multiIds = selectedIdsRef.current;
-      const multiSet = multiIds.length > 0 ? new Set(multiIds) : null;
+      if (multiSetCache.ids !== multiIds) {
+        multiSetCache = { ids: multiIds, set: multiIds.length > 0 ? new Set(multiIds) : null };
+      }
+      const multiSet = multiSetCache.set;
       for (const it of items) {
         const tb = beatToSecondsMultiBpm(it.beat, bpm, offset, bpmlist);
         const { px, py } = worldToPixel(tb, it.x, cssW, cssH, curTime);

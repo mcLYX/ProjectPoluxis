@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 // 重度/非首屏组件按需懒加载，降低菜单首屏 JS 体积（three 等仅在使用时下载）。
 const GameCanvas = lazy(() => import('./components/GameCanvas').then(m => ({ default: m.GameCanvas })));
 // 2D canvas renderer (quality 'lite'). Does NOT import three.js, so its chunk stays tiny.
@@ -16,6 +16,7 @@ import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong
 import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
+import { editorTimeStore } from './editorTimeStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
 import { getSkin, loadSkinImages, loadSkinTextures } from './data/skinStore';
 import type { EditorLaunchInfo, SongItem } from './types/beatmap';
@@ -23,7 +24,7 @@ import { calculateNoteScore, calculateRank } from './utils/scoring';
 import { clampInt } from './utils/math';
 import { safeStorage } from './utils/storage';
 import { createFrameGate } from './utils/frameLimiter';
-import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime, getBpmAtBeat } from './utils/beatTime';
+import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime } from './utils/beatTime';
 import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
 import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats, getAllHighScores, mergeCloudHighScores, type HighScoreMap } from './utils/scoreStore';
 import { getPlatform, hasPlatformIdentity } from './platform';
@@ -342,16 +343,11 @@ export function App() {
   const judgementQueueRef = useRef<JudgementFeedback[]>([]);
   const judgementFlushRafRef = useRef<number | null>(null);
   const lastJudgementFlushRef = useRef(0);
-  // Ambient background is driven imperatively (ref + direct DOM writes inside
-  // the HUD rAF) instead of React state. Pushing it every frame via setState
-  // forced a full 60fps App reconciliation that saturated one CPU core on
-  // mobile; the rAF now mutates the DOM node directly while keeping the exact
-  // same gradient, so visuals are unchanged but React never re-renders.
+  // Ambient background is a STATIC radial gradient applied imperatively (set
+  // once per chart, see the effect below) — never via React state and never per
+  // frame. (Its old loudness/beat pulse was removed: it was mid-quality only and
+  // didn't fit the current music.)
   const ambientBgRef = useRef<HTMLDivElement | null>(null);
-  // P2：光晕脉搏改由「顶层预渲染渐变的 opacity」驱动（见 HUD rAF 与下方 JSX）。
-  // 原先每帧重写 style.background（全屏径向渐变重新栅格化）代价很高；现改为两层
-  // 静态渐变叠加，只动顶层 opacity —— 纯合成器操作，不触发样式重算/重绘。
-  const ambientGlowRef = useRef<HTMLDivElement | null>(null);
   // Live mirror of the current chart so editor callbacks can read fresh notes
   // without adding `currentChart` to their dependency arrays (which would make
   // the place handler stale between rapid placements).
@@ -585,12 +581,15 @@ export function App() {
     currentChart.metadata.offset || 0,
     currentChart.metadata.bpmlist
   );
-  // Mirror currentBeat into a ref so editor handlers can read it without
-  // depending on currentBeat (which changes every frame → would break
-  // useCallback memoization and cause GameCanvas to re-render every
-  // frame via unstable callback identities).
-  const currentBeatRef = useRef(currentBeat);
-  currentBeatRef.current = currentBeat;
+  // 编辑器处理器读取「当前播放头」一律走 editorTimeStore（见下方 effect 与 HUD rAF）：
+  // 预览播放时它由 rAF 实时写入，非预览时与 gameTime 同步；读取方无需依赖会每帧变化的
+  // currentBeat，从而保持 useCallback 身份稳定（避免 GameCanvas 被无谓重渲染）。
+
+  // 把（低频的）gameTime 变化同步进编辑器时间源：seek / 暂停 / 进出编辑器时让编辑器
+  // 显示立即跟上。预览播放期间由 HUD rAF 直接写 store，本 effect 不参与（gameTime 不变）。
+  useEffect(() => {
+    editorTimeStore.set({ timeSec: gameTime, beat: currentBeat });
+  }, [gameTime, currentBeat]);
 
   const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string) => {
     // Reset the end-of-song lock BEFORE the fade-out timer starts, so the
@@ -677,12 +676,15 @@ export function App() {
 
     // Resolve the start position. On a recorded restart this is the point where
     // the current play-test started; otherwise it's the live editor playhead (or 0).
+    // 编辑器播放头时间源（预览播放期间由 HUD rAF 实时写入；非预览时与 gameTime 同步）。
+    // 用它而非 gameTime：预览播放时 gameTime 不再每帧更新。
+    const editorTime = editorTimeStore.getSnapshot();
     const startBeat = restartFromRecorded
       ? playTestStartBeatRef.current
-      : (fromCurrentBeat ? currentBeatRef.current : 0);
+      : (fromCurrentBeat ? editorTime.beat : 0);
     const startSec = restartFromRecorded
       ? playTestStartSecRef.current
-      : (fromCurrentBeat ? gameTime : 0);
+      : (fromCurrentBeat ? editorTime.timeSec : 0);
     playTestStartBeatRef.current = startBeat;
     playTestStartSecRef.current = startSec;
     playTestFromCurrentRef.current = restartFromRecorded ? playTestFromCurrentRef.current : fromCurrentBeat;
@@ -720,7 +722,7 @@ export function App() {
         transitionTimerRef.current = null;
       }, 300);
     }, 200);
-  }, [currentChart, hasCustomAudio, audioOffsetMs, gameTime]);
+  }, [currentChart, hasCustomAudio, audioOffsetMs]);
 
   /**
    * Exit play-test mode and return to the editor.
@@ -1322,12 +1324,12 @@ export function App() {
    *  One notch = exactly one snap subdivision. Scroll down = forward. */
   const handleEditorWheel = useCallback((e: React.WheelEvent) => {
     if (gameState !== 'editor') return;
-    const { bpm, offset, bpmlist } = currentChart.metadata;
     const dir = e.deltaY > 0 ? 1 : -1;
     const deltaBeats = dir * (snapSubdivision || 0.25);
-    const curBeat = secondsToBeatMultiBpm(gameTime, bpm, offset || 0, bpmlist);
+    // 用时间源而非 gameTime：预览播放期间 gameTime 不再每帧更新。
+    const curBeat = editorTimeStore.getSnapshot().beat;
     handleSeekBeat(curBeat + deltaBeats);
-  }, [gameState, gameTime, currentChart, snapSubdivision, handleSeekBeat]);
+  }, [gameState, snapSubdivision, handleSeekBeat]);
 
   // 编辑器放置工具快捷键：q=tap, w=touch, e=slide, r=select(移动)
   useEffect(() => {
@@ -1399,19 +1401,17 @@ export function App() {
       // time DIRECTLY from globalAudio in its own rAF, so it is completely
       // independent of this throttle.
       // Everything the HUD shows is written imperatively here (progress bar,
-      // combo, score, ACC/RANK, ambient bg) — no React state involved, so App
-      // does not reconcile during play. ~30fps is plenty for these non-motion
-      // elements. (Lite has no React at all; this is what closes the gap.)
+      // combo, score, ACC/RANK) — no React state involved, so App does not
+      // reconcile during play. ~30fps is plenty for these non-motion elements.
+      // (Lite has no React at all; this is what closes the gap.)
       // Time-based throttling replaces the old frame%3 counter. On a 144Hz
       // display the rAF fires ~144x/sec, so a frame-count throttle silently
       // became ~48fps of updates — the main mobile CPU hog.
-      //   glow/BPM pulse → ~60fps (keeps the 12ms attack visible)
       //   progress bar   → ~30fps (imperative DOM write, no React re-render)
       //   combo/score/ACC/RANK → ~30fps (imperative DOM writes from statsRef)
       // During pure gameplay we never call setGameTime/setStats, so App never
       // reconciles while playing. Editor preview still needs reactive time for
       // its timeline. The rAF is additionally gated by the user's frame cap.
-      let lastGlow = 0;
       let lastHud = 0;
       // 兼容模式校准：每 5000ms 检测一次谱面墙钟与音频真实位置的偏差。
       // 节流到 5s 保持音频完整性——只有持续落后才重建 buffer，避免频繁 seek 噪声。
@@ -1424,9 +1424,7 @@ export function App() {
           gameTimerRef.current = requestAnimationFrame(tick);
           return;
         }
-        const doGlow = nowMs - lastGlow >= 16;
         const doHud = nowMs - lastHud >= 33;
-        if (doGlow) lastGlow = nowMs;
         if (doHud) lastHud = nowMs;
 
         // 兼容模式校准（仅 playing 且开启时）：音频时钟停滞时，把音频 buffer
@@ -1443,38 +1441,17 @@ export function App() {
 
         const inEditorPreview = gameState === 'editor';
 
-        // 环境光晕只对「有渐变背景层」的档位有意义：low / lite 渲染的是**纯色层**，
-        // ambientGlowRef 为 null —— 这段（含每 16ms 一次的 FFT 采样与秒→拍换算）
-        // 算出的结果会被直接丢弃。这里显式跳过，省掉 2D/Lite 档的纯浪费 CPU。
-        // 画面表现零变化（纯色层本来就不吃这两个值）。
-        const ambientGlowEnabled = quality.qualityMode !== 'low' && quality.qualityMode !== 'lite';
-        if (ambientGlowEnabled) {
-          // Pump current BPM into the audio clock (~60fps) so the pulse stays
-          // tempo-synced across BPM shifts. Derived from the LIVE audio time
-          // (not React state) to avoid stale-beat drift.
-          if (doGlow) {
-            const curT = globalAudio.getCurrentTime();
-            const beat = secondsToBeatMultiBpm(
-              curT,
-              currentChart.metadata.bpm,
-              currentChart.metadata.offset || 0,
-              currentChart.metadata.bpmlist
-            );
-            globalAudio.setCurrentBpm(getBpmAtBeat(beat, currentChart.metadata.bpm, currentChart.metadata.bpmlist));
-            const f = globalAudio.getAudioFrequencyData();
-            // 光晕脉搏 = 顶层渐变（峰值形态）的 opacity：t=0 → 基准渐变(18%)，
-            // t=1 → 峰值渐变(58%)，与原先 extent 18~58 的端点一一对应；中间由
-            // 两层不透明渐变按 alpha 线性混合，视觉与原「改变 extent」几乎一致。
-            if (ambientGlowRef.current) {
-              const t = (f.loudness * 18 + f.beatPulse * 22) / 40;
-              ambientGlowRef.current.style.opacity = String(t < 0 ? 0 : t > 1 ? 1 : t);
-            }
-          }
-        }
-
         if (doHud) {
           const t = globalAudio.getCurrentTime();
-          if (inEditorPreview) setGameTime(t);
+          if (inEditorPreview) {
+            // 编辑器预览：时间经 store 下发，只有订阅它的微型组件重渲染 ——
+            // 不再 setGameTime，从而消除「整个 App 每 30fps 全树重渲染」。
+            const md = currentChartRef.current.metadata;
+            editorTimeStore.set({
+              timeSec: t,
+              beat: secondsToBeatMultiBpm(t, md.bpm, md.offset || 0, md.bpmlist),
+            });
+          }
           setProgressScale(progressRef.current, t / (chartDurationRef.current || 1));
           writeHudFromStats();
         }
@@ -1492,7 +1469,7 @@ export function App() {
 
   // Visual Editor Callbacks
   const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number): { id: string; x: number; y: number; beat: number } | null => {
-    const exactBeat = Math.round((beat ?? currentBeatRef.current) * 1000) / 1000;
+    const exactBeat = Math.round((beat ?? editorTimeStore.getSnapshot().beat) * 1000) / 1000;
 
     const noteType: NoteData['type'] =
       editorTool === 'place-slide' ? 'slide' : editorTool === 'place-touch' ? 'touch' : 'tap';
@@ -1769,7 +1746,7 @@ export function App() {
     setSelectedNoteIds([]);
   }, []);
 
-  const chartDuration = getChartDuration(currentChart);
+  const chartDuration = useMemo(() => getChartDuration(currentChart), [currentChart]);
   chartDurationRef.current = chartDuration;
   // =========================================================================
   // Per-chart HUD color palette (driven by currentChart.metadata.bgScheme).
@@ -1829,19 +1806,15 @@ export function App() {
   // Progress bar
   const progressGradient = `linear-gradient(90deg, ${hudAccentLight} 0%, ${hudAccentDark} 100%)`;
 
-  // Paint the two ambient layers for the current chart. Both gradients are
-  // STATIC (base = min extent 18%, peak = max extent 58%); the HUD rAF only
-  // animates the top layer's opacity during play. Because neither element has a
-  // `style` prop, React never resets these imperative writes on re-renders.
+  // Paint the ambient background for the current chart. It is a STATIC radial
+  // gradient (set once per chart, never touched per frame), so it costs nothing
+  // during play. Because the element has no `style` prop, React never resets this
+  // imperative write on re-renders.
   useEffect(() => {
     const bg = currentChart.metadata.bgScheme;
     if (ambientBgRef.current) {
       ambientBgRef.current.style.background =
-        `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} 18%, ${bg.gradientStart} 90%)`;
-    }
-    if (ambientGlowRef.current) {
-      ambientGlowRef.current.style.background =
-        `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} 58%, ${bg.gradientStart} 90%)`;
+        `radial-gradient(circle at 50% 50%, ${bg.gradientEnd} 21.6%, ${bg.gradientStart} 90%)`;
     }
   }, [currentChart]);
 
@@ -1865,16 +1838,14 @@ export function App() {
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-[#0a0d12] select-none text-white font-rajdhani">
-      {/* Dynamic Ambient BG — fully static dark color in Low Quality Mode to save massive shader resources */}
-      {quality.qualityMode === 'low' || quality.qualityMode === 'lite' ? (
+      {/* Static ambient background: a radial gradient painted once per chart (no
+          per-frame work). Rendered for every 3D tier — the WebGL canvas is
+          alpha:true, so the low tier now gets the gradient background too.
+          'lite' draws its own background inside GameCanvas2D, so it's skipped. */}
+      {quality.qualityMode === 'lite' ? (
         <div className="absolute inset-0 bg-[#0e1218] pointer-events-none z-0" />
       ) : (
-        /* P2：两层静态径向渐变叠加，只动顶层 opacity（合成器完成，零重绘）。
-           base 层 = 最小光晕(18%)，glow 层 = 峰值光晕(58%)，opacity 0~1 由 HUD rAF 驱动。 */
-        <div className="absolute inset-0 pointer-events-none opacity-75">
-          <div ref={ambientBgRef} className="absolute inset-0" />
-          <div ref={ambientGlowRef} className="absolute inset-0 opacity-0" />
-        </div>
+        <div ref={ambientBgRef} className="absolute inset-0 pointer-events-none opacity-75" />
       )}
 
       {/* 3D Viewport — mounted lazily: only when entering the editor or a chart,
@@ -2020,8 +1991,6 @@ export function App() {
         <Suspense fallback={null}>
         <VisualChartEditor
           chart={currentChart}
-          currentBeat={currentBeat}
-          currentTimeSec={gameTime}
           isPlaying={editorPreviewPlaying}
           activeTool={effectiveEditorTool}
           selectedNoteId={selectedNoteId}

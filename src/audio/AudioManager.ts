@@ -1,32 +1,10 @@
 import { NoteType } from '../types/game';
 import { clamp } from '../utils/math';
 
-/** Frequency response of the A-weighting curve (ANSI S1.4), expressed as a
- *  dB gain relative to 1 kHz. Input: frequency in Hz, Output: amplitude gain
- *  in [0,1] range. We do NOT exponentiate to linear in dB (as the failure
- *  experience from a piano pitch task warns against); we convert the dB gain
- *  to linear using 10^(A_dB/20), then apply it to the linear bin magnitude.
- */
-function aWeightingLinearGain(fHz: number): number {
-  // Boundaries & invalid input guard. Values outside 20 Hz..20 kHz get 0.
-  if (fHz < 20 || fHz > 20000) return 0;
-  const f2 = fHz * fHz;
-  const f4 = f2 * f2;
-  // A-weighting (RA_f) formula in dB (IEC 61672-1)
-  const RA = (12200 * 12200) * f4 / (
-    (f2 + 20.6 * 20.6)
-    * Math.sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9))
-    * (f2 + 12200 * 12200)
-  );
-  const A_dB = 20 * Math.log10(Math.max(1e-12, RA)) + 2.0;
-  return Math.pow(10, A_dB / 20);
-}
-
 export class AudioManager {
   private ctx: AudioContext | null = null;
   private bgmSource: AudioBufferSourceNode | null = null;
   private bgmBuffer: AudioBuffer | null = null;
-  private analyser: AnalyserNode | null = null;
   private masterGain: GainNode | null = null;
   private bgmGain: GainNode | null = null;
   private sfxGain: GainNode | null = null;
@@ -108,36 +86,6 @@ export class AudioManager {
   private hitSoundBuffers: Partial<Record<NoteType, AudioBuffer>> = {};
   /** ui.ogg for DOM button/card clicks. Same load / fallback strategy. */
   private uiSoundBuffer: AudioBuffer | null = null;
-  /** Cached FFT output buffer — reused across frames to avoid per-tick allocation. */
-  private freqDataBuffer: Uint8Array<ArrayBuffer> | null = null;
-  /** Precomputed A-weighting linear gain for each FFT bin. Recomputed only
-   *  when the sample rate changes (i.e. at init / on the first analysis). */
-  private aWeightLut: Float32Array | null = null;
-  /** Frequency-bin count at the last LUT build (used to invalidate the cache). */
-  private lastBinCount: number = -1;
-  /** Sample rate used for the last LUT build. */
-  private lastSampleRate: number = -1;
-
-  // ====== BPM-driven rhythm-pulse state ======================================
-  /** Current BPM as supplied by the game loop each frame. Falls back to
-   *  synthBpm or 140 if nobody updates it; we never use 0 to avoid divide-by-0. */
-  private lastBpm: number = 140;
-  /** AudioContext-relative time of the last known beat tick. Infinity means
-   *  "not yet synced". We advance this by 60/lastBpm every time a new beat
-   *  window fires — it's a soft beat clock, derived purely from the BPM
-   *  number the game gives us (no onset detection). */
-  private lastBeatTime: number = Infinity;
-  /** A-weighted RMS loudness averaged over the *preceding* beat window.
-   *  This is the amplitude that drives the current beat's pulse. */
-  private lastBeatLoudness: number = 0.1;
-  /** Running A-weighted RMS inside the CURRENT beat window (accumulating). */
-  private windowSumSq: number = 0;
-  /** Sample count for the current beat window. */
-  private windowCount: number = 0;
-  /** Output beatPulse state — the "节奏扩散" envelope: 0 -> 1 (attack) -> 0 (decay). */
-  private beatPulseState: number = 0;
-  /** When did the current beat pulse attack start (AudioContext time)? */
-  private beatPulseAttackAt: number = -Infinity;
 
   public init() {
     if (!this.ctx) {
@@ -154,15 +102,6 @@ export class AudioManager {
       this.sfxGain = this.ctx.createGain();
       this.sfxGain.gain.value = this.effectVolume;
       this.sfxGain.connect(this.masterGain);
-
-      this.analyser = this.ctx.createAnalyser();
-      this.analyser.fftSize = 64;
-      this.analyser.smoothingTimeConstant = 0.8;
-      this.bgmGain.connect(this.analyser);
-      // Allocate the FFT byte buffer exactly once (matches frequencyBinCount).
-      // Wrap in an explicit ArrayBuffer so the type is Uint8Array<ArrayBuffer>,
-      // which is what getByteFrequencyData expects on TS 5.7+.
-      this.freqDataBuffer = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
 
       // Try to load the packaged hit sounds (tap/touch/slide/ui.ogg). If
       // fetch/decode fails (file:// mode, old browser, CORS, etc.), fall back
@@ -507,7 +446,7 @@ export class AudioManager {
   }
 
   /** 进程级 / HMR 卸载时销毁：关闭 AudioContext、清空缓存与活动缓冲。
-   *  注意：本类为全局单例，组件卸载不得调用（会误伤仍依赖它的 UI 音效 / analyser）；
+   *  注意：本类为全局单例，组件卸载不得调用（会误伤仍依赖它的 UI 音效）；
    *  仅可由 import.meta.hot.dispose 或页面卸载等真正进程级卸载点调用（P1-3）。 */
   public dispose(): void {
     try {
@@ -573,18 +512,6 @@ export class AudioManager {
     // + leadInSec*1000。此处 + leadInSec*1000 对应原 startTime 的 + leadInSec。
     this.chartWallMs = performance.now() - (audioStartSec * 1000) / this.playbackRate + leadInSec * 1000;
     this.isPlaying = true;
-
-    // Reset the beat-driven rhythm state. A new play call means a new chart
-    // (or at least a new lead-in), so any cached beat window from the
-    // previous session would be stale (and cause the pulse to jump wildly
-    // on the first frame of playback). lastBeatTime == Infinity triggers
-    // the first-tick anchor inside getAudioFrequencyData.
-    this.lastBeatTime = Infinity;
-    this.lastBeatLoudness = 0.1;
-    this.windowSumSq = 0;
-    this.windowCount = 0;
-    this.beatPulseState = 0;
-    this.beatPulseAttackAt = -Infinity;
 
     const useBuffer = this.hasUploadedAudio && !this.forceSynth && this.bgmBuffer;
     // The ctx time at which audio time reaches 0 (chart time == offset). The
@@ -801,189 +728,6 @@ export class AudioManager {
 
   public getPlaybackRate(): number {
     return this.playbackRate;
-  }
-
-  // ====== New beat-driven visual light system =================================
-
-  /** Feed the currently active BPM to the audio rhythm clock. Call this on
-   *  every frame from the game loop BEFORE getAudioFrequencyData(). The
-   *  BPM-driven pulse ignores onset detection and instead ticks a soft beat
-   *  clock using `60/bpm` seconds per beat. This is far more stable on
-   *  complex orchestral scores (noisy bass, no clear kick) than the old
-   *  naive bass-magnitude average.
-   *
-   *  `bpmAtBeat` comes from the chart's bpmlist (use `getBpmAtBeat` helper in
-   *  beatTime.ts), so BPM shifts (e.g. a 60bpm slow-down bridge) are tracked
-   *  by the pulse window as well.
-   */
-  public setCurrentBpm(bpmAtBeat: number): void {
-    // Clamp to sane audio values so beat period is never 0 / Inf.
-    const safe = Math.max(30, Math.min(400, Number.isFinite(bpmAtBeat) ? bpmAtBeat : 140));
-    this.lastBpm = safe;
-  }
-
-  /** (Re)build the A-weighting lookup table keyed by bin index. Only runs
-   *  when the bin count or sample rate changes (≈once per app lifetime). */
-  private rebuildAWeightLut() {
-    if (!this.ctx || !this.analyser) return;
-    const sr = this.ctx.sampleRate;
-    const binCount = this.analyser.frequencyBinCount;
-    if (this.aWeightLut && binCount === this.lastBinCount && sr === this.lastSampleRate) return;
-    this.aWeightLut = new Float32Array(binCount);
-    const binHz = sr / (this.analyser.fftSize || 64);
-    for (let i = 0; i < binCount; i++) {
-      this.aWeightLut[i] = aWeightingLinearGain(i * binHz);
-    }
-    this.lastBinCount = binCount;
-    this.lastSampleRate = sr;
-  }
-
-  /** Single-frame A-weighted RMS loudness from the AnalyserNode byte data.
-   *  getByteFrequencyData gives 0..255 → linear magnitude. Divide by 255 to
-   *  [0,1], A-weight, then RMS. This value represents ~23ms of audio (the
-   *  AnalyserNode fftSize=64 window) and will feed the per-beat rolling mean
-   *  inside getAudioFrequencyData. */
-  private computeAWeightedRmsInstant(): number {
-    if (!this.analyser || !this.freqDataBuffer) return 0;
-    this.rebuildAWeightLut();
-    if (!this.aWeightLut) return 0;
-    this.analyser.getByteFrequencyData(this.freqDataBuffer);
-    const data = this.freqDataBuffer;
-    const len = data.length;
-    const lut = this.aWeightLut;
-    let sumSq = 0;
-    let wSum = 0;
-    for (let i = 0; i < len; i++) {
-      const w = lut[i];
-      if (w <= 0) continue;
-      const lin = data[i] / 255;
-      // A-weight in amplitude domain → squared magnitude scales by w^2
-      const v = lin * w;
-      sumSq += v * v;
-      wSum += w * w;
-    }
-    if (wSum < 1e-9) return 0;
-    return Math.sqrt(sumSq / wSum);
-  }
-
-  /** Output signature. `beatPulse` is the tempo-aligned visual envelope
-   *  (0→1→0, attack=12ms, decay across the remaining 0.75*beat) that replaces
-   *  the old bass-only glow. `loudness` is the A-weighted RMS averaged over
-   *  the PREVIOUS beat window (it drives how bright the pulse looks). The
-   *  `bass`/`mid`/`treble`/`overall` fields are preserved for backwards
-   *  compatibility but are recomputed from the A-weighted RMS so that any
-   *  remaining consumers behave consistently.
-   */
-  public getAudioFrequencyData(): {
-    bass: number;
-    mid: number;
-    treble: number;
-    overall: number;
-    loudness: number;
-    beatPulse: number;
-  } {
-    const fallback = { bass: 0.1, mid: 0.1, treble: 0.1, overall: 0.1, loudness: 0.1, beatPulse: 0 };
-    if (!this.analyser || !this.freqDataBuffer || !this.ctx) return fallback;
-
-    const now = this.ctx.currentTime;
-
-    // ---- 1. Per-frame A-weighted RMS --------------------------------------------------------
-    const rmsInstant = this.computeAWeightedRmsInstant();
-
-    // ---- 2. Tick the soft beat clock. -------------------------------------------------------
-    const beatPeriodSec = 60 / Math.max(30, this.lastBpm || 140);
-    if (!isFinite(this.lastBeatTime) || this.lastBeatTime === Infinity) {
-      // First tick — anchor to now; next beat starts immediately.
-      this.lastBeatTime = now;
-      this.windowSumSq = 0;
-      this.windowCount = 0;
-    }
-
-    // Fire one or more beat windows if we've crossed beat boundaries.
-    // Usually it's exactly 1, but if the caller paused then resumed we can
-    // jump multiple; this avoids the pulse stalling when it resumes late.
-    while (now - this.lastBeatTime >= beatPeriodSec) {
-      // Compute per-beat mean RMS from the window.
-      if (this.windowCount > 0) {
-        const meanRms = Math.sqrt(this.windowSumSq / this.windowCount);
-        // LPF so a single quiet/loud beat doesn't cause a jumpy pulse.
-        this.lastBeatLoudness = 0.65 * this.lastBeatLoudness + 0.35 * Math.min(1, meanRms * 2.2);
-      }
-      // Fire the pulse: instant attack → amplitude = lastBeatLoudness.
-      this.beatPulseAttackAt = this.lastBeatTime + beatPeriodSec;
-      this.beatPulseState = this.lastBeatLoudness;
-      // Advance window: rolling 70% carry-over so the new beat inherits
-      // some context. Pure reset would read 0 for the entire first 1/60s of
-      // a beat (≈first 3 frames) and make the attack look jittery.
-      this.windowSumSq = this.windowCount > 0 ? this.windowSumSq * 0.3 : 0;
-      this.windowCount = this.windowCount > 0 ? Math.round(this.windowCount * 0.3) : 0;
-      this.lastBeatTime += beatPeriodSec;
-    }
-
-    // ---- 3. Accumulate into the current beat window ----------------------------------------
-    const v = rmsInstant;
-    this.windowSumSq += v * v;
-    this.windowCount += 1;
-
-    // ---- 4. Compute the tempo-aligned pulse envelope ---------------------------------------
-    // Attack phase = fast ramp (0 → 1 over 12ms)
-    // Decay phase  = exponential drop toward 0 over the beat remainder,
-    //                tuned so it settles at ~5% amplitude by the NEXT beat
-    //                (≈ 0.75 * beatPeriodSec).
-    const ATTACK_MS = 0.012;
-    const tSinceAttack = Math.max(0, now - this.beatPulseAttackAt);
-    let pulse = 0;
-    if (tSinceAttack < ATTACK_MS) {
-      pulse = this.beatPulseState * (tSinceAttack / ATTACK_MS);
-    } else {
-      // Decay coefficient chosen such that exp(-DECAY * beatPeriodSec) ≈ 0.05.
-      // ⇒ DECAY ≈ ln(20) / beatPeriodSec ≈ 3 / beatPeriodSec.
-      const decayPerSec = 3 / beatPeriodSec;
-      const tDecay = tSinceAttack - ATTACK_MS;
-      pulse = this.beatPulseState * Math.exp(-decayPerSec * tDecay);
-    }
-    // Hard-clamp (exponential numerics could drift tiny negatives).
-    const beatPulse = Math.max(0, Math.min(1, pulse));
-    // Loudness for the current visual frame: blend last beat's value with a
-    // hint of the instant RMS so build-up crescendos show up slightly
-    // before the next beat fires.
-    const loudness = Math.min(1, this.lastBeatLoudness * 0.8 + Math.min(1, rmsInstant * 2.2) * 0.2);
-
-    // ---- 5. Backwards-compat: synthesize bass/mid/treble from RMS --------------------------------
-    // Old bass/mid/treble bins are no longer the signal, but some legacy
-    // consumers still read them. Use A-weight bands: bass weight biased low
-    // (~bins 0-4 even though A-weight suppresses them), mid on actual speech
-    // region, treble on the rest. Scaled to the same output range as the old
-    // function (≈bass×1.4, mid×1.3, treble×1.2) so HUDs don't change character.
-    if (!this.aWeightLut) {
-      return { bass: 0.1, mid: 0.1, treble: 0.1, overall: loudness, loudness, beatPulse };
-    }
-    const data = this.freqDataBuffer;
-    const len = data.length;
-    const lut = this.aWeightLut;
-    let b = 0, bW = 0, m = 0, mW = 0, t = 0, tW = 0;
-    const splitMid = Math.min(len, Math.max(4, Math.ceil(len * 0.5)));
-    for (let i = 0; i < len; i++) {
-      const w = lut[i];
-      if (w <= 0) continue;
-      const lin = (data[i] / 255) * w;
-      if (i < 4) { b += lin * lin; bW += w; }
-      else if (i < splitMid) { m += lin * lin; mW += w; }
-      else { t += lin * lin; tW += w; }
-    }
-    const bassOut = Math.min(1, Math.sqrt(b / Math.max(1e-9, bW)) * 1.4);
-    const midOut = Math.min(1, Math.sqrt(m / Math.max(1e-9, mW)) * 1.3);
-    const trebleOut = Math.min(1, Math.sqrt(t / Math.max(1e-9, tW)) * 1.2);
-    const overallOut = Math.min(1, (bassOut * 0.5 + midOut * 0.3 + trebleOut * 0.2));
-
-    return {
-      bass: bassOut,
-      mid: midOut,
-      treble: trebleOut,
-      overall: overallOut,
-      loudness,
-      beatPulse,
-    };
   }
 
   /** Play the note-type-specific hit sound.

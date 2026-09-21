@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { cssVars } from '../utils/style';
 import { createPortal } from 'react-dom';
 import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
@@ -38,6 +38,7 @@ import {
 import { useI18n } from '../i18n';
 import { lintDsl, applyDslToNote } from '../utils/editorRules';
 import { useLiveDrag } from '../liveDragStore';
+import { editorTimeStore, useEditorTime } from '../editorTimeStore';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
 
@@ -76,8 +77,6 @@ export interface QuickCreateDelta {
 
 interface VisualChartEditorProps {
   chart: ChartData;
-  currentBeat: number;
-  currentTimeSec: number;
   isPlaying: boolean;
   activeTool: EditorTool;
   selectedNoteId: string | null;
@@ -425,10 +424,47 @@ function AngleEasingRow({
 
 
 
+/* ------------------------------------------------------------------ *
+ * 播放头时间订阅组件
+ *
+ * 这些微型组件订阅 `editorTimeStore`，是**唯一**会随预览播放 ~30fps 重渲染的地方。
+ * `VisualChartEditor` 本体不再接收高频时间 prop，因此在预览播放期间不重渲染，
+ * 其 O(n) 计算也只在 chart / 选中项真正变化时才重算（见组件内的 useMemo）。
+ * ------------------------------------------------------------------ */
+const LiveBeat: React.FC<{ decimals?: number }> = ({ decimals = 2 }) => {
+  const { beat } = useEditorTime();
+  return <>{beat.toFixed(decimals)}</>;
+};
+
+const LiveTime: React.FC<{ decimals?: number }> = ({ decimals = 3 }) => {
+  const { timeSec } = useEditorTime();
+  return <>{timeSec.toFixed(decimals)}s</>;
+};
+
+/** Render-prop 订阅：用于需要 beat 参与的属性/计算（disabled、BPM 查询、seek 步进）。 */
+const LiveBeatGate: React.FC<{ children: (beat: number) => React.ReactNode }> = ({ children }) => {
+  const { beat } = useEditorTime();
+  return <>{children(beat)}</>;
+};
+
+/** 时间轴拖拽条：`value` 必须随播放头实时更新，故单独订阅。 */
+const EditorScrubber: React.FC<{ max: number; step: number; onSeek: (beat: number) => void }> = ({ max, step, onSeek }) => {
+  const { beat } = useEditorTime();
+  return (
+    <input
+      type="range"
+      min="0"
+      max={max}
+      step={step}
+      value={beat}
+      onChange={(e) => onSeek(parseFloat(e.target.value) || 0)}
+      className="w-full accent-cyan-400 cursor-pointer h-2 bg-white/10 rounded-lg"
+    />
+  );
+};
+
 export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   chart,
-  currentBeat,
-  currentTimeSec,
   isPlaying,
   activeTool,
   selectedNoteId,
@@ -471,7 +507,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 }) => {
   const { t, lang } = useI18n();
   const beatUnit = lang === 'en' ? 'beat' : '拍';
-  const ruleErrors = lintDsl(editorDsl);
+  const ruleErrors = useMemo(() => lintDsl(editorDsl), [editorDsl]);
   // onApplyQuickCreateDelta is wired up from the parent so GameCanvas can
   // push its batch-note payloads through the same prop surface even though
   // the overlay component itself never fires it. Silence "unused variable".
@@ -613,7 +649,11 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   };
 
   const selectedBaseId = selectedNoteId ? selectedNoteId.split('#')[0] : null;
-  const selectedNote = chart.notes.find((n) => n.id === selectedBaseId);
+  // O(n)：仅在 chart / 选中项变化时重算（预览播放不再每帧触发重渲染）。
+  const selectedNote = useMemo(
+    () => chart.notes.find((n) => n.id === selectedBaseId),
+    [chart.notes, selectedBaseId]
+  );
 
   // Live-drag override: while a note is being dragged (in 2D or 3D) the canvas
   // pushes the current position here every frame so these input boxes show the
@@ -621,7 +661,10 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   // Subscribing only re-renders this panel — App and the canvases stay untouched.
   const liveDrag = useLiveDrag();
 
-  const maxBeat = Math.max(16, getMaxBeat(chart)) + 4;
+  // O(n) 全谱遍历：仅在 chart 变化时重算。
+  const chartMaxBeat = useMemo(() => getMaxBeat(chart), [chart]);
+  const maxBeat = useMemo(() => Math.max(16, chartMaxBeat) + 4, [chartMaxBeat]);
+  const playableCount = useMemo(() => countPlayableNotes(chart), [chart]);
 
   const validBatchRange =
     batchSelection.startBeat !== null && batchSelection.endBeat !== null
@@ -631,9 +674,13 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         }
       : null;
 
-  const notesInBatch = validBatchRange
-    ? chart.notes.filter((n) => n.beat >= validBatchRange.start - 0.001 && n.beat <= validBatchRange.end + 0.001)
-    : [];
+  // O(n)：依赖用原始值（validBatchRange 每次渲染都是新对象，不能作为 useMemo 依赖）。
+  const notesInBatch = useMemo(() => {
+    if (batchSelection.startBeat === null || batchSelection.endBeat === null) return [];
+    const lo = Math.min(batchSelection.startBeat, batchSelection.endBeat) - 0.001;
+    const hi = Math.max(batchSelection.startBeat, batchSelection.endBeat) + 0.001;
+    return chart.notes.filter((n) => n.beat >= lo && n.beat <= hi);
+  }, [chart.notes, batchSelection.startBeat, batchSelection.endBeat]);
 
   const handleUpdateMeta = (field: 'bpm' | 'offset', value: number) => {
     onUpdateChart({ ...chart, metadata: { ...chart.metadata, [field]: value } });
@@ -643,7 +690,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const getBpmList = (): BpmPoint[] => chart.metadata.bpmlist ?? [];
 
   const handleAddBpmPoint = () => {
-    const snappedBeat = Math.round(currentBeat / snapSubdivision) * snapSubdivision;
+    const snappedBeat = Math.round(editorTimeStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
     if (snappedBeat <= 0) return;
     const currentBpm = getBpmAtBeatLocal(snappedBeat);
     const newPoint: BpmPoint = { beat: snappedBeat, bpm: currentBpm };
@@ -679,7 +726,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const getEvents = (): EventData[] => chart.events ?? [];
 
   const handleAddEvent = (type: EventType) => {
-    const snappedBeat = Math.round(currentBeat / snapSubdivision) * snapSubdivision;
+    const snappedBeat = Math.round(editorTimeStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
     const newEvent: EventData = {
       id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       type: 'event',
@@ -710,18 +757,18 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   // 界面上的起/终点会被偷偷对调，容易困惑）。实际操作区间由 validBatchRange 用
   // Math.min/max 归一化，所以 start>end 时仍按 [end,start] 执行。
   const handleSetBatchStart = () => {
-    const newStart = Math.round(currentBeat * 100) / 100;
+    const newStart = Math.round(editorTimeStore.getSnapshot().beat * 100) / 100;
     onSetBatchSelection({ startBeat: newStart, endBeat: batchSelection.endBeat });
   };
 
   const handleSetBatchEnd = () => {
-    const newEnd = Math.round(currentBeat * 100) / 100;
+    const newEnd = Math.round(editorTimeStore.getSnapshot().beat * 100) / 100;
     onSetBatchSelection({ startBeat: batchSelection.startBeat, endBeat: newEnd });
   };
 
   const handleBatchClone = () => {
     if (!validBatchRange || notesInBatch.length === 0) return;
-    const deltaBeat = currentBeat - validBatchRange.start;
+    const deltaBeat = editorTimeStore.getSnapshot().beat - validBatchRange.start;
 
     const clonedNotes: NoteData[] = notesInBatch.map((n, idx) => ({
       ...n,
@@ -866,7 +913,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     // 保持段内相邻连接；克隆出的新头节点缺省参数继承自原头节点。
     if (op === 'Clone') {
       const baseBeat = selectedUnits[0].beat; // 最早选中单位的 beat
-      const dBeat = currentBeat - baseBeat;
+      const dBeat = editorTimeStore.getSnapshot().beat - baseBeat;
       const affectedChains = new Set<string>();
       for (const id of selIds) affectedChains.add(id.indexOf('#') >= 0 ? id.split('#')[0] : id);
 
@@ -1656,11 +1703,11 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             <div className="p-3 rounded-xl glass-sub border-white/12" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)' }}>
               <div className="text-[10px] uppercase font-bold text-white/50">{t('editor.curBeat')}</div>
               <div className="text-3xl font-black font-orbitron gradient-text bg-gradient-to-r from-cyan-300 to-amber-300">
-                {currentBeat.toFixed(2)}
+                <LiveBeat />
               </div>
               <div className="flex justify-between items-center text-[11px] text-white/70 mt-1 font-mono">
-                <span>{t('editor.time')}: {currentTimeSec.toFixed(3)}s</span>
-                <span>{countPlayableNotes(chart)} {t('editor.notes')}</span>
+                <span>{t('editor.time')}: <LiveTime /></span>
+                <span>{playableCount} {t('editor.notes')}</span>
               </div>
             </div>
 
@@ -1826,7 +1873,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {sectionOpen.events && (
                 <div className="p-3 space-y-2 border-t border-white/10">
                   <div className="text-[10px] text-white/50">
-                    {t('editor.addEventAtBeat')} ({currentBeat.toFixed(2)}):
+                    {t('editor.addEventAtBeat')} (<LiveBeat />):
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button onClick={() => handleAddEvent('speed_change')} className="py-1.5 px-2 rounded glass-btn border-purple-400/40 text-purple-300 hover:text-purple-200 text-[11px] transition cursor-pointer">
@@ -1936,13 +1983,15 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                   <div className="border-t border-white/10 pt-2">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-[11px] text-cyan-300 font-bold">{t('editor.bpmChanges')}</span>
-                      <button
-                        onClick={handleAddBpmPoint}
-                        disabled={currentBeat <= 0}
-                        className="text-[10px] px-2 py-0.5 rounded bg-cyan-600/50 hover:bg-cyan-600 text-white font-bold transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                      >
-                        {t('editor.addAtCurrentBeat')}
-                      </button>
+                      <LiveBeatGate>{(beat) => (
+                        <button
+                          onClick={handleAddBpmPoint}
+                          disabled={beat <= 0}
+                          className="text-[10px] px-2 py-0.5 rounded bg-cyan-600/50 hover:bg-cyan-600 text-white font-bold transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                        >
+                          {t('editor.addAtCurrentBeat')}
+                        </button>
+                      )}</LiveBeatGate>
                     </div>
                     {getBpmList().length === 0 ? (
                       <div className="text-[10px] text-white/40 italic">{t('editor.noBpmChange')}</div>
@@ -1978,9 +2027,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                       </div>
                     )}
                       <div className="mt-2 text-[10px] text-white/40 font-mono">
-                        {t('editor.curBeatBpm')}: {getBpmAtBeatLocal(currentBeat).toFixed(0)}
+                        {t('editor.curBeatBpm')}: <LiveBeatGate>{(beat) => getBpmAtBeatLocal(beat).toFixed(0)}</LiveBeatGate>
                         {' | '}
-                        {t('editor.totalDuration')}: {beatToSecondsMultiBpm(getMaxBeat(chart), chart.metadata.bpm, chart.metadata.offset, getBpmList()).toFixed(2)}s
+                        {t('editor.totalDuration')}: {beatToSecondsMultiBpm(chartMaxBeat, chart.metadata.bpm, chart.metadata.offset, getBpmList()).toFixed(2)}s
                       </div>
                   </div>
                 </div>
@@ -2434,8 +2483,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         </div>
 
         <div className="text-[9px] text-white/40 font-mono leading-none mt-0.5">{t('editor.tune')}</div>
+        <LiveBeatGate>{(beat) => (<>
         <button
-          onClick={() => onSeekBeat(Math.floor((currentBeat - 1e-6) / snapSubdivision) * snapSubdivision)}
+          onClick={() => onSeekBeat(Math.floor((beat - 1e-6) / snapSubdivision) * snapSubdivision)}
           className="w-10 h-10 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 flex items-center justify-center font-bold text-sm transition cursor-pointer"
           title={t('editor.snapPrev')}
         >
@@ -2443,16 +2493,17 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         </button>
 
         <div className="text-xs font-mono font-bold text-amber-300 py-0.5">
-          {currentBeat.toFixed(2)}
+          {beat.toFixed(2)}
         </div>
 
         <button
-          onClick={() => onSeekBeat(Math.ceil((currentBeat + 1e-6) / snapSubdivision) * snapSubdivision)}
+          onClick={() => onSeekBeat(Math.ceil((beat + 1e-6) / snapSubdivision) * snapSubdivision)}
           className="w-10 h-10 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 flex items-center justify-center font-bold text-sm transition cursor-pointer"
           title={t('editor.snapNext')}
         >
           ▼ +
         </button>
+        </>)}</LiveBeatGate>
       </div>
 
       {/* 4. Bottom Timeline Scrub Bar (Adjusts left offset based on expanded sidebar state to avoid overlap) */}
@@ -2478,18 +2529,10 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
 
         <div className="flex-1 flex flex-col gap-1">
           <div className="flex justify-between text-[11px] font-mono text-white/70">
-            <span className="text-cyan-300 font-bold">Beat {currentBeat.toFixed(2)}</span>
-            <span>{t('editor.totalLen')}: Beat {getMaxBeat(chart).toFixed(2)}</span>
+            <span className="text-cyan-300 font-bold">Beat <LiveBeat /></span>
+            <span>{t('editor.totalLen')}: Beat {chartMaxBeat.toFixed(2)}</span>
           </div>
-          <input
-            type="range"
-            min="0"
-            max={maxBeat}
-            step={snapSubdivision}
-            value={currentBeat}
-            onChange={(e) => onSeekBeat(parseFloat(e.target.value) || 0)}
-            className="w-full accent-cyan-400 cursor-pointer h-2 bg-white/10 rounded-lg"
-          />
+          <EditorScrubber max={maxBeat} step={snapSubdivision} onSeek={onSeekBeat} />
         </div>
       </div>
     </div>

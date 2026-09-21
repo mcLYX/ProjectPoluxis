@@ -71,6 +71,20 @@ export interface ChartRuntime {
   lastNoteTime: number;
   /** 最长 slide 的首尾时间跨度。 */
   maxSlideSpan: number;
+  /**
+   * 按 `note.scrollDist` 升序的音符下标（长度与 `notes` 相同）。
+   *
+   * 负流速下 `S(t)` 非单调，可见集合在 timeSec 空间不再连续，无法用时间二分；
+   * 但可见性本质是 `S(noteTime) - S(curTime)` 落在深度带内 —— 即**在滚动距离
+   * 空间上连续**。故按 `scrollDist` 建一份索引，使窗口可对任意符号流速二分求得。
+   */
+  notesByDist: Int32Array;
+  /**
+   * 各 slide 的 `|S(子节点) - S(头)|` 最大值。用于把「距离窗口」外扩，
+   * 保证「头在窗外、子节点在窗内」的 slide 仍被访问（与时间窗口用
+   * `maxSlideSpan` 外扩同理，只是换到滚动距离空间）。
+   */
+  maxSlideScrollSpan: number;
 }
 
 /**
@@ -172,6 +186,24 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
     }
   }
 
+  // 按滚动距离排序的音符索引 + slide 滚动距离跨度（供负流速下的距离窗口使用）。
+  // scrollDist 已在上一步写入每个音符对象，这里只做排序与统计，不重算距离。
+  const distCount = notes.length;
+  const notesByDist = new Int32Array(distCount);
+  for (let i = 0; i < distCount; i++) notesByDist[i] = i;
+  notesByDist.sort((a, b) => (notes[a].scrollDist ?? 0) - (notes[b].scrollDist ?? 0));
+  let maxSlideScrollSpan = 0;
+  for (let i = 0; i < distCount; i++) {
+    const n = notes[i];
+    const children = n.resolvedNodes;
+    if (!children) continue;
+    const headDist = n.scrollDist ?? 0;
+    for (let j = 0; j < children.length; j++) {
+      const d = Math.abs((children[j].scrollDist ?? 0) - headDist);
+      if (d > maxSlideScrollSpan) maxSlideScrollSpan = d;
+    }
+  }
+
   // 与 GameCanvas.resetPlayState 的预计算逐行同构。
   let totalNotes = 0;
   let lastNoteTime = 0;
@@ -206,7 +238,46 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
     totalNotes,
     lastNoteTime,
     maxSlideSpan,
+    notesByDist,
+    maxSlideScrollSpan,
   };
+}
+
+/**
+ * 在「滚动距离序」上求音符窗口，返回 `notesByDist` 上的连续区间 `[first, last)`。
+ *
+ * `lo` / `hi` 是相对 `curScrollDist` 的滚动距离偏移（上下界），由调用方按渲染
+ * 深度带换算。含负流速时调用方应额外用 `rt.maxSlideScrollSpan` 外扩，以覆盖
+ * 「slide 头在窗外、子节点在窗内」的情形。
+ *
+ * 语义与时间窗口互补：时间窗口保证判定（时间语义）不丢，本窗口保证渲染
+ * （深度/滚动距离语义）不丢，二者对负流速谱面取并集使用。
+ */
+export function scrollDistWindow(
+  rt: ChartRuntime,
+  curScrollDist: number,
+  lo: number,
+  hi: number
+): { first: number; last: number } {
+  const order = rt.notesByDist;
+  const notes = rt.notes;
+  const dLo = curScrollDist + lo;
+  const dHi = curScrollDist + hi;
+  let a = 0;
+  let b = order.length;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if ((notes[order[mid]].scrollDist ?? 0) < dLo) a = mid + 1;
+    else b = mid;
+  }
+  const first = a;
+  b = order.length;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if ((notes[order[mid]].scrollDist ?? 0) <= dHi) a = mid + 1;
+    else b = mid;
+  }
+  return { first, last: a };
 }
 
 /**
