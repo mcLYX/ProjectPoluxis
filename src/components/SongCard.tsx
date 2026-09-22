@@ -314,7 +314,7 @@ export const SongCard: React.FC<SongCardProps> = ({
 
       {/* Expanded state: horizontal title (top left) — inline-editable in edit mode */}
       {editMode && isExpanded ? (
-        <div className="absolute top-5 left-5 right-5 flex flex-col gap-2 transition-all duration-400 max-h-[60%] overflow-y-auto pr-1">
+        <div className="absolute top-5 left-5 flex flex-col gap-2 transition-all duration-400 max-h-[60%] overflow-y-auto pr-1" style={{ width: 'calc(min(85vw, 420px) - 2.5rem)' }}>
           <input
             data-action="edit-field"
             value={editValues?.title ?? item.title}
@@ -383,10 +383,17 @@ export const SongCard: React.FC<SongCardProps> = ({
       ) : (
         <div
           className={`
-            absolute top-5 left-5 right-5
+            absolute top-5 left-5
             transition-all duration-400
             ${isExpanded ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}
           `}
+          /* Viewport-anchored width (== expanded card inner width, which is
+           * `min(85vw,420px) - 40px`). The card width animates 120→420 over 500ms;
+           * if this box used `right-5` its width would track the card every frame
+           * and the title/artist/BPM would re-wrap on every frame (the same jank
+           * Lite had). Anchoring keeps the box constant; `overflow-hidden` on the
+           * card just clips it while narrow and reveals it as it widens. */
+          style={{ width: 'calc(min(85vw, 420px) - 2.5rem)' }}
         >
           <div
             className="text-white font-bold font-orbitron text-2xl tracking-wide"
@@ -426,11 +433,16 @@ export const SongCard: React.FC<SongCardProps> = ({
       {item.type === 'song' && resultData && (
         <div
           className={`
-            absolute left-4 right-4 top-[5.75rem] bottom-[4.75rem] short:top-[4.5rem] short:bottom-[4.25rem]
+            absolute left-1/2 -translate-x-1/2 top-[5.75rem] bottom-[4.75rem] short:top-[4.5rem] short:bottom-[4.25rem]
             flex items-center justify-center
             transition-opacity duration-400
             ${isExpanded ? 'opacity-100' : 'opacity-0 pointer-events-none'}
           `}
+          /* Viewport-anchored width (result card inner width = `min(94vw,600px)
+           * - 32px`). The result card animates 420→600 on entry, so a `left-4
+           * right-4` box would re-wrap the judgement grid every frame. Center it
+           * with translateX(-50%) (compositor, no reflow) and fix the width. */
+          style={{ width: 'calc(min(94vw, 600px) - 2rem)' }}
         >
           <div className="w-full max-h-full overflow-y-auto rounded-2xl bg-white/[0.06] backdrop-blur-xl border border-white/20 px-4 py-3 short:py-2 text-center" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18)' }}>
             <div className="flex items-center justify-center gap-1.5 text-white mb-1 short:mb-0.5">

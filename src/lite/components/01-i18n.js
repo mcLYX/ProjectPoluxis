@@ -16,7 +16,7 @@
       loadFailHint: '加载失败：{err}。可再次点击开始重试。',
       audioFailSynth: '音频加载失败：{err}，已改用合成音。',
       backUp: '← 返回上一级', backAlbum: '返回专辑列表', diff: '难度 ',
-      startGame: '开始游戏', enterAlbum: '进入', albumKw: '专辑', trackKw: '曲目',
+      startGame: '开始', enterAlbum: '进入', albumKw: '专辑', trackKw: '曲目',
       navBack: '← 返回', navHome: '主页',
       errImport: '不支持文件导入', errAudioDecode: '音频解码失败（请尝试MP3格式）',
       errRead: '读取失败', errDecode: '解码失败', errAudioLoad: '音频加载失败', errNet: '网络错误',

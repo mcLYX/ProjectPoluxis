@@ -55,8 +55,15 @@ export default defineConfig({
     VitePWA({
       // 自动在页面注入 manifest 链接与 SW 注册脚本（全版本 SPA 入口）。
       registerType: "autoUpdate",
-      // 把静态资源（图标）纳入预缓存清单。
-      includeAssets: ["icons/icon.svg", "icons/icon-maskable.svg"],
+      // 把静态资源（图标、本地字体）纳入预缓存清单。字体改为本地随包分发后，
+      // 必须显式进预缓存，否则纯离线（仅靠 SW）场景下 /fonts/*.woff2 取不到、
+      // 会回退到系统字体，丢失 Orbitron/Rajdhani/Inter 的视觉效果。
+      includeAssets: [
+        "icons/icon.svg",
+        "icons/icon-maskable.svg",
+        "fonts/*.woff2",
+        "fonts/OFL.txt",
+      ],
       manifest: {
         name: "Project:Poluxis",
         short_name: "Poluxis",

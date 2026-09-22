@@ -1,4 +1,10 @@
 @import "tailwindcss";
+/* Self-hosted fonts (no external CDN). Bundled woff2 live in /public/fonts and
+ * are referenced by the @font-face rules below; see /public/fonts/OFL.txt for
+ * the SIL Open Font License covering Orbitron, Rajdhani and Inter. The
+ * font-family names match the Tailwind `font-orbitron` / `font-rajdhani`
+ * utilities and the `font-['Inter']` body class, so no class changes needed. */
+@import './fonts-latin.css';
 
 html, body {
   background: #0a0d12;
