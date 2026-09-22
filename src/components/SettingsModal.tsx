@@ -682,7 +682,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))', paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 0px))', paddingLeft: 'max(1rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1rem, env(safe-area-inset-right, 0px))' }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))', paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 0px))', paddingLeft: 'max(1rem, env(safe-area-inset-left, 0px))', paddingRight: 'max(1rem, env(safe-area-inset-right, 0px))' }}>
+      {/* 压暗 + 模糊单独成层（同 SongSelect）：容器自身带 backdrop-filter 会成为
+          后代的 backdrop root，让里面的 glass-panel-strong 采不到真正的页面背景。 */}
+      <div aria-hidden className="absolute inset-0 bg-black/70 backdrop-blur-md" />
       <div className="glass-panel-strong settings-modal relative w-full max-w-3xl rounded-2xl border border-white/15 overflow-hidden flex flex-col text-white font-rajdhani">
 
         {/* 顶部栏：标题 + 右上角固定关闭按钮 */}

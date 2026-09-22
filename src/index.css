@@ -100,13 +100,14 @@ html, body {
   --glass-blur: 16px;
   --glass-blur-lg: 22px;
 
-  /* Opaque base fill for glass surfaces. backdrop-filter is NOT rendered on some
-     Android WebViews / older kernels; without this layer the panel keeps only the
-     ~7% white wash above and reads as "completely transparent". Baking a dark base
-     in makes every glass surface legible with or without blur — same philosophy as
-     the Lite build's CSS ("backdrop-filter is progressive enhancement"). */
-  --glass-fill: rgba(13, 17, 24, 0.62);
-  --glass-fill-strong: rgba(14, 18, 26, 0.78);
+  /* Base fill baked under every glass surface. It is what keeps a panel readable
+     when the blur cannot be sampled (old Android WebViews / kernels that report
+     no backdrop-filter support — see the @supports fallback below), but it is
+     deliberately light: when the blur DOES render, it should read as frosted
+     glass, not as a dark mask. Chrome/Safari/modern Android WebView all render
+     backdrop-filter, so they get the frosted look. */
+  --glass-fill: rgba(13, 17, 24, 0.45);
+  --glass-fill-strong: rgba(14, 18, 26, 0.58);
 
   /* Text hierarchy (white at decreasing alpha) */
   --text-1: rgba(255, 255, 255, 0.92);
@@ -160,18 +161,24 @@ html, body {
   color: var(--text-4);
 }
 
-/* Glass button — neutral by default, accent-tinted when .is-accent */
+/* Glass button — neutral by default, accent-tinted when .is-accent.
+   Same layering as .glass-panel: a baked dark base first (so the button stays
+   legible if the blur can't be sampled), the white wash on top, blur as pure
+   enhancement. It previously had ONLY the ~4.5% white wash, which is why the
+   bottom-left avatar / bottom-right manage buttons read as "almost transparent"
+   on Android. */
 .glass-btn {
-  background: var(--surface-1);
+  background-color: var(--glass-fill);
+  background-image: linear-gradient(var(--surface-1), var(--surface-1));
   backdrop-filter: blur(10px) saturate(130%);
   -webkit-backdrop-filter: blur(10px) saturate(130%);
   border: 1px solid var(--glass-border);
   color: var(--text-1);
   box-shadow: var(--glass-shadow-sm), var(--glass-rim-soft);
-  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+  transition: background-color 160ms ease, background-image 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 120ms ease;
 }
 .glass-btn:hover {
-  background: var(--surface-3);
+  background-image: linear-gradient(var(--surface-3), var(--surface-3));
   border-color: var(--glass-border-strong);
   box-shadow: var(--glass-shadow), var(--glass-rim);
 }
@@ -182,15 +189,20 @@ html, body {
 
 /* Accent-tinted glass (uses --hud-accent set by App.tsx, falls back to cyan) */
 .glass-accent {
-  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 14%, transparent);
+  background-color: var(--glass-fill);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 14%, transparent),
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 14%, transparent));
   border: 1px solid color-mix(in srgb, var(--hud-accent, #22d3ee) 45%, transparent);
   color: var(--text-1);
   box-shadow: 0 0 18px color-mix(in srgb, var(--hud-accent, #22d3ee) 22%, transparent),
               var(--glass-rim-soft);
-  transition: background 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+  transition: background-image 160ms ease, box-shadow 160ms ease, transform 120ms ease;
 }
 .glass-accent:hover {
-  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 24%, transparent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 24%, transparent),
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 24%, transparent));
   box-shadow: 0 0 26px color-mix(in srgb, var(--hud-accent, #22d3ee) 38%, transparent),
               var(--glass-rim);
 }
@@ -198,12 +210,26 @@ html, body {
   transform: scale(0.97);
 }
 
+/* 引擎完全不支持 backdrop-filter 时（老 Android WebView / 旧内核），把玻璃底
+   烘焙得更实：此时退化成"深色半透明面板"而不是"几乎透明"，可读性优先。
+   支持模糊的引擎（含现代 Android WebView / Chromium）走上面的轻量底，保持
+   真正的磨砂玻璃观感。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-fill: rgba(13, 17, 24, 0.86);
+    --glass-fill-strong: rgba(14, 18, 26, 0.92);
+  }
+}
+
 /* Primary CTA — frosted glass + accent glow (the "light" of the design language).
    Uses --hud-accent (per-chart in App.tsx) with a cyan brand fallback; set
    --hud-accent inline to recolor (e.g. emerald for album-enter, amber for alt
    actions). No transform here so Tailwind hover/active scale utilities win. */
 .glass-btn-primary {
-  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 18%, transparent);
+  background-color: var(--glass-fill);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 18%, transparent),
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 18%, transparent));
   backdrop-filter: blur(10px) saturate(140%);
   -webkit-backdrop-filter: blur(10px) saturate(140%);
   border: 1px solid color-mix(in srgb, var(--hud-accent, #22d3ee) 50%, transparent);
@@ -212,7 +238,9 @@ html, body {
               inset 0 1px 0 rgba(255, 255, 255, 0.20);
 }
 .glass-btn-primary:hover {
-  background: color-mix(in srgb, var(--hud-accent, #22d3ee) 28%, transparent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 28%, transparent),
+    color-mix(in srgb, var(--hud-accent, #22d3ee) 28%, transparent));
   box-shadow: 0 0 34px color-mix(in srgb, var(--hud-accent, #22d3ee) 45%, transparent),
               inset 0 1px 0 rgba(255, 255, 255, 0.26);
 }
@@ -291,7 +319,10 @@ canvas {
 
 @keyframes fadeIn {
   0% { opacity: 0; transform: scale(1.02); }
-  100% { opacity: 1; transform: scale(1); }
+  /* 终态用 `none` 而不是 `scale(1)`：animation-fill-mode: forwards 会保留
+     终态，给元素留下一个常驻 transform（合成层），某些 Android WebView 上会
+     让元素自身的 backdrop-filter 采不到背景。 */
+  100% { opacity: 1; transform: none; }
 }
 
 .animate-fade-in {
@@ -381,12 +412,14 @@ canvas {
    briefly overflow and flashes an ugly scrollbar at the bottom — and on
    non-overlay scrollbar devices that bar eats layout height and shoves the
    centered cards upward. We hide it (scrolling still works) and contain the
-   overscroll so the bounce can't chain to the page. This element-scoped rule
-   overrides the global ::-webkit-scrollbar above (higher specificity). */
+   overscroll so the bounce can't chain to the page. Both axes are contained:
+   a vertical drag over the carousel used to chain out to the document (iOS).
+   This element-scoped rule overrides the global ::-webkit-scrollbar above
+   (higher specificity). */
 .song-carousel {
   scrollbar-width: none;            /* Firefox */
   -ms-overflow-style: none;         /* legacy Edge/IE */
-  overscroll-behavior-x: contain;
+  overscroll-behavior: contain;
 }
 .song-carousel::-webkit-scrollbar {
   display: none;

@@ -160,7 +160,45 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     toastTimer.current = window.setTimeout(() => setToastMsg(null), 2600);
   }, []);
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
+  // 加载阶段文案（「谱面 42%」/「音频 87%」/「解码中」）。与 loadingSongId 同生命周期。
+  const [startPhase, setStartPhase] = useState<string | null>(null);
   const isStartingGameRef = useRef(false);
+  /* 当前正在"开始"的那首曲目。isStartingGameRef 成功开局后不会复位（它还要阻止
+   * 预览的清理逻辑停掉游戏音频），所以仅凭它做闸门的话，玩过一局之后再浏览卡片，
+   * 后台预载的进度回调会持续写状态、引起无谓重渲染。加上这个 id 精确限定。 */
+  const startingSongIdRef = useRef<string | null>(null);
+  /* 统一的加载阶段上报：不论下载是"展开卡片时的预览预载"发起的，还是"点击开始"
+   * 发起的，都走这里 —— 玩家按下开始后若预载仍在进行，就能立刻看到真实阶段与
+   * 百分比，而不是干等一个笼统的「加载中」。
+   * 只在"这一首正在开始"时写入状态。百分比只在整数变化时更新（字节回调上百次）。 */
+  const phasePctRef = useRef(-1);
+  const reportPhase = useCallback(
+    (
+      songId: string,
+      phase: 'chart' | 'audio' | 'decode',
+      loaded?: number,
+      total?: number,
+    ): void => {
+      if (!isStartingGameRef.current || startingSongIdRef.current !== songId) return;
+      if (phase === 'decode') {
+        phasePctRef.current = -1;
+        setStartPhase(t('songcard.decoding'));
+        return;
+      }
+      const label = phase === 'chart' ? t('songcard.loadingChart') : t('songcard.loadingAudio');
+      if (loaded === undefined || total === undefined || total <= 0) {
+        // 无 Content-Length：只报阶段，不带百分比。
+        phasePctRef.current = -1;
+        setStartPhase(label);
+        return;
+      }
+      const pct = Math.min(100, Math.round((loaded / total) * 100));
+      if (pct === phasePctRef.current) return;
+      phasePctRef.current = pct;
+      setStartPhase(`${label} ${pct}%`);
+    },
+    [t],
+  );
   // In-flight preview preload (audio + chart) per expanded song. The Start
   // button stays enabled during preload; if the player hits Start before it
   // finishes, handleStartGame awaits this promise (showing the loading state)
@@ -411,7 +449,11 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         // Load audio (only once per song — same audio across all difficulties)
         if (song.audio) {
           try {
-            await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true);
+            await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true, (p) => {
+              // 预览预载也会上报阶段；reportPhase 在未点"开始"时直接忽略。
+              if (p.phase === 'decode') reportPhase(song.id, 'decode');
+              else reportPhase(song.id, 'audio', p.loaded, p.total);
+            });
           } catch (e) {
             console.warn('Failed to load preview audio:', e);
           }
@@ -423,7 +465,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
         // Preload chart for current difficulty
         const diffIdx = selectedDifficultiesRef.current[song.id] ?? 0;
-        await loadChartForDifficulty(song, diffIdx);
+        await loadChartForDifficulty(song, diffIdx, (loaded, total) =>
+          reportPhase(song.id, 'chart', loaded, total),
+        );
 
         if (!cancelled && !isStartingGameRef.current) {
           // Preview play at low volume from ~10% in
@@ -484,7 +528,14 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     if (!diff) return;
 
     setLoadingSongId(song.id);
+    /* 阶段文案（与 Lite 一致）：起步是笼统的「加载中」——此刻可能仍在等展开
+     * 卡片时启动的预览预载，而那个 Promise 同时含谱面+音频、分辨不出卡在哪一步。
+     * 预载自己的进度回调会在 isStartingGameRef 置位后接管这里，把文案细化成
+     * 「谱面 42%」/「音频 87%」/「解码中」。 */
+    setStartPhase(t('songcard.loading'));
+    phasePctRef.current = -1;
     isStartingGameRef.current = true;
+    startingSongIdRef.current = song.id;
     try {
       // If the preview preload (audio + chart) for this song is still in
       // flight, wait for it first — the button shows "加载中" only from
@@ -498,11 +549,16 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       if (isFallbackSong(song.id)) {
         chart = getFallbackChart(song.id);
       } else {
-        chart = await loadChartForDifficulty(song, diffIdx);
+        reportPhase(song.id, 'chart');
+        chart = await loadChartForDifficulty(song, diffIdx, (loaded, total) =>
+          reportPhase(song.id, 'chart', loaded, total),
+        );
       }
       if (!chart) {
         setLoadingSongId(null);
+        setStartPhase(null);
         isStartingGameRef.current = false;
+        startingSongIdRef.current = null;
         return;
       }
 
@@ -514,18 +570,33 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       if (hasAudio) {
         // Audio already loaded in preview; if not, load now
         if (!globalAudio.getActiveBuffer?.()) {
-          await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true);
+          reportPhase(song.id, 'audio');
+          await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true, (p) => {
+            if (p.phase === 'decode') {
+              // 字节已到齐：解码没有百分比，只报阶段。
+              reportPhase(song.id, 'decode');
+              return;
+            }
+            reportPhase(song.id, 'audio', p.loaded, p.total);
+          });
         }
       }
       // scoreKey 按来源加命名空间，避免同一在线曲目下载前后的成绩互通。
       const scoreKey = getScoreKey(song.id, song.source);
+      setStartPhase(null);
+      // 关卡已交出去：关闭阶段闸门，避免之后的预览预载继续写状态。
+      startingSongIdRef.current = null;
       onStartGame(chart, hasAudio, song.id, scoreKey, diff.name);
     } catch (e) {
       console.error('Failed to start game:', e);
       setLoadingSongId(null);
+      setStartPhase(null);
       isStartingGameRef.current = false;
+      startingSongIdRef.current = null;
     }
-  }, [onStartGame]);
+    // t / reportPhase 分别只在切换语言时变化（useI18n 与 reportPhase 内部都是
+    // useCallback([t])），放入依赖是安全的。
+  }, [onStartGame, t, reportPhase]);
 
   // Click outside to collapse (in result mode: exit result, keep card expanded)
   const handleContainerClick = useCallback((e: React.MouseEvent) => {
@@ -852,8 +923,18 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     <div
       ref={containerRef}
       onClick={handleContainerClick}
-      className="absolute inset-0 z-20 bg-black/45 backdrop-blur-md"
+      className="absolute inset-0 z-20"
     >
+      {/* 压暗 + 背景模糊层：单独提成一层，不再挂在容器自身上。
+          带 backdrop-filter 的元素会成为其后代的 backdrop root —— 容器自己带
+          模糊时，左下头像、右下管理菜单以及所有玻璃面板只能采到本层内部的内容，
+          采不到容器之外的页面背景，表现就是"模糊没渲染出来、几乎透明"（安卓
+          WebView 上尤其明显）。改为兄弟层之后，面板的 backdrop 才是真正的页面
+          背景，磨砂玻璃才成立。 */}
+      <div
+        aria-hidden
+        className="absolute inset-0 z-0 bg-black/45 backdrop-blur-md pointer-events-none"
+      />
       {/* Dim + blurred cover background — fades in when a card is expanded, and
           cross-dissolves when switching cards. All transitions delayed 0.5s. */}
       <div
@@ -1054,6 +1135,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
                 item={item}
                 isExpanded={isExpanded}
                 isLoading={isLoading}
+                loadingLabel={isLoading ? startPhase : null}
                 currentDifficultyIdx={diffIdx}
                 onExpand={() => handleExpand(item.id)}
                 onCollapse={handleCollapse}

@@ -26,6 +26,8 @@ interface SongCardProps {
   item: BeatmapItem;
   isExpanded: boolean;
   isLoading?: boolean;
+  /** 覆盖加载中的文案（阶段 + 百分比，如「音频 42%」）；缺省为 t('songcard.loading')。 */
+  loadingLabel?: string | null;
   currentDifficultyIdx?: number;
   onExpand: () => void;
   onCollapse: () => void;
@@ -120,6 +122,7 @@ export const SongCard: React.FC<SongCardProps> = ({
   item,
   isExpanded,
   isLoading = false,
+  loadingLabel = null,
   currentDifficultyIdx = 0,
   onExpand,
   onCollapse,
@@ -533,7 +536,7 @@ export const SongCard: React.FC<SongCardProps> = ({
         {isLoading ? (
           <div className="px-5 py-2.5 rounded-xl bg-black/40 backdrop-blur-sm border border-white/20 flex items-center gap-2 text-white/60">
             <Loader2 size={16} className="animate-spin" />
-            <span className="text-sm font-bold">{t('songcard.loading')}</span>
+            <span className="text-sm font-bold">{loadingLabel || t('songcard.loading')}</span>
           </div>
         ) : editMode ? (
           <button

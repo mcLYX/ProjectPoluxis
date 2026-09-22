@@ -17,6 +17,12 @@
  *   if (!gate(performance.now(), maxFps)) { raf = requestAnimationFrame(loop); return; }
  *
  * `maxFps <= 0` 或非有限值 = 不限帧（永远放行）。
+ *
+ * 补充（相对朴素相位累加器的一处改进）：门控会顺带估计**显示器自身的帧周期**
+ * （EWMA），当「上限不低于实际刷新率」时直接放行。否则 60 上限 + 60Hz 屏时，
+ * 理想步长 16.67ms 与真实 tick 的取整差异会让约 1/10 的帧落进 0.5ms 保护带而
+ * 被误跳过 —— 实测只有 ~54fps（而非 60）。门控只应“降低”帧率，不应“削”帧率。
+ * 与 Lite 版 `src/lite/components/09-engine.js` 的 frameGateAllows 保持一致。
  */
 export interface FrameGate {
   /** 返回 true 表示本帧应渲染；false 表示跳过这一帧。 */
@@ -26,15 +32,25 @@ export interface FrameGate {
 export function createFrameGate(): FrameGate {
   let interval = -1; // -1 = 未初始化
   let next = 0;
+  let lastTick = 0;
+  let tickMs = 0; // 显示器帧周期估计（EWMA，ms）
   return (now: number, maxFps: number): boolean => {
+    // 估计显示器帧周期。>100ms 的空档（后台标签页、长任务）忽略，否则会把
+    // 估计值拉偏、进而让下面的放行判断失效。
+    if (lastTick > 0) {
+      const d = now - lastTick;
+      if (d > 0 && d < 100) tickMs = tickMs ? tickMs * 0.9 + d * 0.1 : d;
+    }
+    lastTick = now;
+
     const iv = Number.isFinite(maxFps) && maxFps > 0 ? 1000 / maxFps : 0;
-    if (iv === 0) {
-      // 不限帧：清空相位，永远放行。
+    // 不限帧；或上限不低于实际刷新率 → 无需节流，直接放行。
+    if (iv === 0 || (tickMs > 0 && iv <= tickMs * 1.05)) {
       interval = 0;
       return true;
     }
     if (iv !== interval) {
-      // 首次调用 / 上限变化：重置相位，本帧放行、下一帧起按新上限节流。
+      // 首次进入节流 / 上限变化：重置相位，本帧放行、下一帧起按新上限节流。
       interval = iv;
       next = now + iv;
       return true;

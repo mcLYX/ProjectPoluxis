@@ -36,37 +36,250 @@
     .screen { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column; pointer-events: auto; }
     .screen.hidden { display: none; }
 
-    /* Menu */
+    /* Menu — three bands: brand (top-left), card carousel (middle), toolbar (bottom). */
     #menu-screen {
       -ms-flex-pack: justify; justify-content: space-between; padding: 24px;
       background: rgba(5, 7, 13, 0.5);
     }
+    /* Top-left cluster: brand + album nav on one row. `align-self` keeps the
+     * cluster shrink-to-fit inside the column flex screen, so the corner badges
+     * anchor to the wordmark — not the viewport edge. */
+    .menu-top {
+      position: relative;
+      display: -ms-flexbox; display: flex;
+      -ms-flex-align: center; align-items: center;
+      -ms-flex-wrap: wrap; flex-wrap: wrap;
+      -ms-flex-item-align: start; -ms-align-self: flex-start; align-self: flex-start;
+    }
+    .menu-brand {
+      display: inline-block; padding: 0 78px 8px 0;
+      opacity: 1; visibility: visible;
+      transition: opacity 200ms ease, visibility 0s linear 0s;
+    }
+    /* Album nav (replaces the old "back" carousel card).
+     *   root list : wordmark shown, nav hidden.
+     *   in album  : the wordmark fades out AND leaves the flow (absolute, so it
+     *               leaves no gap behind) while the nav fades in at the left. */
+    .menu-nav {
+      display: none; -ms-flex-align: center; align-items: center;
+      margin: 0 0 8px 0;
+    }
+    .menu-top--album .menu-brand {
+      position: absolute; top: 0; left: 0; padding-bottom: 0;
+      opacity: 0; visibility: hidden;
+      transition: opacity 200ms ease, visibility 0s linear 200ms;
+    }
+    .menu-top--album .menu-nav {
+      display: -ms-flexbox; display: flex;
+      /* Toggling display:none → flex starts this animation fresh every time. */
+      animation: navIn 220ms ease backwards;
+    }
+    @keyframes navIn { from { opacity: 0; } to { opacity: 1; } }
+    .glass-nav {
+      margin-right: 8px; padding: 6px 12px; border-radius: 10px;
+      background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.42);
+      color: #67e8f9; font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease;
+    }
+    .glass-nav:hover { background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62); }
+    /* Inside an album the album name takes over the top-left identity: white and
+     * noticeably larger than the nav buttons. */
+    .menu-nav-title { color: #fff; font-size: 20px; font-weight: 800; letter-spacing: 1px; margin-left: 4px; }
     .menu-title {
-      font-size: 36px; font-weight: 900; letter-spacing: 6px; margin: 0;
+      font-size: 36px; font-weight: 900; letter-spacing: 6px; margin: 0; line-height: 1;
       background: linear-gradient(90deg, #06b6d4, #2563eb);
       -webkit-background-clip: text; background-clip: text;
       -webkit-text-fill-color: transparent;
-      text-align: center;
     }
-    /* IE11 fallback for gradient text is at the end of the stylesheet
-     * (must come after the base rules so it can override them). */
-    .menu-subtitle { text-align: center; font-size: 12px; color: #94a3b8; letter-spacing: 2px; margin: 4px 0 0 0; }
-    .chart-list { -ms-flex: 1 1 auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: 720px; width: 100%; margin: 0 auto; padding: max(16px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
+    /* IE fallback for gradient text lives at the end of the stylesheet
+     * (scoped to `.ie`, must come after these rules so it can override them). */
+    .menu-badge {
+      position: absolute; right: 0; font-size: 10px; font-weight: 700;
+      letter-spacing: 3px; text-transform: uppercase; color: #94a3b8; white-space: nowrap;
+    }
+    .menu-badge--project { top: 3px; }
+    .menu-badge--lite { bottom: 10px; color: #67e8f9; }
+    /* Card carousel: portrait cards laid out horizontally and scrollable.
+     * `margin-right` (not `gap`) because IE11's flexbox has no `gap` support. */
+    .chart-carousel {
+      -ms-flex: 1 1 auto; flex: 1 1 auto; min-height: 0; width: 100%;
+      display: -ms-flexbox; display: flex;
+      -ms-flex-align: center; align-items: center;
+      overflow-x: auto; overflow-y: hidden;
+      /* Scrolling stays enabled, but the native scrollbar is hidden: a bright bar
+       * under the dark cards is jarring, and its height/state changes the row
+       * layout as the card count grows. Each engine needs its own switch, and
+       * none of them are non-standard hacks. */
+      scrollbar-width: none;      /* Firefox 64+ (and Chromium 121+) */
+      -ms-overflow-style: none;   /* IE10/11 + legacy Edge */
+      /* The carousel is its own scroll container, so this is the touch-action
+       * that matters (the page-level `none` stops being considered here). */
+      -ms-touch-action: pan-x; touch-action: pan-x;
+      /* The vertical padding is exactly the room the selected card's -10px lift
+       * animates into: `overflow-x: auto` forces overflow-y to be non-visible,
+       * and that clip happens at the PADDING BOX — with the old 8px the lifted
+       * card lost its top 2px. 12px keeps the whole lift visible. */
+      padding: 12px max(12px, env(safe-area-inset-right, 0px)) 12px max(12px, env(safe-area-inset-left, 0px));
+    }
+    .chart-carousel::-webkit-scrollbar { width: 0; height: 0; }   /* WebKit / Blink */
+    .chart-carousel::-webkit-scrollbar-thumb { background: transparent; }
+    /* Album enter/leave transition: the row slides in from the direction of
+     * travel (drilling in → from the right, going back → from the left). The
+     * class is re-applied by buildMenu on every list change, which is what makes
+     * the animation replay. IE9 has no animations and simply shows the list. */
+    .chart-carousel--fwd { animation: listInFwd 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+    .chart-carousel--back { animation: listInBack 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+    @keyframes listInFwd {
+      from { opacity: 0; -ms-transform: translateX(28px); transform: translateX(28px); }
+      to { opacity: 1; -ms-transform: translateX(0); transform: translateX(0); }
+    }
+    @keyframes listInBack {
+      from { opacity: 0; -ms-transform: translateX(-28px); transform: translateX(-28px); }
+      to { opacity: 1; -ms-transform: translateX(0); transform: translateX(0); }
+    }
+    /* Collapsed card = a narrow "spine": 120px wide with the title rotated to run
+     * top-to-bottom. Selecting it widens the card to 208px and cross-fades the
+     * horizontal body in — same two-state idea as the full version, where the
+     * collapsed card is w-[28vw]/max-120px and the expanded one w-[85vw]/max-420px.
+     * Width is in the transition list, so the expand animates (IE10+; IE9 ignores
+     * the transition and just snaps). The back-ease overshoots slightly, which is
+     * what gives the expand its "pop". */
     .chart-card {
-      padding: 14px 18px; margin-bottom: 10px; border-radius: 14px; cursor: pointer;
-      background: rgba(9, 17, 36, 0.9); border: 1px solid rgba(6, 182, 212, 0.2);
+      position: relative; overflow: hidden; cursor: pointer; box-sizing: border-box;
+      -ms-flex: 0 0 auto; flex: 0 0 auto;
+      width: 120px; max-width: 36vw; height: 58vh; min-height: 160px; max-height: 360px;
+      margin-right: 14px; border-radius: 18px;
+      background: linear-gradient(160deg, rgba(16, 24, 44, 0.94) 0%, rgba(6, 9, 18, 0.97) 100%);
+      border: 1px solid rgba(6, 182, 212, 0.2);
+      transition: border-color 180ms ease, box-shadow 220ms ease,
+                  width 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+                  transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
     }
-    .chart-card:hover { border-color: rgba(6, 182, 212, 0.5); background: #0c1733; }
-    .chart-card.selected { border-color: #06b6d4; box-shadow: 0 0 18px rgba(6, 182, 212, 0.25); }
-    .chart-title { font-size: 16px; font-weight: 700; color: #fff; margin: 0 0 4px 0; }
-    .chart-meta { font-size: 12px; color: #94a3b8; }
-    .chart-bpm { display: inline-block; padding: 2px 8px; border-radius: 6px; border: 1px solid rgba(6,182,212,0.3); color: #67e8f9; margin-left: 8px; font-size: 11px; }
+    .chart-card:last-child { margin-right: 0; }
+    .chart-card:hover {
+      border-color: rgba(6, 182, 212, 0.5); box-shadow: 0 0 22px rgba(6, 182, 212, 0.22);
+      -ms-transform: translateY(-6px); transform: translateY(-6px);
+    }
+    /* Selected cards stay lifted (also on hover) so hovering never drops them. */
+    .chart-card.selected {
+      width: 365px; max-width: 54vw; max-height: 520px;
+      border-color: #06b6d4; box-shadow: 0 0 26px rgba(6, 182, 212, 0.32);
+      -ms-transform: translateY(-10px); transform: translateY(-10px);
+    }
+    .card-glow { position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; }
+    /* Bottom readability veil (same role as the full version's cover overlay). */
+    .card-veil {
+      position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none;
+      background: linear-gradient(to top, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.34) 46%, rgba(0,0,0,0.12) 100%);
+    }
+    /* Collapsed-state title: the card's own spine label (see .chart-card above).
+     * `left/right` give the box a definite block size, the height stays auto so
+     * the box hugs the text and `bottom` anchors it to the card's bottom — the
+     * same placement as the full version's collapsed title.
+     * `vertical-lr` runs the text top-to-bottom (lines would stack left→right);
+     * IE10/11 have no unprefixed `writing-mode` and use `-ms-writing-mode: tb-lr`,
+     * which is the spec's own mapping for `vertical-lr`. `text-orientation` is
+     * ignored by IE, where `tb-lr` already keeps CJK upright and rotates Latin. */
+    .card-title-v {
+      position: absolute; left: 14px; right: 14px; bottom: 14px;
+      font-size: 15px; font-weight: 800; line-height: 1.25; color: #fff;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+      -webkit-writing-mode: vertical-lr; -ms-writing-mode: tb-lr; writing-mode: vertical-lr;
+      -webkit-text-orientation: mixed; text-orientation: mixed;
+      /* Base rule describes the COLLAPSED card (a freshly built card is
+       * unselected), mirroring the .card-start reveal below: `visibility` is
+       * delayed when hiding so the fade-out is still visible. */
+      opacity: 1; visibility: visible;
+      transition: opacity 200ms ease, visibility 0s linear 0s;
+    }
+    .chart-card.selected .card-title-v {
+      opacity: 0; visibility: hidden;
+      transition: opacity 200ms ease, visibility 0s linear 200ms;
+    }
+    /* Collapsed-only badge: while the card is a narrow spine the horizontal body
+     * (with its .card-kind line) is hidden, so an album would be indistinguishable
+     * from a song. Only albums get this pill — the same idea as the full version's
+     * small 专辑 tag on its collapsed album cards. */
+    .card-kind-v { display: none; }
+    .chart-card--album .card-kind-v {
+      display: block; position: absolute; left: 10px; right: 10px; top: 12px; margin: 0;
+      font-size: 9px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+      text-align: center; color: #fbbf24;
+      opacity: 1; visibility: visible;
+      transition: opacity 200ms ease, visibility 0s linear 0s;
+    }
+    .chart-card--album.selected .card-kind-v {
+      opacity: 0; visibility: hidden;
+      transition: opacity 200ms ease, visibility 0s linear 200ms;
+    }
+    /* The horizontal body is the SELECTED state (kind / title / artist / BPM /
+     * difficulty chips). It stays in the DOM while collapsed and only fades, so
+     * selecting never rebuilds DOM. */
+    .card-body {
+      position: absolute; left: 14px; right: 14px; bottom: 54px;
+      opacity: 0; visibility: hidden;
+      -ms-transform: translateY(6px); transform: translateY(6px);
+      transition: opacity 200ms ease, transform 200ms ease, visibility 0s linear 200ms;
+    }
+    .chart-card.selected .card-body {
+      opacity: 1; visibility: visible;
+      -ms-transform: translateY(0); transform: translateY(0);
+      transition: opacity 200ms ease, transform 200ms ease, visibility 0s linear 0s;
+    }
+    .card-kind {
+      font-size: 9px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.45); margin-bottom: 6px;
+    }
+    .chart-card--album .card-kind { color: #fbbf24; }
+    .chart-title { font-size: 15px; font-weight: 800; color: #fff; margin: 0 0 4px 0; line-height: 1.25; word-break: break-word; }
+    .chart-meta { font-size: 11px; color: #94a3b8; line-height: 1.35; }
+    .chart-bpm { display: inline-block; margin-top: 8px; padding: 2px 7px; border-radius: 6px; border: 1px solid rgba(6,182,212,0.3); color: #67e8f9; font-size: 10px; }
+    .card-diffs { display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap; margin-top: 8px; }
+    .diff-btn {
+      margin: 0 4px 4px 0; padding: 3px 8px; border-radius: 7px;
+      background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.35);
+      color: #a5f3fc; font-family: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+      /* Chips are created on selection, so an insert animation (not a
+       * transition) is what slides them in. IE9 ignores @keyframes and simply
+       * shows them at their final style. */
+      animation: chipIn 220ms ease both;
+    }
+    @keyframes chipIn {
+      from { opacity: 0; -ms-transform: translateY(6px); transform: translateY(6px); }
+      to { opacity: 1; -ms-transform: translateY(0); transform: translateY(0); }
+    }
+    .diff-btn.active { background: rgba(6, 182, 212, 0.28); border-color: rgba(6, 182, 212, 0.75); color: #fff; }
+    /* In-card action button (bottom-right), revealed only on the selected card.
+     * The card element survives selection, so this reveal animates via a
+     * transition. `visibility` is delayed when hiding so the button stays
+     * non-interactive immediately but keeps fading out. */
+    .card-start {
+      position: absolute; right: 14px; bottom: 14px; margin-top: 0;
+      padding: 8px 14px; border-radius: 11px; font-size: 12px; letter-spacing: 1px;
+      opacity: 0; visibility: hidden;
+      -ms-transform: translateY(8px); transform: translateY(8px);
+      transition: opacity 200ms ease, transform 220ms ease, visibility 0s linear 220ms;
+    }
+    .chart-card.selected .card-start {
+      opacity: 1; visibility: visible;
+      -ms-transform: translateY(0); transform: translateY(0);
+      transition: opacity 200ms ease, transform 220ms ease, visibility 0s;
+    }
+    /* Higher specificity than the generic `.btn-start:hover` scale, which would
+     * otherwise be overridden by the `.selected .card-start` rule above. */
+    .chart-card.selected .card-start:hover {
+      -ms-transform: scale(1.04); transform: translateY(0) scale(1.04);
+    }
     .menu-footer {
       display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap;
       -ms-flex-align: center; align-items: center;
-      -ms-flex-pack: justify; justify-content: space-between;
       border-top: 1px solid rgba(6, 182, 212, 0.2); padding-top: 12px;
     }
+    /* Non-blocking status line under the carousel (download errors / timeouts).
+     * Empty → not rendered as a flex item, so the layout is untouched. */
+    .menu-status { display: none; font-size: 12px; color: #fca5a5; line-height: 1.5; margin: 0 0 10px 0; }
+    .menu-status--on { display: block; }
     .toolbar { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; font-size: 12px; color: #cbd5e1; }
     .toolbar > * { margin-right: 16px; }
     .toolbar > *:last-child { margin-right: 0; }
@@ -165,12 +378,26 @@
     }
     .modal-backdrop.active { display: block; }
     .modal-card {
+      position: relative;
       max-width: 560px; width: 100%; max-height: 88%; overflow-y: auto;
       margin: 0 auto; margin-top: 5%;
       background: rgba(14, 27, 56, 0.97); border: 1px solid rgba(6,182,212,0.3);
       border-radius: 18px; padding: 22px; box-sizing: border-box;
     }
-    .modal-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; }
+    .modal-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; padding-right: 40px; }
+    /* Icon-only close at the modal's top-right (replaces the old bottom 关闭
+     * button). The glyph is `×` (U+00D7) — present in every font in the Lite
+     * stack, unlike the math/dingbat crosses. */
+    .modal-close {
+      position: absolute; top: 10px; right: 10px; z-index: 1;
+      width: 30px; height: 30px; padding: 0; line-height: 1; border-radius: 9px; cursor: pointer;
+      background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.42);
+      color: #67e8f9; font-family: inherit; font-size: 18px; font-weight: 700;
+      transition: background 160ms ease, border-color 160ms ease;
+    }
+    .modal-close:hover { background: rgba(6, 182, 212, 0.22); border-color: rgba(6, 182, 212, 0.7); }
+    /* Explanatory line under a settings row (e.g. the frame-rate cap tradeoff). */
+    .modal-hint { font-size: 11px; color: #94a3b8; line-height: 1.5; margin: -2px 0 10px 0; }
     .modal-row { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; -ms-flex-pack: justify; justify-content: space-between; margin: 10px 0; font-size: 13px; color: #cbd5e1; }
     .modal-row label { -ms-flex: 0 0 auto; flex: 0 0 auto; min-width: 120px; margin-right: 12px; }
     .modal-row input[type="range"] { -ms-flex: 1 1 auto; flex: 1 1 auto; }
@@ -213,19 +440,85 @@
       background: rgba(6, 182, 212, 0.2); border-color: rgba(6, 182, 212, 0.62);
       box-shadow: 0 0 20px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     }
-    /* === IE11 fallbacks ===
-     * Must come AFTER all base rules so they can properly override.
-     * Targeted via IE11-specific media query. */
-    @media all and (-ms-high-contrast: none), (-ms-high-contrast: active) {
-      .menu-title {
-        background: transparent; background-image: none;
-        color: #06b6d4; -webkit-text-fill-color: #06b6d4;
-      }
-      .result-rank {
-        background: transparent; background-image: none;
-        color: #fbbf24; -webkit-text-fill-color: #fbbf24;
-      }
-      /* .btn-start needs no override: rgba() backgrounds and box-shadow work in
-       * IE11, so the glass look survives (only backdrop-filter blur is lost). */
-      .hud-progress-fill { background: #06b6d4; }
+    /* === Small screens =================================================
+     * The menu is a fixed three-band column: brand (top) → carousel (middle)
+     * → footer (bottom), packed with `justify-content: space-between`. Only the
+     * carousel is flexible, so on short/narrow phones the two chrome bands
+     * (24px screen padding + 36px wordmark + bordered footer) plus a
+     * viewport-sized card add up to more than the screen and the cards get
+     * squeezed / clipped. These rules hand the leftover space to the cards
+     * instead: the card height comes from the flex row rather than from `58vh`,
+     * and both chrome bands shrink.
+     * (IE9 has no flexbox at all — ie9.css replaces the whole layout there.) */
+    @media (max-height: 760px) {
+      #menu-screen { padding: 12px 14px; }
+      .menu-title { font-size: 26px; letter-spacing: 4px; }
+      .menu-brand { padding: 0 64px 4px 0; }
+      .menu-badge--project { top: 1px; }
+      .menu-badge--lite { bottom: 4px; }
+      /* Height follows the row now: 100% of the carousel's content box, so a
+       * squeezed row shortens the card instead of overflowing it. The old
+       * `min-height: 230px` is dropped — that floor is what forced the overflow —
+       * but a much smaller one is kept as insurance: every child of the card is
+       * absolutely positioned, so if an engine ever failed to resolve the
+       * percentage the card would collapse to zero height. `max-height` (380px,
+       * from the base rule) still caps it, and `align-items: center` keeps the
+       * card centered in the row.
+       * The carousel padding is bumped to 16px so the card does not butt up
+       * against the brand band / footer — the row is the only flexible band, so
+       * "card == row height" reads as three glued-together bars. It doubles as
+       * the clearance the selected card's -10px lift needs (see the base rule). */
+      .chart-carousel { padding-top: 16px; padding-bottom: 16px; }
+      .chart-card { height: 100%; min-height: 180px; max-height: 380px; }
+      .menu-footer { padding-top: 8px; }
+    }
+    /* IE11 resolves percentage heights on a flex item's child unreliably, so it
+     * keeps the viewport-relative height (`.ie` is set for any IE). */
+    .ie .chart-card { height: 58vh; min-height: 230px; }
+    /* Extra-tight screens (small landscape / very short viewports): shrink the
+     * card's contents too, so nothing is clipped by the card's overflow:hidden. */
+    @media (max-height: 560px) {
+      #menu-screen { padding: 8px 10px; }
+      .menu-title { font-size: 22px; letter-spacing: 3px; }
+      /* Every pixel of padding here is card height, so the clearance is trimmed
+       * back to 12px — and the lift is halved to 8px/5px to still fit inside it. */
+      .chart-carousel { padding-top: 12px; padding-bottom: 12px; }
+      .chart-card { min-height: 160px; margin-right: 10px; border-radius: 14px; }
+      .chart-card:hover { -ms-transform: translateY(-5px); transform: translateY(-5px); }
+      .chart-card.selected { -ms-transform: translateY(-8px); transform: translateY(-8px); }
+      .card-body { left: 12px; right: 12px; bottom: 44px; }
+      .card-title-v { left: 12px; right: 12px; bottom: 12px; font-size: 13px; }
+      .chart-title { font-size: 14px; }
+      .chart-meta { font-size: 10px; }
+      .card-start { padding: 7px 12px; }
+      .menu-footer { padding-top: 6px; }
+      .toolbar { font-size: 11px; }
+      .toolbar > * { margin-right: 10px; }
+    }
+    /* Narrow phones: the toolbar (Auto-Play + 3 buttons) is a single
+     * non-wrapping flex row, so below ~420px it overflows and the last button
+     * is cut off by the screen's hidden overflow. */
+    @media (max-width: 420px) {
+      #menu-screen { padding-left: 10px; padding-right: 10px; }
+      .toolbar { -ms-flex-wrap: wrap; flex-wrap: wrap; }
+      .toolbar > * { margin-right: 8px; }
+      /* No card width override here: both card states are already viewport-
+       * relative (`max-width: 36vw` collapsed / `54vw` selected). */
+    }
+
+    /* === IE fallbacks ===
+     * Scoped to the `.ie` class that the head script in index.template.html puts
+     * on <html> for ANY IE (9/10/11) — the old `@media (-ms-high-contrast)`
+     * sniffing is gone, so these are ordinary CSS rules that must come AFTER the
+     * base rules to override them.
+     * No IE supports background-clip:text, so the gradient wordmarks fall back to
+     * a solid accent colour. Everything else (rgba fills, box-shadow, -ms-flexbox)
+     * already works in IE11, so the glass look survives untouched. */
+    .ie .menu-title {
+      background: transparent; background-image: none;
+      color: #06b6d4; -webkit-text-fill-color: #06b6d4;
+    }
+    .ie .result-rank {
+      background: transparent; background-image: none;
+      color: #fbbf24; -webkit-text-fill-color: #fbbf24;
     }

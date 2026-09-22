@@ -20,7 +20,7 @@
    * without touching each handler. Walks a few levels up from the event target
    * because buttons may contain inline elements. */
   (function () {
-    var UI_HIT = /(^|\s)(btn-tool|btn-start|upload-btn|pause-btn|chart-card|diff-btn)(\s|$)/;
+    var UI_HIT = /(^|\s)(btn-tool|btn-start|card-start|upload-btn|pause-btn|chart-card|diff-btn)(\s|$)/;
     document.addEventListener('click', function (e) {
       var el = e.target || e.srcElement;
       for (var depth = 0; el && el.nodeType === 1 && depth < 4; depth++) {

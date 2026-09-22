@@ -15,6 +15,7 @@ import {
   resolveIdbUrl,
 } from './idb';
 import { getLibraryVersion } from './libraryStore';
+import { readBodyWithProgress, type BodyProgress } from '../utils/bodyProgress';
 import { getCurrentServer, type OnlineServer } from './onlineServers';
 
 // Local fallbacks (previously imported from removed modules)
@@ -41,6 +42,7 @@ export function getFallbackChart(_id?: string): ChartData {
 export async function loadChartForDifficulty(
   item: SongItem,
   difficultyIndex: number,
+  onProgress?: BodyProgress,
 ): Promise<ChartData> {
   const diff = item.difficulties[difficultyIndex];
   if (!diff) throw new Error('难度索引无效');
@@ -57,7 +59,11 @@ export async function loadChartForDifficulty(
     const url = raw.startsWith('idb://') ? await resolveIdbUrl(raw) : resolveBeatmapUrl(raw);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`谱面加载失败: ${res.status}`);
-    const json = await res.json();
+    /* 无进度回调时保留 res.json()（与既有行为一致）；需要进度时才把 body 当流读，
+     * 再自行按 UTF-8 解码（body 只能被消费一次，二者互斥）。 */
+    const json: unknown = onProgress
+      ? JSON.parse(new TextDecoder().decode(await readBodyWithProgress(res, onProgress)))
+      : await res.json();
     const result = parseAndValidateChart(json);
     if (!result.valid || !result.chart) throw new Error(result.error || '谱面校验失败');
     if (result.warnings?.length) {

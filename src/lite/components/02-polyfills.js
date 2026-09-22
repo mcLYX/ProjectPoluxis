@@ -150,6 +150,13 @@
     }
   }
 
+  /* True only when a real requestAnimationFrame exists. The setTimeout fallback
+   * (IE9) fires ~60Hz with jitter, and the frame-rate gate compares against an
+   * exact ideal schedule — on such a timer the gate would drop ~1 in 3 frames
+   * and make things *worse*. So the cap is only applied when this is true. */
+  var hasNativeRAF = !!(window.requestAnimationFrame
+    || window.webkitRequestAnimationFrame
+    || window.mozRequestAnimationFrame);
   var rAF = window.requestAnimationFrame
     || window.webkitRequestAnimationFrame
     || window.mozRequestAnimationFrame

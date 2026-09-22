@@ -22,6 +22,7 @@
       var light = adjustBrightness(accent, 1.35);
       var bright = adjustBrightness(accent, 1.6);
       var a20 = withAlpha(accent, 0.2), a30 = withAlpha(accent, 0.3),
+          a35 = withAlpha(accent, 0.35),
           a50 = withAlpha(accent, 0.5), a60 = withAlpha(accent, 0.6);
       var primaryGrad = 'linear-gradient(90deg,' + accent + ',' + adark + ')';
       /* Secondary (tool/upload/pause) and primary (start) glass buttons */
@@ -31,12 +32,22 @@
       var gPriHover = glass(accent, 0.28, 0.66, { px: 34, a: 0.45 }, 0.26);
       var css =
         '.chart-card{border-color:' + a20 + ';}' +
-        '.chart-card:hover{border-color:' + a50 + ';background:' + withAlpha(adark, 0.55) + ';}' +
-        '.chart-card.selected{border-color:' + accent + ';box-shadow:0 0 18px ' + a30 + ';}' +
+        /* Hover keeps only the border/glow accent so the card's own gradient
+         * background is not replaced by a flat fill. */
+        '.chart-card:hover{border-color:' + a50 + ';}' +
+        '.chart-card.selected{border-color:' + accent + ';box-shadow:0 0 26px ' + a30 + ';}' +
+        '.card-kind{color:' + withAlpha(accent, 0.75) + ';}' +
+        '.card-veil{background:linear-gradient(to top,rgba(0,0,0,0.88) 0%,' + withAlpha(adark, 0.4) + ' 46%,rgba(0,0,0,0.12) 100%);}' +
         '.chart-bpm{border-color:' + a30 + ';color:' + light + ';}' +
+        '.diff-btn{border-color:' + a35 + ';color:' + bright + ';}' +
+        '.diff-btn.active{border-color:' + withAlpha(accent, 0.75) + ';box-shadow:0 0 12px ' + a30 + ';}' +
         '.menu-footer{border-top-color:' + a20 + ';}' +
-        '.btn-tool,.upload-btn,.pause-btn{' + gSub + 'color:' + light + ';}' +
-        '.btn-tool:hover,.upload-btn:hover,.pause-btn:hover{' + gSubHover + '}' +
+        '.menu-badge--lite{color:' + bright + ';}' +
+        /* .glass-nav (top-left album nav) and .modal-close (modal ✕) share the
+         * secondary glass recipe so every plain button follows the active
+         * chart's accent color. */
+        '.btn-tool,.upload-btn,.pause-btn,.glass-nav,.modal-close{' + gSub + 'color:' + light + ';}' +
+        '.btn-tool:hover,.upload-btn:hover,.pause-btn:hover,.glass-nav:hover,.modal-close:hover{' + gSubHover + '}' +
         '.btn-start{' + gPri + 'color:#fff;}' +
         '.btn-start:hover{' + gPriHover + '}' +
         '.hud-score{text-shadow:0 0 12px ' + a60 + ';}' +
@@ -49,13 +60,11 @@
         '.modal-row input[type=number],.editor-textarea{border-color:' + a30 + ';}' +
         '.modal-row .val{color:' + light + ';}' +
         '.menu-title{background:' + primaryGrad + ';-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}' +
-        /* IE11 only: no background-clip:text support → solid accent text.
-         * rgba backgrounds / box-shadow DO work in IE11, so the glass buttons
-         * need no override here. */
-        '@media all and (-ms-high-contrast:none),(-ms-high-contrast:active){' +
-          '.hud-progress-fill{background:' + accent + ';}' +
-          '.menu-title{background:transparent;color:' + accent + ';-webkit-text-fill-color:' + accent + ';}' +
-        '}';
+        /* Any IE (`.ie` on <html>, set by the head script): no
+         * background-clip:text → solid accent text. rgba backgrounds and
+         * box-shadow DO work in IE11, so the glass buttons need no override. */
+        '.ie .menu-title{background:transparent;color:' + accent + ';-webkit-text-fill-color:' + accent + ';}' +
+        '.ie .hud-progress-fill{background:' + accent + ';}';
       if (!styleEl) {
         styleEl = document.createElement('style');
         styleEl.id = 'theme-style';

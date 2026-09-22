@@ -1,43 +1,92 @@
-/* IE9 overrides — minimal "just enough to click START GAME" fixes.
-     * Full layout polish is intentionally skipped per user requirement. */
+/* IE9 overrides — minimal "just enough to play" fixes.
+ *
+ * Every rule is scoped to `.ie9`, the class the head script in
+ * index.template.html adds to <html> when documentMode === 9. That makes this a
+ * plain, standard stylesheet (no conditional comments anywhere in the build) and
+ * guarantees the rules can never leak into modern browsers.
+ *
+ * IE9 has no flexbox and ignores `pointer-events: none` on HTML elements, so the
+ * goals here are only: (1) keep the menu readable in a crude block flow, and
+ * (2) keep each card's action button reachable/clickable. Layout polish is
+ * intentionally skipped. */
 
-    /* 1. Gradient-text fallback (webkit-background-clip:text not supported).
-     *    The IE11 media query above doesn't apply to IE9, so force solid color. */
-    .menu-title  { background: transparent !important; color: #06b6d4 !important; }
-    .result-rank { background: transparent !important; color: #fbbf24 !important; }
+    /* 1. Gradient-text fallback (`.ie` in base.css already covers this; repeated
+     *    here so this file is readable on its own). */
+    .ie9 .menu-title  { background: transparent !important; color: #06b6d4 !important; }
+    .ie9 .result-rank { background: transparent !important; color: #fbbf24 !important; }
 
-    /* 2. Flexbox not supported in IE9. Give menu-screen a crude block layout
-     *    so the title, chart-list, and footer (start button) are all visible.
-     *    We don't care about alignment — just that START is reachable. */
-    .screen { display: block !important; }
-    #menu-screen { padding: 16px; overflow: auto; }
-    .chart-list  { max-height: 45%; overflow-y: auto; margin: 8px 0; padding: 8px 0; }
-    .menu-footer { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(6,182,212,0.2); }
-    .toolbar     { display: block; }
-    .toolbar > * { display: inline-block; margin: 4px 8px 4px 0; }
-    .btn-start   { display: block; margin: 12px auto 0 auto; }
+    /* 2. No flexbox → block flow. The carousel becomes a vertical stack of
+     *    full-width cards so nothing is clipped off-screen, and each card's
+     *    START/Enter button is forced visible (IE9 cannot rely on the
+     *    `.selected` reveal alone) so the game is always reachable. */
+    .ie9 .screen { display: block !important; }
+    .ie9 #menu-screen { padding: 16px; overflow: auto; }
+    .ie9 .menu-top { display: block; }
+    .ie9 .menu-brand { display: block; padding: 0 0 6px 0; }
+    .ie9 .menu-badge { position: static; display: inline-block; margin-left: 8px; }
+    /* No animations in IE9, so the brand↔nav hand-over is done with display
+     * instead: the absolute-positioned faded-out brand would otherwise stay on
+     * screen (IE9 never runs the transition that hides it). */
+    .ie9 .menu-top--album .menu-brand { display: none; }
+    .ie9 .menu-nav { display: none; margin: 0 0 10px 0; }
+    .ie9 .menu-top--album .menu-nav { display: block; }
+    .ie9 .glass-nav { display: inline-block; margin-right: 8px; }
+    .ie9 .menu-nav-title { display: inline-block; }
+    .ie9 .chart-carousel { display: block; overflow: visible; padding: 0; margin: 8px 0; }
+    .ie9 .chart-card {
+      display: block; width: auto; max-width: none;
+      height: auto; min-height: 0; max-height: none; margin: 0 0 10px 0;
+      /* No transitions in IE9 — kill the -ms-transform hover/selected lift so it
+       * doesn't jump instantly under a block layout. */
+      -ms-transform: none !important;
+    }
+    .ie9 .card-glow, .ie9 .card-veil { display: none; }
+    .ie9 .card-body { position: static; padding: 12px; }
+    /* The rotated spine title (.card-title-v in base.css) is absolutely
+     * positioned, which would leave IE9's auto-height block cards with zero
+     * height — drop it back into the flow, unrotated. */
+    .ie9 .card-title-v {
+      position: static; padding: 12px;
+      -ms-writing-mode: lr-tb; writing-mode: lr-tb;
+    }
+    /* IE9's collapsed card shows the title in the flow, so the badge would just
+     * overlap it — the album pill is a narrow-spine-only nicety. */
+    .ie9 .card-kind-v { display: none; }
+    /* "Select a card → the START button appears" DOES work in IE9: the classList
+     * polyfill (02-polyfills.js) makes toggling `.selected` possible, so the
+     * shared `.chart-card.selected .card-start` reveal applies as-is. Only the
+     * layout needs a fix — the button is absolutely positioned inside a card with
+     * a fixed height, which IE9's auto-height block cards don't have — so pin it
+     * back into the flow once revealed. */
+    .ie9 .chart-card.selected .card-start {
+      position: static; display: inline-block; margin: 8px 12px 12px 12px;
+      -ms-transform: none; transform: none;
+    }
+    .ie9 .menu-footer { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(6,182,212,0.2); }
+    .ie9 .toolbar     { display: block; }
+    .ie9 .toolbar > * { display: inline-block; margin: 4px 8px 4px 0; }
 
     /* 3. Pause/result screens: rough centering so buttons are reachable */
-    .pause-card, .result-card { margin: 15% auto 0 auto; }
-    .result-row { display: block; }
-    .result-row span { display: inline-block; width: 48%; }
-    .result-actions { text-align: center; }
+    .ie9 .pause-card, .ie9 .result-card { margin: 15% auto 0 auto; }
+    .ie9 .result-row { display: block; }
+    .ie9 .result-row span { display: inline-block; width: 48%; }
+    .ie9 .result-actions { text-align: center; }
 
     /* 4. Modal layout — flex rows → floated labels + inline-block inputs */
-    .modal-row { display: block; padding: 4px 0; zoom: 1; overflow: hidden; }
-    .modal-row label { float: left; min-width: 120px; margin-right: 12px; }
-    .modal-row input[type="range"],
-    .modal-row input[type="number"],
-    .modal-row .val { display: inline-block; vertical-align: middle; margin: 2px 0; }
-    .modal-actions { text-align: right; }
+    .ie9 .modal-row { display: block; padding: 4px 0; zoom: 1; overflow: hidden; }
+    .ie9 .modal-row label { float: left; min-width: 120px; margin-right: 12px; }
+    .ie9 .modal-row input[type="range"],
+    .ie9 .modal-row input[type="number"],
+    .ie9 .modal-row .val { display: inline-block; vertical-align: middle; margin: 2px 0; }
+    .ie9 .modal-actions { text-align: right; }
 
     /* 5. pointer-events:none is ignored on IE9 HTML elements.
      *    The JS forwarder handles the event re-dispatch, but we also force
      *    overlay/hud to not claim mouse events by reducing their clickable
      *    footprint when their content is hidden. */
-    .overlay        { z-index: 10; }
-    .overlay > *    { position: static; }
-    .screen.hidden  { display: none !important; }
-    #hud            { z-index: 5; }
-    #hud:not(.active) { display: none !important; }
-    .hud-pause-btn  { z-index: 6; }
+    .ie9 .overlay        { z-index: 10; }
+    .ie9 .overlay > *    { position: static; }
+    .ie9 .screen.hidden  { display: none !important; }
+    .ie9 #hud            { z-index: 5; }
+    .ie9 #hud:not(.active) { display: none !important; }
+    .ie9 .hud-pause-btn  { z-index: 6; }

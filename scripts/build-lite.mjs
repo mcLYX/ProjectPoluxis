@@ -83,17 +83,18 @@ let appJs = result.code;
 /* Guard against a literal </script> inside the bundle breaking the HTML. */
 appJs = appJs.replace(/<\/script>/gi, '<\\/script>');
 
-/* 3. Read styles. */
+/* 3. Read styles.
+ * ie9.css is now plain, standard CSS whose every rule is scoped to `.ie9`
+ * (the class the head script in the template adds to <html> for IE9). It is
+ * inlined unconditionally — no IE conditional comments anywhere in the build. */
 const baseCss = fs.readFileSync(path.join(STYLE_DIR, 'base.css'), 'utf8');
-const ie9Css = fs.readFileSync(path.join(STYLE_DIR, 'ie9.css'), 'utf8');
-const ie9Block =
-  '<!--[if IE 9]>\n<style>\n' + ie9Css + '\n</style>\n<![endif]-->';
+const ieCss = fs.readFileSync(path.join(STYLE_DIR, 'ie9.css'), 'utf8');
 
 /* 4. Inline into the template. */
 let tpl = fs.readFileSync(TPL, 'utf8');
 const PLACEHOLDERS = [
   '<!--LITE_BASE_CSS-->',
-  '<!--LITE_IE9_CSS-->',
+  '<!--LITE_IE_CSS-->',
   '<!--LITE_APP_JS-->',
   '<!--LITE_PWA_MANIFEST-->',
   '<!--LITE_PWA_SW-->',
@@ -123,7 +124,7 @@ const SERVER_ROW =
 /* Replace with FUNCTIONS (not strings) so `$&`/`$'`/`$$` sequences inside the
  * minified JS / CSS are treated literally and never as replacement patterns. */
 tpl = tpl.replace('<!--LITE_BASE_CSS-->', () => '<style>\n' + baseCss + '\n</style>');
-tpl = tpl.replace('<!--LITE_IE9_CSS-->', () => ie9Block);
+tpl = tpl.replace('<!--LITE_IE_CSS-->', () => '<style>\n' + ieCss + '\n</style>');
 tpl = tpl.replace('<!--LITE_APP_JS-->', () => '<script>\n' + appJs + '\n</script>');
 tpl = tpl.replace('<!--LITE_PWA_MANIFEST-->', () => (enablePwa ? PWA_MANIFEST : ''));
 tpl = tpl.replace('<!--LITE_PWA_SW-->', () => (enablePwa ? PWA_SW : ''));
@@ -135,5 +136,5 @@ const kb = (s) => (Buffer.byteLength(s, 'utf8') / 1024).toFixed(1) + ' KB';
 console.log('build:lite complete');
 console.log('  out : ' + path.relative(root, OUT));
 console.log('  js  : ' + kb(appJs) + (minify ? ' (minified)' : ' (unminified)'));
-console.log('  css : ' + kb(baseCss) + ' + ' + kb(ie9Css) + ' (IE9)');
+console.log('  css : ' + kb(baseCss) + ' + ' + kb(ieCss) + ' (IE9, scoped)');
 console.log('  pwa : ' + (enablePwa ? 'on' : 'off') + ' | server row: ' + (enableServer ? 'on' : 'off'));

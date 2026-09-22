@@ -2170,9 +2170,12 @@ export function App() {
 
           {/* Dark Pause Overlay with Action Cards */}
           {gameState === 'paused' && countdownVal === null && (
-            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/65 backdrop-blur-md pointer-events-auto">
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center pointer-events-auto">
+              {/* 压暗 + 模糊单独成层（同 SongSelect）：容器自身带 backdrop-filter
+                  会成为后代的 backdrop root，让暂停卡片采不到真正的游戏画面。 */}
+              <div aria-hidden className="absolute inset-0 bg-black/65 backdrop-blur-md" />
               <div
-                className="glass-panel-strong text-center max-w-sm w-full p-6 rounded-3xl animate-in zoom-in-95 duration-200"
+                className="glass-panel-strong relative text-center max-w-sm w-full p-6 rounded-3xl animate-in zoom-in-95 duration-200"
                 style={{ borderColor: panelBorder }}
               >
                 <div

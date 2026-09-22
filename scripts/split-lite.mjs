@@ -1,15 +1,24 @@
 // split-lite.mjs
-// One-time extraction: turn the monolithic public/lite/index.html into
-// modular source under src/lite/ (components/*.js + styles/*.css + template).
+// HISTORICAL one-time extraction tool — kept only to document how the modular
+// Lite source was originally carved out of a single monolithic HTML file.
 //
-// The legacy Lite build is a single ES5 IIFE with heavily shared closure state,
-// so the "engineering" step here is a *verbatim, concern-based split*: each
-// section of the original <script> becomes its own file, and the build step
-// concatenates them back into one IIFE (preserving the shared scope) before
-// transpiling to ES5 + minifying + inlining into a single HTML file.
+// ⚠ Do NOT run this against the current tree: `public/lite/index.html` is now a
+//   BUILD ARTIFACT produced by scripts/build-lite.mjs, so re-splitting it would
+//   clobber the hand-maintained sources under src/lite/.
+//   `src/lite/index.template.html` is the authoritative markup.
 //
-// Run order:  node scripts/split-lite.mjs   (reads public/lite/index.html)
-//             node scripts/build-lite.mjs   (writes public/lite/index.html)
+// It turned the legacy monolithic Lite file into modular source under src/lite/
+// (components/*.js + styles/*.css + template). The legacy build was a single ES5
+// IIFE with heavily shared closure state, so the "engineering" step was a
+// *verbatim, concern-based split*: each section of the original <script> became
+// its own file, and the build step concatenates them back into one IIFE
+// (preserving the shared scope) before transpiling to ES5 + minifying + inlining
+// into a single HTML file.
+//
+// IE compatibility is no longer handled with conditional comments: the head
+// script in the template tags <html> with `ie` / `ie9` / `ie10` / `ie11`, and
+// src/lite/styles/ie9.css is plain CSS scoped to `.ie9` (hand-maintained, NOT
+// extracted by this tool).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -80,16 +89,14 @@ const baseMatch = html.match(/<style>([\s\S]*?)<\/style>/);
 if (!baseMatch) throw new Error('base <style> not found');
 fs.writeFileSync(path.join(STYLE_DIR, 'base.css'), baseMatch[1].trim() + '\n');
 
-const ie9Match = html.match(/<!--\[if IE 9\]>([\s\S]*?)<!\[endif\]-->/);
-if (!ie9Match) throw new Error('IE9 conditional block not found');
-const ie9Inner = ie9Match[1].match(/<style>([\s\S]*?)<\/style>/);
-if (!ie9Inner) throw new Error('IE9 inner <style> not found');
-fs.writeFileSync(path.join(STYLE_DIR, 'ie9.css'), ie9Inner[1].trim() + '\n');
+/* ---------- 3b. styles/ie9.css is intentionally NOT written here ----------
+ * It used to be pulled out of an IE9 conditional-comment block. That whole
+ * mechanism is gone: IE-specific rules are ordinary CSS scoped to `.ie9` and are
+ * maintained by hand in src/lite/styles/ie9.css. */
 
 /* ---------- 4. Produce the HTML template (placeholders for build step) ---------- */
 let tpl = html;
 tpl = tpl.replace(/<style>[\s\S]*?<\/style>/, '<!--LITE_BASE_CSS-->');
-tpl = tpl.replace(/<!--\[if IE 9\]>[\s\S]*?<!\[endif\]-->/, '<!--LITE_IE9_CSS-->');
 tpl = tpl.replace(/<script>[\s\S]*?<\/script>/, '<!--LITE_APP_JS-->');
 /* Optional blocks (filled by build-lite.mjs; dropped for platform builds). */
 tpl = tpl.replace(

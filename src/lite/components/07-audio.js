@@ -273,18 +273,102 @@
     }
   };
 
-  /* Load audio from a URL (for online beatmaps). IE11-compatible. */
-  LiteAudio.prototype.loadAudioUrl = function (url, onLoad, onError) {
+  /* Abort a download after this long with NO bytes received. Reset on every
+   * progress event, so a slow-but-moving download is never killed — only a
+   * genuinely stalled one is. */
+  var AUDIO_IDLE_MS = 25000;
+
+  /* Fetch + decode an audio URL. The decoded AudioBuffer is handed to `onLoad`
+   * WITHOUT touching this instance's state, so the menu can prefetch into its
+   * own cache and adopt the buffer only when it actually starts playing — a
+   * prefetched buffer must never leak into a chart that has no audio of its own.
+   *
+   * Slow / stalled networks: previously this had no timeout at all, so a dead
+   * connection left the UI hanging with no feedback forever. Now a stalled
+   * download is aborted and reported. `onProgress(loaded,total)` is XHR2-only
+   * (IE10+); without it the request still works, just without a percentage and
+   * with the timer acting as a plain total timeout.
+   * HTML5 mode (IE11 without Web Audio) cannot decode to a buffer, so callers
+   * there must use loadAudioUrl, which handles the <audio> element path.
+   *
+   * `onDecode()` fires once the bytes are all in and CPU-side decoding begins.
+   * That phase has no progress of its own and can take a noticeable while for a
+   * multi-MB file on a weak device, so the UI uses it to switch to a
+   * "decoding" label instead of freezing on the last percentage. */
+  LiteAudio.prototype.decodeAudioUrl = function (url, onLoad, onError, onProgress, onDecode) {
     this.init();
     var self = this;
-    /* HTML5 fallback (IE11) */
+    if (this.useHtml5 || !this.ctx) {
+      if (onError) onError(new Error('decodeAudioUrl unavailable'));
+      return;
+    }
+    var xhr = new XMLHttpRequest();
+    var finished = false;
+    var timer = 0;
+    function finish(err, buffer) {
+      if (finished) return;
+      finished = true;
+      if (timer) { window.clearTimeout(timer); timer = 0; }
+      if (err) { if (onError) onError(err); }
+      else { if (onLoad) onLoad(buffer); }
+    }
+    function armTimer() {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(function () {
+        /* Report BEFORE aborting: abort() fires readystatechange synchronously
+         * with status 0, which would otherwise win the race with a vaguer error. */
+        finish(new Error(L('errTimeout')));
+        try { xhr.abort(); } catch (e) {}
+      }, AUDIO_IDLE_MS);
+    }
+    try {
+      xhr.open('GET', url + (url.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now(), true);
+    } catch (e) { finish(e); return; }
+    xhr.responseType = 'arraybuffer';
+    if (onProgress) {
+      xhr.onprogress = function (e) {
+        armTimer();
+        onProgress(e ? e.loaded : 0, (e && e.lengthComputable) ? e.total : 0);
+      };
+    }
+    xhr.onload = function () {
+      if (xhr.status < 200 || xhr.status >= 300) { finish(new Error('HTTP ' + xhr.status)); return; }
+      /* Download done — from here on it is CPU-side decode with no progress of
+       * its own (this also covers a response served straight from the HTTP
+       * cache, where no progress event fires at all). */
+      if (onDecode) onDecode();
+      var success = function (buffer) { finish(null, buffer); };
+      var failure = function (err) { finish(err || new Error(L('errDecode'))); };
+      try {
+        /* IE11-style callback signature; modern engines return a Promise. */
+        var r = self.ctx.decodeAudioData(xhr.response, success, failure);
+        if (r && typeof r.then === 'function') r.then(success, failure);
+      } catch (e) { finish(e); }
+    };
+    xhr.onerror = function () { finish(new Error(L('errNet'))); };
+    armTimer();
+    xhr.send();
+  };
+
+  /* Load audio from a URL and adopt it as this instance's BGM buffer.
+   * `onDecode` is ignored on the HTML5 path (there is no decode step). */
+  LiteAudio.prototype.loadAudioUrl = function (url, onLoad, onError, onProgress, onDecode) {
+    this.init();
+    var self = this;
+    /* HTML5 fallback (IE11 / no Web Audio): an <audio> element, no decode.
+     * No byte progress is available here, so the guard is a plain timeout. */
     if (this.useHtml5) {
       var audioEl = document.createElement('audio');
       audioEl.src = url;
       audioEl.volume = this.musicVolume;
       var done = false;
+      var timer = window.setTimeout(function () {
+        if (done) return; done = true;
+        if (onError) onError(new Error(L('errTimeout')));
+      }, AUDIO_IDLE_MS);
       var onReady = function () {
         if (done) return; done = true;
+        window.clearTimeout(timer);
         self.htmlAudioEl = audioEl;
         self.hasUploadedAudio = true; self.forceSynth = false;
         if (onLoad) onLoad({ duration: audioEl.duration || 0 });
@@ -293,31 +377,15 @@
       audioEl.addEventListener('canplay', onReady);
       audioEl.addEventListener('error', function () {
         if (done) return; done = true;
+        window.clearTimeout(timer);
         if (onError) onError(new Error(L('errAudioLoad')));
       });
       return;
     }
-    if (!this.ctx) { if (onError) onError(new Error('AudioContext unavailable')); return; }
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', url + '?t=' + Date.now(), true);
-    xhr.responseType = 'arraybuffer';
-    xhr.onload = function () {
-      if (xhr.status < 200 || xhr.status >= 300) {
-        if (onError) onError(new Error('HTTP ' + xhr.status));
-        return;
-      }
-      var success = function (buffer) {
-        self.bgmBuffer = buffer; self.hasUploadedAudio = true; self.forceSynth = false;
-        if (onLoad) onLoad(buffer);
-      };
-      var failure = function (err) { if (onError) onError(err || new Error(L('errDecode'))); };
-      try {
-        var r = self.ctx.decodeAudioData(xhr.response, success, failure);
-        if (r && typeof r.then === 'function') r.then(success, failure);
-      } catch (e) { if (onError) onError(e); }
-    };
-    xhr.onerror = function () { if (onError) onError(new Error(L('errNet'))); };
-    xhr.send();
+    this.decodeAudioUrl(url, function (buffer) {
+      self.bgmBuffer = buffer; self.hasUploadedAudio = true; self.forceSynth = false;
+      if (onLoad) onLoad(buffer);
+    }, onError, onProgress, onDecode);
   };
 
   LiteAudio.prototype.setMusicVolume = function (v) {

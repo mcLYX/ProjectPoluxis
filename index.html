@@ -31,6 +31,66 @@
           document.addEventListener(t, function (e) { e.preventDefault(); }, { passive: false });
         });
       })();
+      // iOS（Safari / WKWebView）整页"橡皮筋"兜底。
+      // html/body 已经 position:fixed + overflow:hidden，文档本身不可滚动，但
+      // 它们仍保留 `touch-action: pan-x pan-y`，iOS 会把落在**静态区域**的拖拽
+      // 判定成一次滚动手势：文档滚不动时它会继续向上找可滚动祖先——Toy 容器
+      // 把页面放进 iframe 时那就是外层宿主文档，于是整个游戏被拖出屏幕、露出
+      // 外层白色底，松手回弹。（根滚动容器上的 overscroll-behavior 在 Safari
+      // 上并不可靠。）
+      // 做法：在 touchstart 时记下触点沿途是否有能滚动的容器，touchmove 时按
+      // 手势方向判断——没有对应方向的可滚动容器就 preventDefault，让这次手势
+      // 不再被当成滚动；有则原样放行给内层滚动（选歌卡片横滑、设置弹窗、编辑
+      // 器侧栏等）。
+      (function () {
+        var startX = 0, startY = 0, axis = 0, canX = false, canY = false;
+        function canScroll(el, vertical) {
+          var s = window.getComputedStyle(el);
+          var o = vertical ? s.overflowY : s.overflowX;
+          if (o !== 'auto' && o !== 'scroll') return false;
+          return vertical
+            ? el.scrollHeight - el.clientHeight > 1
+            : el.scrollWidth - el.clientWidth > 1;
+        }
+        function inFormControl(el) {
+          while (el && el.nodeType === 1) {
+            var tag = el.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return true;
+            el = el.parentNode;
+          }
+          return false;
+        }
+        document.addEventListener('touchstart', function (e) {
+          var t = e.touches[0];
+          if (!t) return;
+          startX = t.clientX; startY = t.clientY; axis = 0;
+          canX = canY = false;
+          if (inFormControl(e.target)) { canX = canY = true; return; } // 输入框内的选区拖拽不拦
+          var el = e.target;
+          while (el && el.nodeType === 1) {
+            var s = window.getComputedStyle(el);
+            // touch-action: none 的元素（画布、拖拽手柄等）浏览器本来就不会
+            // 把它当滚动，再 preventDefault 反而会触发 pointercancel 打断
+            // 正在进行的拖拽 —— 直接放行。
+            if (s.touchAction === 'none') { canX = canY = true; break; }
+            if (!canX && canScroll(el, false)) canX = true;
+            if (!canY && canScroll(el, true)) canY = true;
+            if (canX && canY) break;
+            el = el.parentNode;
+          }
+        }, { passive: true });
+        document.addEventListener('touchmove', function (e) {
+          if (e.touches.length > 1) { e.preventDefault(); return; }
+          var t = e.touches[0];
+          if (!t) return;
+          if (!axis) {
+            var dx = t.clientX - startX, dy = t.clientY - startY;
+            if (Math.abs(dx) > 6 || Math.abs(dy) > 6) axis = Math.abs(dy) > Math.abs(dx) ? 2 : 1;
+          }
+          var ok = axis === 2 ? canY : (axis === 1 ? canX : (canX || canY));
+          if (!ok && e.cancelable) e.preventDefault();
+        }, { passive: false });
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

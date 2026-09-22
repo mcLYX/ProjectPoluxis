@@ -30,7 +30,11 @@
     sizeScale: 1.0,
     musicVolume: 0.8,
     effectVolume: 0.9,
-    compatMode: false
+    compatMode: false,
+    /* Render frame-rate cap (0 = unlimited). Mirrors the full version's
+     * qualityStore.maxFps default: on 90/120/144Hz screens this drops the drawn
+     * frame count (and with it power draw) with almost no visual difference. */
+    maxFps: 60
   };
   try {
     var saved = window.localStorage && localStorage.getItem('poluxis-lite-settings');
@@ -751,7 +755,58 @@
     }
     return manualClock.time;
   }
+  /* ---- Frame-rate gate (mirrors the full version's utils/frameLimiter) ----
+   * A PHASE ACCUMULATOR, not a "compare against the previous frame" check: the
+   * latter drifts low on non-integer refresh ratios (144Hz targeting 60fps lands
+   * on 48). Here an ideal "next allowed time" is advanced by a fixed
+   * 1000/maxFps step, so the average rate equals maxFps on 90/120/144/165Hz.
+   * A skipped frame does NO work (no render, no judgment pass, no HUD write) but
+   * the rAF chain keeps running, which is where the saving comes from.
+   * `maxFps <= 0` = unlimited. */
+  var _fpsInterval = -1; /* -1 = not initialised */
+  var _fpsNext = 0;
+  var _fpsLastTick = 0;
+  var _fpsTickMs = 0; /* smoothed display frame period (ms) */
+  function frameGateAllows(t, maxFps) {
+    /* Track the display's own frame period (EWMA, gaps > 100ms ignored so a
+     * backgrounded tab can't distort it). Used for the pass-through below. */
+    if (_fpsLastTick > 0) {
+      var d = t - _fpsLastTick;
+      if (d > 0 && d < 100) _fpsTickMs = _fpsTickMs ? (_fpsTickMs * 0.9 + d * 0.1) : d;
+    }
+    _fpsLastTick = t;
+
+    var iv = (maxFps > 0 && isFinite(maxFps)) ? 1000 / maxFps : 0;
+    /* One refinement over the plain phase accumulator: a cap that is at or above
+     * the actual refresh rate passes straight through. Otherwise a 60 cap on a
+     * 60Hz panel fights the 16.67ms rounding and silently drops ~1 frame in 10
+     * (measured 54fps instead of 60) — the gate must only ever LOWER the rate. */
+    if (iv === 0 || (_fpsTickMs > 0 && iv <= _fpsTickMs * 1.05)) {
+      _fpsInterval = 0;
+      return true;
+    }
+    if (iv !== _fpsInterval) {
+      /* First gated call / the cap changed: reset the phase, let this frame run. */
+      _fpsInterval = iv;
+      _fpsNext = t + iv;
+      return true;
+    }
+    if (t < _fpsNext - 0.5) return false;
+    /* Advance by whole steps so the average rate stays exact and a long stall
+     * (backgrounded tab) never bursts a queue of frames. */
+    do { _fpsNext += iv; } while (_fpsNext <= t);
+    return true;
+  }
+
   function loop() {
+    /* Frame-rate cap. Skipped frames do nothing at all; game time comes from the
+     * wall clock / audio position, so dropping frames never slows the chart down.
+     * Only applied with a real rAF (see hasNativeRAF in 02-polyfills): the IE9
+     * setTimeout fallback is already ~60Hz and too jittery for an exact gate. */
+    if (hasNativeRAF && !frameGateAllows(now(), settings.maxFps)) {
+      animId = rAF(loop);
+      return;
+    }
     if (game.state === STATE.PLAYING) {
       var t = now();
       if (!manualClock.lastStamp) manualClock.lastStamp = t;

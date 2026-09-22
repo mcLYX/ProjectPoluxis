@@ -1,5 +1,12 @@
 import { NoteType } from '../types/game';
 import { clamp } from '../utils/math';
+import { readBodyWithProgress } from '../utils/bodyProgress';
+
+/** 加载阶段上报：下载中（含已下/总长）或解码中。供 UI 显示
+ *  「音频 42%」/「解码中」，避免网络慢时只有一个笼统的「加载中」。 */
+export type AudioLoadPhase =
+  | { phase: 'download'; loaded: number; total: number }
+  | { phase: 'decode' };
 
 export class AudioManager {
   private ctx: AudioContext | null = null;
@@ -390,8 +397,13 @@ export class AudioManager {
   }
 
   /** Load audio from a URL (e.g. /beatmaps/...mp3). Sets it as the active BGM
-   *  buffer if `setActive` is true. */
-  public async loadAudioURL(url: string, setActive = true): Promise<void> {
+   *  buffer if `setActive` is true. `onPhase` reports download progress and the
+   *  start of decoding so the caller can show a stage label. */
+  public async loadAudioURL(
+    url: string,
+    setActive = true,
+    onPhase?: (p: AudioLoadPhase) => void,
+  ): Promise<void> {
     this.init();
     if (!this.ctx) throw new Error('AudioContext failed to initialize');
     // 命中 URL 缓存：直接复用已解码缓冲，避免重复 fetch + decodeAudioData。
@@ -408,10 +420,16 @@ export class AudioManager {
     const res = await fetch(url);
     if (token !== this.loadToken) return;
     if (!res.ok) throw new Error(`HTTP ${res.status} loading ${url}`);
-    const arrayBuffer = await res.arrayBuffer();
+    const arrayBuffer = await readBodyWithProgress(
+      res,
+      onPhase && ((loaded, total) => onPhase({ phase: 'download', loaded, total })),
+    );
     if (token !== this.loadToken) return;
     let audioBuffer: AudioBuffer;
     try {
+      /* 字节已到齐，剩下的是 CPU 侧解码：它自身没有进度可报，但几 MB 的文件
+       * 在弱设备上可能明显耗时，所以单独告知一声，避免 UI 停在「音频 100%」。 */
+      onPhase?.({ phase: 'decode' });
       audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
     } catch {
       const isOgg = /\.ogg(\?|$)/i.test(url);
