@@ -83,16 +83,14 @@ export type EventType = 'speed_change' | 'text_display' | 'bg_change' | 'note_co
 export type JudgementType = 'S-Perfect' | 'Perfect' | 'Good' | 'Miss';
 
 /**
- * Graphics quality tiers.
- * - 'lite':    Replaces the 3D scene with a 2D canvas renderer (no WebGL at all).
- * - 'low':     No antialiasing, pixelRatio locked to 1.0, ambient bg is flat color.
- * - 'standard': Antialiasing on, pixelRatio up to 1.5, ambient bg uses audio frequency.
- * - 'high':    Standard + Bloom post-processing (if chart.effectToggles.bloom)
- *              + ambient particle field (if chart.effectToggles.particles).
- * - 'ultra':   High + notes become real light sources illuminating tunnel walls
- *              + hit bursts emit shattering light particles. Heavy GPU cost.
- * - 'custom':  User-defined tier; antialias / bloom / particles / renderScale
- *              are each controlled independently via the custom* settings.
+ * Graphics quality mode.
+ * - 'lite':    2D canvas renderer (no WebGL); the only mode that changes the
+ *              renderer itself. Routed in App.tsx; never loads three.js.
+ * - 'low' / 'standard' / 'high' / 'ultra': presets. They do NOT drive rendering
+ *              directly — selecting one backfills the `custom*` flags
+ *              (see qualityStore.PRESET_VALUES), and the 3D renderer consumes
+ *              only those flags. So a preset is just a shortcut for a flag set.
+ * - 'custom':  the `custom*` flags are edited independently by the user.
  */
 export type QualityMode = 'lite' | 'low' | 'standard' | 'high' | 'ultra' | 'custom';
 

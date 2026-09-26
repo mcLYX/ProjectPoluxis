@@ -30,7 +30,9 @@
     sizeScale: 1.0,
     musicVolume: 0.8,
     effectVolume: 0.9,
-    compatMode: false,
+    /* 默认开启：多数设备关闭后音画同步更好，但部分设备音频时钟不稳会出问题，
+     * 故以兼容模式为默认，异常时反而更稳。仅改默认值，文案与完整版不同步。 */
+    compatMode: true,
     /* Render frame-rate cap (0 = unlimited). Mirrors the full version's
      * qualityStore.maxFps default: on 90/120/144Hz screens this drops the drawn
      * frame count (and with it power draw) with almost no visual difference. */
@@ -132,6 +134,7 @@
    * scaleTarget = per-judgment growth factor (1.2/1.1/1.05/1.0) from JUDGE_SCALE.
    * Animation: size = baseSize * (1 + (scaleTarget-1) * sin(p*π/2)), 300ms, linear fade.
    * Mirrors GameCanvas.tsx L1338-1343 exactly. */
+  var burstPool = [];
   function spawnBurst(wx, wy, jType, nt, angle) {
     var p = project(wx, wy, 0, -1000);
     if (!p) return;
@@ -151,12 +154,12 @@
     } else {
       baseSize = (TAP_SIZE / 2) * view.pxPerUnit * p.scale * vs;
     }
-    game.bursts.push({
-      x: p.x, y: p.y, start: now(), dur: 300,
-      color: JUDGE_COLORS[jType], kind: kind, baseSize: baseSize,
-      scaleTarget: JUDGE_SCALE[jType] || 1.0,
-      angle: (typeof angle === 'number') ? angle : 0
-    });
+    var b = burstPool.pop() || {};
+    b.x = p.x; b.y = p.y; b.start = now(); b.dur = 300;
+    b.color = JUDGE_COLORS[jType]; b.kind = kind; b.baseSize = baseSize;
+    b.scaleTarget = JUDGE_SCALE[jType] || 1.0;
+    b.angle = (typeof angle === 'number') ? angle : 0;
+    game.bursts.push(b);
   }
   /* Draw active bursts. Shape varies by note type:
    *   tap → square, touch → circle, slide → diamond.
@@ -169,7 +172,7 @@
     for (var i = 0; i < game.bursts.length; i++) {
       var b = game.bursts[i];
       var prog = (t - b.start) / b.dur;
-      if (prog >= 1) continue;
+      if (prog >= 1) { burstPool.push(b); continue; }
       /* Sine-eased scale: 1 at start → scaleTarget at end (p=1).
        * multiplier = 1 + (scaleTarget - 1) * sin(p * π / 2) */
       var multiplier = 1 + (b.scaleTarget - 1) * Math.sin(prog * Math.PI * 0.5);
@@ -588,12 +591,12 @@
           if (samples.length < 2) continue;
 
           /* --- Slide pipe color/brightness effects (mirrors GameCanvas.tsx) ---
-           * 1. Red: destination node has redWarn / missLocked → SLIDE_RED.
+           * 1. Red: destination node has missLocked → SLIDE_RED.
            * 2. Holding: ANY bound pointer is down AND within the hit zone of the
            *    judge-plane cross-section (curve point at z=0, not the chord). */
           var slideRt = getSlideRt(note.id, allNodes.length);
           var nextNodeRt = slideRt.nodes[pi + 1];
-          var isRed = !!nextNodeRt && (nextNodeRt.missLocked || nextNodeRt.redWarn) && !judgedB;
+          var isRed = !!nextNodeRt && nextNodeRt.missLocked && !judgedB;
           var isHolding = false;
           if (!isRed) {
             var hasAnyBound = false;
@@ -631,7 +634,7 @@
           if (isHolding) brightness = isRed ? 2.7 : 2.3;
           else if (isRed) brightness = 1.7;
           var pipeColor = isRed ? SLIDE_RED : nc;
-          drawPipeCurve(samples, pipeColor, brightness);
+          drawPipeCurve(samples, pipeColor, brightness, vScale);
 
           /* Cross-section caps at the pipe ENDS (playhead edge + node B), fading
            * in smoothly as each end nears the judge plane (z≈0). Drawing the cap at
@@ -645,11 +648,11 @@
           var capAN = Math.max(0, 1 - Math.abs(wzN) / capZ);
           if (capA0 > 0.01) {
             var cp0 = project(nodeA.x + easeFn(visLo) * ex, nodeA.y + easeFn(visLo) * ey, wz0, spawnLimit);
-            if (cp0) drawPipeCap(cp0, pipeColor, capA0 * Math.min(1, brightness), cp0.scale);
+            if (cp0) drawPipeCap(cp0, pipeColor, capA0 * Math.min(1, brightness), cp0.scale, vScale);
           }
           if (capAN > 0.01) {
             var cpN = project(nodeA.x + easeFn(visHi) * ex, nodeA.y + easeFn(visHi) * ey, wzN, spawnLimit);
-            if (cpN) drawPipeCap(cpN, pipeColor, capAN * Math.min(1, brightness), cpN.scale);
+            if (cpN) drawPipeCap(cpN, pipeColor, capAN * Math.min(1, brightness), cpN.scale, vScale);
           }
         }
         /* Slide nodes + projection guides */
@@ -685,10 +688,7 @@
       if (item.kind === 'tap') drawTap(item.p, item.color, vScale, item.angle);
       else if (item.kind === 'touch') drawTouch(item.p, item.color, vScale, item.angle);
       else {
-        /* Red-warn slide nodes (bound pointer off-node) flash red. */
-        var rt = game.slideStates[item.noteId];
-        var isRed = rt && rt.nodes[item.nodeIdx] && rt.nodes[item.nodeIdx].redWarn;
-        drawSlideNode(item.p, isRed ? SLIDE_RED : item.color, vScale, item.isHead, item.angle);
+        drawSlideNode(item.p, item.color, vScale, item.isHead, item.angle);
       }
     }
 
@@ -852,12 +852,29 @@
    * (tie-break by id). After consuming `best`, merge its own box into the other
    * hittable same-time taps so subsequent presses on the overlap can still reach
    * them. Does NOT cross into later time windows. */
+  var tapNotesCache = null, tapNotesCacheKey = null;
+  function getTapNotes() {
+    if (tapNotesCache && tapNotesCacheKey === game.notes) return tapNotesCache;
+    tapNotesCache = game.notes.filter(function (n) { return n.type === 'tap'; });
+    tapNotesCacheKey = game.notes;
+    return tapNotesCache;
+  }
+  function findWindowOf(notes, curTime, spawnLimit) {
+    var speed = game.speed * game.speedMul;
+    var pastBuffer = 0.3 + (game.maxSlideSpan || 0), futureBuffer = -spawnLimit / speed + 0.3;
+    var pastTh = curTime - pastBuffer, futureTh = curTime + futureBuffer;
+    var lo = 0, hi = notes.length, mid;
+    while (lo < hi) { mid = (lo + hi) >> 1; if (notes[mid].timeSec < pastTh) lo = mid + 1; else hi = mid; }
+    var first = lo; lo = first; hi = notes.length;
+    while (lo < hi) { mid = (lo + hi) >> 1; if (notes[mid].timeSec <= futureTh) lo = mid + 1; else hi = mid; }
+    return { first: first, last: lo };
+  }
   function findHitTapNote(wx, wy, curTime) {
+    var tapNotes = getTapNotes();
     var overlapSet = [];
-    var win = findWindow(curTime, -game.renderDist);
+    var win = findWindowOf(tapNotes, curTime, -game.renderDist);
     for (var i = win.first; i < win.last; i++) {
-      var n = game.notes[i];
-      if (n.type !== 'tap') continue;
+      var n = tapNotes[i];
       if (game.judged[n.id]) continue;
       var dtMs = Math.abs((curTime - n.timeSec) * 1000);
       if (dtMs >= HIT_WINDOW_MS) continue;
@@ -940,7 +957,8 @@
         rt.nodes.push({
           judged: false, missLocked: false, everInZone: false,
           lastInsideTime: null, lastInsidePointerId: null,
-          arrivalChecked: false, redWarn: false, tailLockedSPerfect: false
+          arrivalChecked: false, tailLockedSPerfect: false,
+          earlySPLocked: false, earlyTouchIds: []
         });
       }
       game.slideStates[noteId] = rt;
@@ -983,8 +1001,34 @@
       if (ns.judged) continue;
       var dtI = (curTime - allNodes[i].timeSec) * 1000;
       if (dtI > HIT_WINDOW_MS) {
-        ns.judged = true; ns.redWarn = false;
+        ns.judged = true;
         commitJudge(note.id + '#' + i, 'Miss', dtI, allNodes[i].x, allNodes[i].y, 'slide', allNodes[i].angle);
+      }
+    }
+
+    /* 头节点特殊逻辑的生效区间：默认持续到「头节点时间 + HIT_WINDOW_MS」；
+     * 若第一子节点与头节点相距不足 HIT_WINDOW_MS，则只持续到第一子节点的时间，
+     * 避免宽松窗口越界覆盖子节点自身的判定。 */
+    var headT = allNodes[0].timeSec;
+    var child1T = allNodes.length > 1 ? allNodes[1].timeSec : Infinity;
+    var headWindowEnd = Math.min(headT + HIT_WINDOW_MS / 1000, child1T);
+    var headSpecialActive = curTime < headWindowEnd;
+
+    /* 2) 头节点开放绑定窗口：头节点一旦被命中（judged），在上述区间内持续把
+     * 「处于头节点判定盒内」的手指自由加入链上绑定。这样即便划过的 A 先被判定、
+     * 真正要接的 B 晚一帧才按下（甚至 A 已抬起），B 仍能在窗口内加入接管；
+     * 交叉 slide 中划过且仍在盒内的 A 也能自由加绑（多一个绑定只更安全）。
+     * 仅在头已被命中后才加绑，避免早期窗口（-160..0）提前产生绑定而误触发红锁。 */
+    if (rt.nodes[0].judged && headSpecialActive) {
+      var hx = allNodes[0].x;
+      var hy = allNodes[0].y;
+      for (var hk in game.pointers) {
+        if (!game.pointers.hasOwnProperty(hk)) continue;
+        var hp = game.pointers[hk];
+        if (!hp.down) continue;
+        if (Math.abs(hp.x - hx) < SLIDE_HIT_HALF && Math.abs(hp.y - hy) < SLIDE_HIT_HALF) {
+          rt.boundPointerIds[hk] = true;
+        }
       }
     }
 
@@ -992,47 +1036,12 @@
      * below AND for step 3. Mirrors GameCanvas.processSlide. */
     var nextIdx = -1;
     for (var k0 = 0; k0 < rt.nodes.length; k0++) { if (!rt.nodes[k0].judged) { nextIdx = k0; break; } }
-    var ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
-
-    /* 2) Release detection + off-node pruning (faithful to GameCanvas).
-     * A still-down bound finger that has slid OFF the next node is dropped ONLY
-     * when another bound finger is already ON that node. This keeps the correct
-     * finger bound through split slides / shared starts, instead of dropping it
-     * and wrongly binding whatever was grabbed first. */
-    var boundKeys = Object.keys(rt.boundPointerIds);
-    if (boundKeys.length > 0) {
-      var allReleased = true;
-      for (var bpid in rt.boundPointerIds) {
-        if (!rt.boundPointerIds.hasOwnProperty(bpid)) continue;
-        var bp = game.pointers[bpid];
-        if (bp && bp.down) { allReleased = false; }
-        else { delete rt.boundPointerIds[bpid]; }
-      }
-      if (ndForCheck && Object.keys(rt.boundPointerIds).length > 0) {
-        var onNodeBound = [], offNodeBound = [];
-        for (var pidc in rt.boundPointerIds) {
-          if (!rt.boundPointerIds.hasOwnProperty(pidc)) continue;
-          var bpc = game.pointers[pidc];
-          var onNode = !!bpc && bpc.down &&
-            Math.abs(bpc.x - ndForCheck.x) < SLIDE_HIT_HALF &&
-            Math.abs(bpc.y - ndForCheck.y) < SLIDE_HIT_HALF;
-          (onNode ? onNodeBound : offNodeBound).push(pidc);
-        }
-        if (onNodeBound.length > 0) {
-          for (var oi = 0; oi < offNodeBound.length; oi++) delete rt.boundPointerIds[offNodeBound[oi]];
-        }
-      }
-      if (allReleased && Object.keys(rt.boundPointerIds).length === 0 && nextIdx >= 0) {
-        var nns = rt.nodes[nextIdx];
-        if (!nns.judged && !nns.tailLockedSPerfect) { nns.missLocked = true; nns.redWarn = false; }
-      }
-    }
-
-    /* 3) Interact with the current next node (nextIdx / ndForCheck computed above) */
     if (nextIdx < 0) return;
     var cns = rt.nodes[nextIdx];
     var cnd = allNodes[nextIdx];
     var dt = (curTime - cnd.timeSec) * 1000;
+    var isTail = nextIdx === allNodes.length - 1;
+    var isHead = nextIdx === 0;
 
     if (game.autoPlay) {
       if (dt >= 0 && !cns.judged) {
@@ -1041,105 +1050,120 @@
         audio.playHitSound('slide');
         spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
       }
-      cns.redWarn = false;
       return;
     }
 
-    if (cns.missLocked) { cns.redWarn = false; return; }
+    if (cns.missLocked) return;
 
-    /* --- Tail-node special rule ---
-     * The last slide node has relaxed judgement: if ANY bound pointer is still
-     * on screen (anywhere) when the node enters the hit window (-160ms), lock
-     * it for S-Perfect. Player just needs to hold through the end. */
-    var isTail = nextIdx === allNodes.length - 1;
+    /* Unified per-frame scan: maintain bindings AND classify every down finger. */
+    var hadBinding = Object.keys(rt.boundPointerIds).length > 0;
+    var anyDown = false;
+    var allDown = [];
+    var onNode = [];
+    var boundOnNode = 0;
+    var boundOffNode = [];
+    for (var pk in game.pointers) {
+      if (!game.pointers.hasOwnProperty(pk)) continue;
+      var pp = game.pointers[pk];
+      var isBound = rt.boundPointerIds.hasOwnProperty(pk);
+      if (isBound && !pp.down) { delete rt.boundPointerIds[pk]; continue; }
+      if (!pp.down) continue;
+      anyDown = true;
+      allDown.push(pk);
+      var inBox = Math.abs(pp.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(pp.y - cnd.y) < SLIDE_HIT_HALF;
+      var elig = hadBinding ? isBound : true;
+      if (inBox && elig) onNode.push(pk);
+      if (isBound) { if (inBox) boundOnNode++; else boundOffNode.push(pk); }
+    }
+    /* Drop bound pointers that have lifted. This runtime deletes lifted pointers
+     * from game.pointers entirely, so the scan above never sees them — remove
+     * them here so the chain can detect a full release (→ red lock / Miss). */
+    var boundKeys2 = Object.keys(rt.boundPointerIds);
+    for (var dk = 0; dk < boundKeys2.length; dk++) {
+      var bp2 = game.pointers[boundKeys2[dk]];
+      if (!bp2 || !bp2.down) delete rt.boundPointerIds[boundKeys2[dk]];
+    }
+    if (boundOnNode > 0) for (var bo = 0; bo < boundOffNode.length; bo++) delete rt.boundPointerIds[boundOffNode[bo]];
+    var allReleased = Object.keys(rt.boundPointerIds).length === 0;
+
+    /* Tail relaxed rule: held through the end. */
     if (isTail && !cns.tailLockedSPerfect && dt >= -HIT_WINDOW_MS) {
-      var hasBound = false;
-      for (var tpid0 in rt.boundPointerIds) {
-        if (!rt.boundPointerIds.hasOwnProperty(tpid0)) continue;
-        hasBound = true;
-        var bpp0 = game.pointers[tpid0];
-        if (bpp0 && bpp0.down) { cns.tailLockedSPerfect = true; break; }
-      }
-      if (!hasBound) {
-        for (var tpid in game.pointers) {
-          if (!game.pointers.hasOwnProperty(tpid)) continue;
-          if (game.pointers[tpid].down) { cns.tailLockedSPerfect = true; break; }
-        }
-      }
+      if (Object.keys(rt.boundPointerIds).length > 0 || anyDown) cns.tailLockedSPerfect = true;
     }
 
-    /* Collect EVERY finger currently on the node (multi-finger binding, mirrors
-     * GameCanvas onNodePids). Bound chain → any bound pointer; free → any held. */
-    var boundCount = Object.keys(rt.boundPointerIds).length;
-    var onNodePids = [];
-    if (boundCount > 0) {
-      for (var bpid3 in rt.boundPointerIds) {
-        if (!rt.boundPointerIds.hasOwnProperty(bpid3)) continue;
-        var p = game.pointers[bpid3];
-        if (p && p.down &&
-            Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF) {
-          onNodePids.push(bpid3);
-        }
-      }
-    } else {
-      for (var pid in game.pointers) {
-        if (!game.pointers.hasOwnProperty(pid)) continue;
-        var p2 = game.pointers[pid];
-        if (!p2.down) continue;
-        if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
+    /* Red lock on full release (tail exempt).
+     * 头节点特殊窗口内不立即落锤：只记录「发生过全松手」，等窗口结束再裁定
+     * （期间允许目标手指 B 自由加绑接管，避免划过的 A 抬起就误判 misslock）。 */
+    if (hadBinding && allReleased && nextIdx >= 0 && !cns.judged && !cns.tailLockedSPerfect) {
+      if (headSpecialActive) rt.headReleasePending = true;
+      else cns.missLocked = true;
+    }
+    if (!headSpecialActive && rt.headReleasePending) {
+      rt.headReleasePending = false;
+      /* 窗口结束时仍无人绑定 → 链确已放弃，才红锁下一个未判定节点。 */
+      if (Object.keys(rt.boundPointerIds).length === 0 && nextIdx >= 0 && !cns.judged && !cns.tailLockedSPerfect) {
+        cns.missLocked = true;
       }
     }
+    if (cns.missLocked) return;
 
-    if (boundCount > 0 && onNodePids.length > 0) cns.everInZone = true;
-
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
+    /* Bookkeeping. */
+    if (Object.keys(rt.boundPointerIds).length > 0 && onNode.length > 0) cns.everInZone = true;
+    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNode.length > 0) {
       cns.lastInsideTime = curTime;
-      cns.lastInsidePointerId = onNodePids[0];
+      cns.lastInsidePointerId = onNode[0];
+    }
+
+    /* Pre-window early S-Perfect lock (lenient early sweep). */
+    if (!cns.judged && !cns.earlySPLocked && dt < 0 && dt >= -HIT_WINDOW_MS && onNode.length > 0) {
+      cns.earlySPLocked = true;
+      if (isHead) for (var ei = 0; ei < onNode.length; ei++) {
+        if (cns.earlyTouchIds.indexOf(onNode[ei]) === -1) cns.earlyTouchIds.push(onNode[ei]);
+      }
+    }
+
+    function judge(j, bindPids) {
+      cns.judged = true;
+      for (var bi = 0; bi < bindPids.length; bi++) rt.boundPointerIds[bindPids[bi]] = true;
+      commitJudge(note.id + '#' + nextIdx, j, dt);
+      audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j, 'slide', cnd.angle);
     }
 
     if (dt >= 0 && !cns.judged) {
-      /* Tail-node locked S-Perfect: any bound pointer is on screen → instant S-Perfect.
-       * Doesn't require being in the spatial zone, just holding through the end. */
-      if (isTail && cns.tailLockedSPerfect) {
-        cns.judged = true;
-        if (boundCount === 0) {
-          for (var tpid2 in game.pointers) {
-            if (!game.pointers.hasOwnProperty(tpid2)) continue;
-            if (game.pointers[tpid2].down) rt.boundPointerIds[tpid2] = true;
+      var sPerfect = false;
+      if (cns.earlySPLocked) {
+        if (isHead) {
+          /* 优先绑定「当前仍在判定盒内」的手指：这把真正在头节点处按下的手指
+           * （B）以及仍停在盒内的合法早扫 / 拖入手指判给头节点，避免被只是扫过的
+           * A 抢走。仅当盒内当前无人时，才回退到宽松早锁（早扫过但手指仍按着）。 */
+          if (onNode.length > 0) {
+            sPerfect = true;
+            judge('S-Perfect', onNode.slice());
+          } else {
+            var earlyAnyDown = cns.earlyTouchIds.some(function (id) {
+              var p = game.pointers[id];
+              return !!p && p.down;
+            });
+            if (earlyAnyDown) { sPerfect = true; judge('S-Perfect', cns.earlyTouchIds.slice()); }
+            else { cns.earlySPLocked = false; cns.earlyTouchIds = []; }
           }
+        } else {
+          sPerfect = true; judge('S-Perfect', []);
         }
-        commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
-        audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
-      } else if (!cns.arrivalChecked) {
-        cns.arrivalChecked = true;
-        if (onNodePids.length > 0) {
-          cns.judged = true;
-          for (var bi = 0; bi < onNodePids.length; bi++) rt.boundPointerIds[onNodePids[bi]] = true;
-          commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
-          audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide');
-        }
-      } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
-        var j2 = evaluateJudgement(dt);
-        if (j2) {
-          cns.judged = true;
-          for (var bi2 = 0; bi2 < onNodePids.length; bi2++) rt.boundPointerIds[onNodePids[bi2]] = true;
-          commitJudge(note.id + '#' + nextIdx, j2, dt);
-          audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j2, 'slide', cnd.angle);
+      }
+      if (!cns.judged && !sPerfect) {
+        if (isTail && cns.tailLockedSPerfect) {
+          judge('S-Perfect', Object.keys(rt.boundPointerIds).length > 0 ? [] : allDown.slice());
+        } else if (!cns.arrivalChecked) {
+          cns.arrivalChecked = true;
+          if (onNode.length > 0) judge('S-Perfect', onNode.slice());
+        } else if (onNode.length > 0 && dt <= HIT_WINDOW_MS) {
+          var j2 = evaluateJudgement(dt);
+          if (j2) judge(j2, onNode.slice());
         }
       }
     }
 
-    /* 4) Red warning: NONE of the bound pointers are on node but another held pointer is on it */
-    cns.redWarn = false;
-    if (!cns.judged && boundCount > 0 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
-      for (var pid2 in game.pointers) {
-        if (!game.pointers.hasOwnProperty(pid2)) continue;
-        if (rt.boundPointerIds.hasOwnProperty(pid2)) continue;
-        var p3 = game.pointers[pid2];
-        if (!p3.down) continue;
-        if (Math.abs(p3.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p3.y - cnd.y) < SLIDE_HIT_HALF) { cns.redWarn = true; break; }
-      }
-    }
   }
 
   /* Per-frame touch note judgment — faithful port of GameCanvas L1296-1316.

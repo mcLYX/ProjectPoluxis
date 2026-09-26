@@ -89,6 +89,30 @@
         }, { passive: false });
       })();
     </script>
+    <script>
+      // 启动看门狗：capability.js 只能覆盖"已知"的语法 / 接口门槛，这里兜住未知缺口。
+      // 若模块脚本加载或解析失败（老浏览器不支持产物语法、资源被拦截、CSP 等），
+      // 或超过时限仍未启动，就复用 capability.js 的兜底卡片提示。
+      // 好处：不需要预先知道"从哪个 Chrome 版本开始才行"也能优雅降级。
+      (function () {
+        var BOOT_TIMEOUT = 15000;
+        function booted() { return !!window.__POLUXIS_BOOTED__; }
+        function fail(reason) {
+          if (booted() || window.__POLUXIS_FALLBACK_DONE__) return;
+          window.__POLUXIS_FALLBACK_DONE__ = true;
+          if (typeof window.__POLUXIS_FALLBACK__ === 'function') window.__POLUXIS_FALLBACK__(reason);
+        }
+        // 资源（module script / CSS）加载或解析错误不会冒泡到 window 的常规
+        // error 处理，必须在捕获阶段监听，且以 e.target 是否为元素来判定。
+        window.addEventListener('error', function (e) {
+          if (e && e.target && e.target.nodeType === 1) {
+            var tag = e.target.tagName;
+            if (tag === 'SCRIPT' || tag === 'LINK') fail('boot_failed');
+          }
+        }, true);
+        window.setTimeout(function () { if (!booted()) fail('boot_failed'); }, BOOT_TIMEOUT);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

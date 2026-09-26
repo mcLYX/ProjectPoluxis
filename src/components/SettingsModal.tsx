@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette,
-  User, Upload, Trash2, LogIn, LogOut, Gauge,
+  User, Upload, Trash2, LogIn, LogOut, Gauge, Gamepad2,
 } from 'lucide-react';
 import type { QualityMode } from '../types/game';
 import { useI18n, LANGS } from '../i18n';
@@ -9,7 +9,7 @@ import { NetworkSettings } from './NetworkSettings';
 import { DocContent } from './DocModal';
 import SkinManager from './SkinManager';
 // R4-6: quality 渲染设置改由模块级 qualityStore 承载（不再经 App props 传递）。
-import { qualityStore, useQuality } from '../qualityStore';
+import { qualityStore, useQuality, type QualityState, PRESET_VALUES } from '../qualityStore';
 // 账号切片：模块级 accountStore（与 qualityStore 同范式），避免经 App props 透传。
 import { accountStore, getDisplayAccount, normalizeNickname, MAX_NICKNAME_LENGTH, useAccount } from '../accountStore';
 import { storeAvatar, validateAvatarFile, type AvatarReject } from '../utils/avatar';
@@ -18,15 +18,17 @@ import { usePlatform } from '../platform/PlatformContext';
 import { hasPlatformIdentity } from '../platform';
 
 /** 自定义档位下的单项开关（抗锯齿 / Bloom / 粒子）。 */
-const QualityToggle: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({
+const QualityToggle: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }> = ({
   label,
   checked,
   onChange,
+  disabled = false,
 }) => (
-  <label className="flex items-center justify-between p-3 rounded-xl bg-white/[0.04] border border-white/10 cursor-pointer">
+  <label className={`flex items-center justify-between p-3 rounded-xl bg-white/[0.04] border border-white/10 ${disabled ? 'opacity-40 pointer-events-none' : 'cursor-pointer'}`}>
     <span className="text-sm text-white/80">{label}</span>
     <button
       type="button"
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-cyan-500/70' : 'bg-white/15'}`}
     >
@@ -36,6 +38,9 @@ const QualityToggle: React.FC<{ label: string; checked: boolean; onChange: (v: b
     </button>
   </label>
 );
+
+/** 各预设对应的自定义项有效值（不含帧率上限）来自 qualityStore.PRESET_VALUES，
+ *  切换预设时据此把值同步写入 custom*，用于「切换预设时同步展示」。 */
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -73,7 +78,7 @@ interface SettingsModalProps {
   setDefaultSkinJudgeWidth: (value: number) => void;
 }
 
-type SettingsTab = 'graphics' | 'skin' | 'account' | 'sound' | 'language' | 'network' | 'about';
+type SettingsTab = 'game' | 'graphics' | 'skin' | 'account' | 'sound' | 'language' | 'network' | 'about';
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
@@ -120,9 +125,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarError, setAvatarError] = useState<AvatarReject | 'generic' | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     setNameDraft(display.nickname);
   }, [display.nickname]);
+  // 切换左侧栏目时把右侧滚动容器滚回顶部：否则上一栏（较长）遗留的 scrollTop 会套到
+  // 新栏（较短）内容上，表现为「滑动一半并卡住」，移动端惯性滑动中还会冻结原生滚动。
+  // rAF 再补一次以覆盖 iOS 惯性滚动（useEffect 提交后、下一帧前 momentum 才停）。
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    el.scrollTop = 0;
+    const id = requestAnimationFrame(() => { el.scrollTop = 0; });
+    return () => cancelAnimationFrame(id);
+  }, [tab]);
 
   if (!isOpen) return null;
 
@@ -137,6 +153,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const qualityDesc = (q: QualityMode) => t(`settings.quality.desc.${q}`);
 
   const tabs: { key: SettingsTab; label: string; icon: typeof Sliders }[] = [
+    { key: 'game', label: t('settings.tab.game'), icon: Gamepad2 },
     { key: 'graphics', label: t('settings.tab.graphics'), icon: Sliders },
     { key: 'skin', label: t('settings.tab.skin'), icon: Palette },
     { key: 'account', label: t('settings.tab.account'), icon: User },
@@ -147,18 +164,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     { key: 'about', label: t('settings.tab.about'), icon: Info },
   ];
 
+  // 「画面预设」切换：选中某个具体预设时，把该预设的自定义项有效值同步写入
+  // （帧率上限除外），实现下方自定义滑块的展示联动；选中「自定义」则保持现有值不变。
+  const applyPreset = (mode: QualityMode): void => {
+    if (mode === 'custom') { qualityStore.set({ qualityMode: 'custom' }); return; }
+    const p = PRESET_VALUES[mode];
+    qualityStore.set({
+      qualityMode: mode,
+      customAntialias: p.customAntialias,
+      customBloom: p.customBloom,
+      customParticles: p.customParticles,
+      customDynamicLighting: p.customDynamicLighting,
+      customHitEffects: p.customHitEffects,
+      customRenderScale: p.customRenderScale,
+    });
+  };
+  // 手动修改任一自定义项（帧率除外）→ 画面预设立即跳回「自定义」，并写入该值。
+  const editCustom = (patch: Partial<QualityState>): void => {
+    qualityStore.set({ ...patch, qualityMode: 'custom' });
+  };
+  // Lite 预设下，除帧率上限外的所有自定义项置灰不可用。
+  const isLitePreset = quality.qualityMode === 'lite';
+  const customOptDisabled = isLitePreset;
+
   const graphicsContent = (
     <div className="space-y-5">
       <section className="space-y-1.5">
         <div className="flex justify-between">
-          <label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Zap size={16} /> {t('settings.effects')}</label>
+          <label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Zap size={16} /> {t('settings.preset')}</label>
           <span className={valueClass}>{qualityLabel(quality.qualityMode)}</span>
         </div>
         <input
           type="range"
           min="0" max="5" step="1"
           value={qualityIdx[quality.qualityMode]}
-          onChange={(e) => qualityStore.set({ qualityMode: qualityOrder[Number(e.target.value)] })}
+          onChange={(e) => applyPreset(qualityOrder[Number(e.target.value)])}
           className={sliderClass}
         />
         <div className="flex justify-between text-[11px] text-white/40 font-mono">
@@ -185,59 +225,73 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.maxFpsHint')}</p>
       </section>
 
-      {quality.qualityMode === 'custom' && (
-        <section className="space-y-3 p-4 rounded-xl glass-sub border border-cyan-400/30">
-          <div className="flex items-center gap-2 text-sm font-bold text-cyan-300">
-            <Sliders size={16} /> {t('settings.custom.title')}
-          </div>
+      {/* 自定义项：始终展示（不再限定为「自定义」预设），作为常规区域；
+          修改其中任意一项（帧率除外）→ 画面预设立即跳回「自定义」；
+          Lite 预设下整体置灰不可用。 */}
+      <section className={`space-y-1.5 transition-opacity ${customOptDisabled ? 'opacity-40 pointer-events-none' : ''}`}>
+        <div className="flex items-center justify-between gap-3">
+          <label className="text-sm font-medium text-white/80">{t('settings.custom.renderScale')}</label>
+          <span className={valueClass}>{(quality.customRenderScale * 100).toFixed(0)}%</span>
+        </div>
+        <input
+          type="range"
+          min="0.25"
+          max="2"
+          step="0.05"
+          value={quality.customRenderScale}
+          disabled={customOptDisabled}
+          onChange={(e) => editCustom({ customRenderScale: Number(e.target.value) })}
+          className={sliderClass}
+        />
+        <div className="flex justify-between text-[11px] text-white/40 font-mono">
+          <span>25%</span><span>200%</span>
+        </div>
+        <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.custom.renderScaleHint')}</p>
+      </section>
 
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-3">
-              <label className="text-sm font-medium text-white/80">{t('settings.custom.renderScale')}</label>
-              <span className={valueClass}>{(quality.customRenderScale * 100).toFixed(0)}%</span>
-            </div>
-            <input
-              type="range"
-              min="0.25"
-              max="2"
-              step="0.05"
-              value={quality.customRenderScale}
-              onChange={(e) => qualityStore.set({ customRenderScale: Number(e.target.value) })}
-              className={sliderClass}
-            />
-            <div className="flex justify-between text-[11px] text-white/40 font-mono">
-              <span>25%</span><span>200%</span>
-            </div>
-            <p className="text-[11px] text-white/50 leading-relaxed">{t('settings.custom.renderScaleHint')}</p>
-          </div>
+      <QualityToggle
+        label={t('settings.custom.antialias')}
+        checked={quality.customAntialias}
+        disabled={customOptDisabled}
+        onChange={(v) => editCustom({ customAntialias: v })}
+      />
+      <QualityToggle
+        label={t('settings.custom.bloom')}
+        checked={quality.customBloom}
+        disabled={customOptDisabled}
+        onChange={(v) => editCustom({ customBloom: v })}
+      />
+      <QualityToggle
+        label={t('settings.custom.particles')}
+        checked={quality.customParticles}
+        disabled={customOptDisabled}
+        onChange={(v) => editCustom({ customParticles: v })}
+      />
+      <QualityToggle
+        label={t('settings.custom.dynamicLighting')}
+        checked={quality.customDynamicLighting}
+        disabled={customOptDisabled}
+        onChange={(v) => editCustom({ customDynamicLighting: v })}
+      />
+      <QualityToggle
+        label={t('settings.custom.hitEffects')}
+        checked={quality.customHitEffects}
+        disabled={customOptDisabled}
+        onChange={(v) => editCustom({ customHitEffects: v })}
+      />
+    </div>
+  );
 
-          <QualityToggle
-            label={t('settings.custom.antialias')}
-            checked={quality.customAntialias}
-            onChange={(v) => qualityStore.set({ customAntialias: v })}
-          />
-          <QualityToggle
-            label={t('settings.custom.bloom')}
-            checked={quality.customBloom}
-            onChange={(v) => qualityStore.set({ customBloom: v })}
-          />
-          <QualityToggle
-            label={t('settings.custom.particles')}
-            checked={quality.customParticles}
-            onChange={(v) => qualityStore.set({ customParticles: v })}
-          />
-          <QualityToggle
-            label={t('settings.custom.dynamicLighting')}
-            checked={quality.customDynamicLighting}
-            onChange={(v) => qualityStore.set({ customDynamicLighting: v })}
-          />
-          <QualityToggle
-            label={t('settings.custom.hitEffects')}
-            checked={quality.customHitEffects}
-            onChange={(v) => qualityStore.set({ customHitEffects: v })}
-          />
-        </section>
-      )}
+  const gameContent = (
+    <div className="space-y-5">
+      <section className="space-y-1.5">
+        <div className="flex justify-between"><label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Focus size={16} /> {t('settings.audioOffset')}</label><span className={valueClass}>{audioOffsetMs > 0 ? '+' : ''}{audioOffsetMs}ms</span></div>
+        <input type="range" min="-600" max="400" step="5" value={audioOffsetMs} onChange={(e) => setAudioOffsetMs(Number(e.target.value))} className={sliderClass} />
+        <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>+400ms</span></div>
+        <p className="text-[11px] text-white/50 leading-relaxed">
+          {t('settings.audioOffsetHint')}
+        </p>
+      </section>
 
       <section className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
@@ -640,20 +694,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </p>
       </section>
       <section className="space-y-1.5">
-        <div className="flex justify-between"><label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Focus size={16} /> {t('settings.audioOffset')}</label><span className={valueClass}>{audioOffsetMs > 0 ? '+' : ''}{audioOffsetMs}ms</span></div>
-        <input type="range" min="-600" max="400" step="5" value={audioOffsetMs} onChange={(e) => setAudioOffsetMs(Number(e.target.value))} className={sliderClass} />
-        <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>+400ms</span></div>
-        <p className="text-[11px] text-white/50 leading-relaxed">
-          {t('settings.audioOffsetHint')}
-        </p>
-      </section>
-      <section className="space-y-1.5">
         <label className="flex items-center gap-2 text-sm font-bold text-cyan-300 cursor-pointer select-none" onClick={() => setCompatMode(!compatMode)}>
           <input type="checkbox" checked={compatMode} onChange={() => setCompatMode(!compatMode)} className="w-4 h-4 rounded border-white/30 bg-white/10 focus:outline-none cursor-pointer" />
           {t('settings.compatMode')}
         </label>
         <p className="text-[11px] text-white/50 leading-relaxed">
-          {t('settings.compatModeHint')}
+          {t(compatMode ? 'settings.compatModeHintOn' : 'settings.compatModeHint')}
         </p>
       </section>
     </div>
@@ -728,7 +774,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </aside>
 
           {/* 右侧内容区（独立滚动，X 固定不随内容滚动） */}
-          <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-5 sm:p-6">
+          <div ref={contentRef} className="flex-1 min-w-0 min-h-0 overflow-y-auto p-5 sm:p-6">
+            {tab === 'game' && gameContent}
             {tab === 'graphics' && graphicsContent}
             {tab === 'skin' && skinContent}
             {tab === 'account' && accountContent}

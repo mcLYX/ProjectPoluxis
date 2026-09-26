@@ -72,8 +72,9 @@
     .menu-top--album .menu-nav {
       display: -ms-flexbox; display: flex;
       /* Toggling display:none → flex starts this animation fresh every time. */
-      animation: navIn 220ms ease backwards;
+      -webkit-animation: navIn 220ms ease backwards; animation: navIn 220ms ease backwards;
     }
+    @-webkit-keyframes navIn { from { opacity: 0; } to { opacity: 1; } }
     @keyframes navIn { from { opacity: 0; } to { opacity: 1; } }
     .glass-nav {
       margin-right: 8px; padding: 6px 12px; border-radius: 10px;
@@ -119,6 +120,8 @@
        * happens at the PADDING BOX — a little vertical padding keeps the height-
        * grown selected card clear of the clip edge. The 12px also gives the cards
        * some breathing room from the brand band / footer (no lift now). */
+      /* 先给一条普通值做回退：max()/env() 需 Chrome 79/69，老内核会整条丢弃。 */
+      padding: 12px;
       padding: 12px max(12px, env(safe-area-inset-right, 0px)) 12px max(12px, env(safe-area-inset-left, 0px));
     }
     .chart-carousel::-webkit-scrollbar { width: 0; height: 0; }   /* WebKit / Blink */
@@ -127,15 +130,23 @@
      * travel (drilling in → from the right, going back → from the left). The
      * class is re-applied by buildMenu on every list change, which is what makes
      * the animation replay. IE9 has no animations and simply shows the list. */
-    .chart-carousel--fwd { animation: listInFwd 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
-    .chart-carousel--back { animation: listInBack 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+    .chart-carousel--fwd { -webkit-animation: listInFwd 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; animation: listInFwd 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+    .chart-carousel--back { -webkit-animation: listInBack 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; animation: listInBack 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+    @-webkit-keyframes listInFwd {
+      from { opacity: 0; -ms-transform: translateX(28px); -webkit-transform: translateX(28px); transform: translateX(28px); }
+      to { opacity: 1; -ms-transform: translateX(0); -webkit-transform: translateX(0); transform: translateX(0); }
+    }
     @keyframes listInFwd {
-      from { opacity: 0; -ms-transform: translateX(28px); transform: translateX(28px); }
-      to { opacity: 1; -ms-transform: translateX(0); transform: translateX(0); }
+      from { opacity: 0; -ms-transform: translateX(28px); -webkit-transform: translateX(28px); transform: translateX(28px); }
+      to { opacity: 1; -ms-transform: translateX(0); -webkit-transform: translateX(0); transform: translateX(0); }
+    }
+    @-webkit-keyframes listInBack {
+      from { opacity: 0; -ms-transform: translateX(-28px); -webkit-transform: translateX(-28px); transform: translateX(-28px); }
+      to { opacity: 1; -ms-transform: translateX(0); -webkit-transform: translateX(0); transform: translateX(0); }
     }
     @keyframes listInBack {
-      from { opacity: 0; -ms-transform: translateX(-28px); transform: translateX(-28px); }
-      to { opacity: 1; -ms-transform: translateX(0); transform: translateX(0); }
+      from { opacity: 0; -ms-transform: translateX(-28px); -webkit-transform: translateX(-28px); transform: translateX(-28px); }
+      to { opacity: 1; -ms-transform: translateX(0); -webkit-transform: translateX(0); transform: translateX(0); }
     }
     /* Collapsed card = a narrow "spine": 120px wide with the title rotated to run
      * top-to-bottom. Selecting it widens the card to 208px and cross-fades the
@@ -228,12 +239,12 @@
     .card-body {
       position: absolute; left: 14px; width: 337px; right: auto; bottom: 54px;
       opacity: 0; visibility: hidden;
-      -ms-transform: translateY(6px); transform: translateY(6px);
+      -ms-transform: translateY(6px); -webkit-transform: translateY(6px); transform: translateY(6px);
       transition: opacity 200ms ease, transform 200ms ease, visibility 0s linear 200ms;
     }
     .chart-card.selected .card-body {
       opacity: 1; visibility: visible;
-      -ms-transform: translateY(0); transform: translateY(0);
+      -ms-transform: translateY(0); -webkit-transform: translateY(0); transform: translateY(0);
       transition: opacity 200ms ease, transform 200ms ease, visibility 0s linear 0s;
     }
     /* Below this width the selected card is capped by `max-width: 54vw` (< 365px),
@@ -259,11 +270,15 @@
       /* Chips are created on selection, so an insert animation (not a
        * transition) is what slides them in. IE9 ignores @keyframes and simply
        * shows them at their final style. */
-      animation: chipIn 220ms ease both;
+      -webkit-animation: chipIn 220ms ease both; animation: chipIn 220ms ease both;
+    }
+    @-webkit-keyframes chipIn {
+      from { opacity: 0; -ms-transform: translateY(6px); -webkit-transform: translateY(6px); transform: translateY(6px); }
+      to { opacity: 1; -ms-transform: translateY(0); -webkit-transform: translateY(0); transform: translateY(0); }
     }
     @keyframes chipIn {
-      from { opacity: 0; -ms-transform: translateY(6px); transform: translateY(6px); }
-      to { opacity: 1; -ms-transform: translateY(0); transform: translateY(0); }
+      from { opacity: 0; -ms-transform: translateY(6px); -webkit-transform: translateY(6px); transform: translateY(6px); }
+      to { opacity: 1; -ms-transform: translateY(0); -webkit-transform: translateY(0); transform: translateY(0); }
     }
     .diff-btn.active { background: rgba(6, 182, 212, 0.28); border-color: rgba(6, 182, 212, 0.75); color: #fff; }
     /* In-card action button (bottom-right), revealed only on the selected card.
@@ -280,18 +295,18 @@
        * taller button. Keep it one line no matter what. */
       white-space: nowrap;
       opacity: 0; visibility: hidden;
-      -ms-transform: translateY(8px); transform: translateY(8px);
+      -ms-transform: translateY(8px); -webkit-transform: translateY(8px); transform: translateY(8px);
       transition: opacity 200ms ease, transform 220ms ease, visibility 0s linear 220ms;
     }
     .chart-card.selected .card-start {
       opacity: 1; visibility: visible;
-      -ms-transform: translateY(0); transform: translateY(0);
+      -ms-transform: translateY(0); -webkit-transform: translateY(0); transform: translateY(0);
       transition: opacity 200ms ease, transform 220ms ease, visibility 0s;
     }
     /* Higher specificity than the generic `.btn-start:hover` scale, which would
      * otherwise be overridden by the `.selected .card-start` rule above. */
     .chart-card.selected .card-start:hover {
-      -ms-transform: scale(1.04); transform: translateY(0) scale(1.04);
+      -ms-transform: scale(1.04); -webkit-transform: translateY(0) scale(1.04); transform: translateY(0) scale(1.04);
     }
     .menu-footer {
       display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap;
@@ -337,7 +352,7 @@
     .btn-start:hover {
       background: rgba(6, 182, 212, 0.28); border-color: rgba(6, 182, 212, 0.66);
       box-shadow: 0 0 34px rgba(6, 182, 212, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.26);
-      -ms-transform: scale(1.04); transform: scale(1.04);
+      -ms-transform: scale(1.04); -webkit-transform: scale(1.04); transform: scale(1.04);
     }
 
     /* HUD — layout mirrors full version App.tsx L506-534:
@@ -361,7 +376,8 @@
 
     /* Result */
     #result-screen { -ms-flex-pack: center; justify-content: center; -ms-flex-align: center; align-items: center; background: rgba(5, 7, 13, 0.85); }
-    .result-card { max-width: 420px; width: 90%; margin: max(16px, env(safe-area-inset-top, 0px)) auto max(16px, env(safe-area-inset-bottom, 0px)); background: rgba(14, 27, 56, 0.95); border: 1px solid rgba(6,182,212,0.3); border-radius: 18px; padding: 28px; text-align: center; }
+    /* margin 同理：先回退到固定 16px auto，再覆盖为 safe-area 版本（老内核丢弃后者）。 */
+    .result-card { max-width: 420px; width: 90%; margin: 16px auto; margin: max(16px, env(safe-area-inset-top, 0px)) auto max(16px, env(safe-area-inset-bottom, 0px)); background: rgba(14, 27, 56, 0.95); border: 1px solid rgba(6,182,212,0.3); border-radius: 18px; padding: 28px; text-align: center; }
     .result-title { font-size: 18px; font-weight: 800; color: #fff; margin: 0 0 4px 0; letter-spacing: 1px; word-break: break-word; }
     .result-meta { font-size: 11px; color: #94a3b8; margin: 0 0 14px 0; }
     .result-rank {
@@ -396,6 +412,8 @@
       position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%;
       z-index: 20; display: none;
       background: rgba(0,0,0,0.6);
+      /* 同上：先普通 16px 回退，再 safe-area 版本。 */
+      padding: 16px;
       padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); box-sizing: border-box;
     }
     .modal-backdrop.active { display: block; }

@@ -1,6 +1,7 @@
 /* === 5. Renderer — full perspective projection (mirrors Three.js camera) === */
   var canvas = document.getElementById('game-canvas');
   var ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
   var view = { w: 0, h: 0, aspect: 1, cd: 4.96, dpr: 1, pxPerUnit: 0 };
 
   function fitCameraDistance(aspect) {
@@ -28,6 +29,7 @@
     if (canvas.width !== newW || canvas.height !== newH) {
       canvas.width = newW;
       canvas.height = newH;
+      ctx.imageSmoothingEnabled = false;
       ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
     }
   }
@@ -125,7 +127,7 @@
    *   linear gradient from pA→pB so the pipe stays visible at the in-view end
    *   and fades smoothly toward the clamped (far-plane) end — matching how the
    *   full version's per-vertex alpha behaves on the 3D mesh. */
-  function drawPipe(pA, pB, color, alphaA, alphaB, maxScale, brightness) {
+  function drawPipe(pA, pB, color, alphaA, alphaB, maxScale, brightness, vScale) {
     if (!pA || !pB) return;
     brightness = brightness || 1.0;
     var dx = pB.x - pA.x, dy = pB.y - pA.y;
@@ -134,8 +136,8 @@
     /* Perpendicular unit vector (screen space) */
     var nx = -dy / len, ny = dx / len;
     /* Half-width at each end, perspective-scaled (narrower when farther). */
-    var hwA = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pA.scale);
-    var hwB = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pB.scale);
+    var hwA = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pA.scale * vScale);
+    var hwB = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pB.scale * vScale);
     /* Parse #rrggbb → rgb components for gradient color stops. All slide pipe
      * colors in this build are 7-char hex (SLIDE_RED + chart noteColor). */
     var cr = parseInt(color.substr(1, 2), 16);
@@ -189,7 +191,7 @@
    * 2D canvas. This is the 2D equivalent of the full version's curved tube
    * centreline (GameCanvas.buildSlideTubeGeometry: x/y follow ease(τ) while z
    * advances linearly with τ). */
-  function drawPipeCurve(samples, color, brightness) {
+  function drawPipeCurve(samples, color, brightness, vScale) {
     if (!samples || samples.length < 2) return;
     brightness = brightness || 1.0;
     var cr = parseInt(color.substr(1, 2), 16);
@@ -198,7 +200,7 @@
     var n = samples.length;
     var hw = [];
     for (var i = 0; i < n; i++) {
-      hw.push(Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * samples[i].scale));
+      hw.push(Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * samples[i].scale * vScale));
     }
     var left = [], right = [];
     for (var i = 0; i < n; i++) {
@@ -259,9 +261,9 @@
   /* Draw a pipe cap — a filled (no wireframe) semi-transparent diamond at a
    * projected point. Used at judge-plane cross-sections to make the cut pipe
    * look like it has a solid 3D end, not a flat edge. */
-  function drawPipeCap(p, color, alpha, scale) {
+  function drawPipeCap(p, color, alpha, scale, vScale) {
     if (!p) return;
-    var half = Math.max(1.5, SLIDE_HALF * view.pxPerUnit * scale);
+    var half = Math.max(1.5, SLIDE_HALF * view.pxPerUnit * scale * vScale);
     ctx.save();
     ctx.globalAlpha = Math.min(1, alpha * 0.35);
     ctx.fillStyle = color;

@@ -9,7 +9,7 @@ const EDIT_INPUT_STYLE: React.CSSProperties = {
   WebkitBackdropFilter: 'blur(6px)',
 };
 import { resolveBeatmapUrl, isFallbackSong, countLeafSongs, albumHasPlayableSong } from '../data/beatmapLoader';
-import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft, Save, Trash2 } from 'lucide-react';
+import { Play, ChevronRight, Loader2, Music, Award, ArrowLeft, Save, Trash2, RotateCcw } from 'lucide-react';
 import { getHighScore, HighScoreEntry, ClearBadge } from '../utils/scoreStore';
 import { GameStats } from '../types/game';
 import { useI18n } from '../i18n';
@@ -444,7 +444,7 @@ export const SongCard: React.FC<SongCardProps> = ({
            * with translateX(-50%) (compositor, no reflow) and fix the width. */
           style={{ width: 'calc(min(94vw, 600px) - 2rem)' }}
         >
-          <div className="w-full max-h-full overflow-y-auto rounded-2xl bg-white/[0.06] backdrop-blur-xl border border-white/20 px-4 py-3 short:py-2 text-center" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18)' }}>
+          <div className="w-full max-h-full overflow-y-auto rounded-2xl bg-[rgba(255,255,255,0.06)] result-card-blur border border-[rgba(255,255,255,0.2)] px-4 py-3 short:py-2 text-center" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18)' }}>
             <div className="flex items-center justify-center gap-1.5 text-white mb-1 short:mb-0.5">
               <Award size={13} />
               <span className="text-[10px] font-bold font-orbitron tracking-[0.3em] uppercase">
@@ -489,7 +489,7 @@ export const SongCard: React.FC<SongCardProps> = ({
             <div className="grid grid-cols-3 gap-1.5 mb-1.5 short:mb-1">
               <div
                 onClick={() => setSplit((s) => (s === 'perfect' ? null : 'perfect'))}
-                className="rounded-lg bg-white/5 border border-yellow-500/40 py-1.5 short:py-1 cursor-pointer hover:bg-white/10 active:scale-95 transition select-none"
+                className="rounded-lg bg-[rgba(255,255,255,0.05)] border border-[rgba(234,179,8,0.4)] py-1.5 short:py-1 cursor-pointer hover:bg-[rgba(255,255,255,0.1)] active:scale-95 transition select-none"
               >
                 <div className="text-yellow-300 text-[10px] font-bold tracking-wider">PERFECT</div>
                 <div className="font-mono font-bold text-white text-sm">
@@ -510,7 +510,7 @@ export const SongCard: React.FC<SongCardProps> = ({
               </div>
               <div
                 onClick={() => setSplit((s) => (s === 'good' ? null : 'good'))}
-                className="rounded-lg bg-white/5 border border-sky-500/40 py-1.5 short:py-1 cursor-pointer hover:bg-white/10 active:scale-95 transition select-none"
+                className="rounded-lg bg-[rgba(255,255,255,0.05)] border border-[rgba(14,165,233,0.4)] py-1.5 short:py-1 cursor-pointer hover:bg-[rgba(255,255,255,0.1)] active:scale-95 transition select-none"
               >
                 <div className="text-sky-400 text-[10px] font-bold tracking-wider">GOOD</div>
                 <div className="font-mono font-bold text-white text-sm">
@@ -524,7 +524,7 @@ export const SongCard: React.FC<SongCardProps> = ({
                   )}
                 </div>
               </div>
-              <div className="rounded-lg bg-white/5 border border-red-500/40 py-1.5 short:py-1">
+              <div className="rounded-lg bg-[rgba(255,255,255,0.05)] border border-[rgba(239,68,68,0.4)] py-1.5 short:py-1">
                 <div className="text-red-400 text-[10px] font-bold tracking-wider">MISS</div>
                 <div className="font-mono font-bold text-white text-sm">{resultData.stats.missCount}</div>
               </div>
@@ -597,7 +597,7 @@ export const SongCard: React.FC<SongCardProps> = ({
               onClick={handleStart}
               className="px-5 py-2.5 rounded-xl glass-btn-primary font-bold text-sm hover:scale-105 active:scale-95 transition flex items-center gap-1.5"
             >
-              <Play size={14} className="fill-white" />
+              {inResult ? <RotateCcw size={14} /> : <Play size={14} className="fill-white" />}
               {inResult ? t('songcard.retry') : t('songcard.start')}
             </button>
           </div>

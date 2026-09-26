@@ -84,7 +84,11 @@ export class AudioManager {
    *  仅按 URL 作键，文件上传走一次性路径不进缓存。上限防止长会话/多谱面累积。
    *  注意：AudioBuffer 无 close() 方法，淘汰时只需从 Map 移除引用交由 GC 回收。 */
   private bufferCache = new Map<string, AudioBuffer>();
-  private static readonly BUFFER_CACHE_MAX = 8;
+  private static readonly BUFFER_CACHE_MAX = 4;
+  /** 当前活动 BGM 缓冲（bgmBuffer）对应的音频 URL。null = 合成器曲目 / 上传文件 /
+   *  尚未加载。调用方（如选歌界面）用它判断"活动缓冲是否就是目标曲目"，
+   *  避免上一首残留的缓冲被误认为已就绪。 */
+  private activeUrl: string | null = null;
 
   /** Hit sound buffers keyed by note type — tap/touch/slide.ogg are loaded
    *  from /sounds/ (build-packaged) in loadBuiltinSounds() during init().
@@ -134,6 +138,11 @@ export class AudioManager {
 
   public getActiveBuffer(): AudioBuffer | null {
     return this.bgmBuffer;
+  }
+
+  /** 当前活动 BGM 缓冲对应的 URL；null = 合成器 / 上传文件 / 未加载。 */
+  public getActiveURL(): string | null {
+    return this.activeUrl;
   }
 
   /** True when playback uses a real decoded audio file rather than the built-in
@@ -394,6 +403,7 @@ export class AudioManager {
     this.bgmBuffer = audioBuffer;
     this.hasUploadedAudio = true;
     this.forceSynth = false;
+    this.activeUrl = null; // 上传文件不走 URL 缓存，活动缓冲不再是任何 URL 的产物
   }
 
   /** Load audio from a URL (e.g. /beatmaps/...mp3). Sets it as the active BGM
@@ -403,6 +413,7 @@ export class AudioManager {
     url: string,
     setActive = true,
     onPhase?: (p: AudioLoadPhase) => void,
+    signal?: AbortSignal,
   ): Promise<void> {
     this.init();
     if (!this.ctx) throw new Error('AudioContext failed to initialize');
@@ -413,11 +424,12 @@ export class AudioManager {
         this.bgmBuffer = cached;
         this.hasUploadedAudio = true;
         this.forceSynth = false;
+        this.activeUrl = url;
       }
       return;
     }
     const token = ++this.loadToken;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     if (token !== this.loadToken) return;
     if (!res.ok) throw new Error(`HTTP ${res.status} loading ${url}`);
     const arrayBuffer = await readBodyWithProgress(
@@ -425,6 +437,10 @@ export class AudioManager {
       onPhase && ((loaded, total) => onPhase({ phase: 'download', loaded, total })),
     );
     if (token !== this.loadToken) return;
+    if (signal?.aborted) {
+      // 字节虽已到齐，但调用方已不关心本曲：省掉解码的 CPU 开销。
+      throw new DOMException('Audio load aborted', 'AbortError');
+    }
     let audioBuffer: AudioBuffer;
     try {
       /* 字节已到齐，剩下的是 CPU 侧解码：它自身没有进度可报，但几 MB 的文件
@@ -446,6 +462,7 @@ export class AudioManager {
       this.bgmBuffer = audioBuffer;
       this.hasUploadedAudio = true;
       this.forceSynth = false;
+      this.activeUrl = url;
     }
   }
 
@@ -481,6 +498,7 @@ export class AudioManager {
       this.ctx = null;
     }
     this.bgmBuffer = null;
+    this.activeUrl = null;
     this.bufferCache.clear();
     this.loadToken++;
   }
@@ -494,6 +512,7 @@ export class AudioManager {
     this.loadToken++;
     this.hasUploadedAudio = false;
     this.bgmBuffer = null;
+    this.activeUrl = null;
     this.forceSynth = true;
     this.synthBpm = bpm;
   }
@@ -617,6 +636,13 @@ export class AudioManager {
       this.bgmSource = null;
     }
     this.clearSynth();
+  }
+
+  /** 把谱面时钟归零（未播放态下 getCurrentTime 的回退值）。开局流程在挂载画布、
+   *  等待首帧期间调用：画布此刻应以 t=0 渲染场景，而不是上一局残留的 pauseTime
+   *  （stop() 故意不清它，暂停-恢复依赖原值）。 */
+  public resetClock(): void {
+    this.pauseTime = 0;
   }
 
   /** In-place position jump while staying in the playing state — no stop/play

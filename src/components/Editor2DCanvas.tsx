@@ -3,7 +3,7 @@ import { globalAudio } from '../audio/AudioManager';
 import { beatToSecondsMultiBpm, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { EASING_FNS } from '../utils/easing';
 import { getWaveformPeaks, peakInRange } from '../utils/waveform';
-import type { ChartData, NoteData, EasingType } from '../types/game';
+import type { ChartData, NoteData, EasingType, EventType, EventData } from '../types/game';
 import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
 
@@ -21,6 +21,32 @@ const FIELD_INNER_PAD_X = 30;
 /** Vertical position of the judgement line (fraction of field height from top).
  *  More room above for upcoming (future) notes. */
 const JUDGE_FRAC = 0.8;
+/** 事件标记高度（px）。同时作为聚类阈值：像素间距小于此值即视为「同一/极近时刻」。 */
+const CHIP_H = 14;
+/** 事件轨配色 —— 与侧栏「事件」分区的按钮配色保持一致（紫/琥珀/青/绿），
+ *  便于在画布与侧栏之间对照。 */
+const EVENT_STYLE: Record<EventType, { fill: string; stroke: string; line: string; label: string; band: string; solid: string }> = {
+  speed_change: {
+    fill: 'rgba(192,132,252,0.20)', stroke: 'rgba(192,132,252,0.85)',
+    line: 'rgba(192,132,252,0.10)', label: '#e9d5ff', band: 'rgba(192,132,252,0.10)',
+    solid: '#c084fc',
+  },
+  text_display: {
+    fill: 'rgba(251,191,36,0.20)', stroke: 'rgba(251,191,36,0.85)',
+    line: 'rgba(251,191,36,0.10)', label: '#fde68a', band: 'rgba(251,191,36,0.12)',
+    solid: '#fbbf24',
+  },
+  note_color_change: {
+    fill: 'rgba(34,211,238,0.18)', stroke: 'rgba(34,211,238,0.85)',
+    line: 'rgba(34,211,238,0.10)', label: '#a5f3fc', band: 'rgba(34,211,238,0.10)',
+    solid: '#22d3ee',
+  },
+  bg_change: {
+    fill: 'rgba(52,211,153,0.18)', stroke: 'rgba(52,211,153,0.85)',
+    line: 'rgba(52,211,153,0.10)', label: '#a7f3d0', band: 'rgba(52,211,153,0.10)',
+    solid: '#34d399',
+  },
+};
 /** Full-scale waveform amplitude (1.0) reaches this fraction of the playfield's
  *  half-width, so the loudest peaks never actually touch the field edges. */
 const WAVE_AMP_RATIO = 0.618;
@@ -622,6 +648,90 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         }
       }
 
+      // ----- Event rail (right) -----
+      // 事件只有 beat、没有场地 x，放进场地「右侧内边距带」：与左侧对称，
+      // 不压到音符 / 框选 / 命中测试。去掉外框装饰（轨道底与 chip 边框），
+      // 改为文字 / 点状标记：
+      //   - 变速：淡紫 "x"+倍速（如 x1）
+      //   - 音符色：字母 "N"，颜色 = 变到的目标色
+      //   - 背景色：字母 "B"，颜色 = 变到的目标渐变
+      //   - 文字：黄色字母 "T"
+      // 同一 / 极近时刻的多事件则聚成点状（横向错开，颜色即类型）。
+      // 注意：本段在「音符」之前绘制，使事件图层位于音符之下，避免盖住最右侧音符。
+      const evts = chartRef.current.events;
+      if (evts && evts.length > 0) {
+        ctx.save();
+        const railW = Math.max(14, FIELD_INNER_PAD_X - 6);
+        const railX = field.left + field.width - railW - 2;
+        const pbNow = pxPerBeatRef.current;
+        const wTop = curBeat + (judgeY - field.top) / pbNow;
+        const wBot = curBeat + (judgeY - (field.top + field.height)) / pbNow;
+        const bLo = Math.min(wTop, wBot) - 1;
+        const bHi = Math.max(wTop, wBot) + 1;
+        // 可视事件 → 像素位置（自上而下排序，便于按像素邻近聚类）。
+        const vis: Array<{ ev: EventData; py: number }> = [];
+        for (const ev of evts) {
+          if (ev.beat < bLo || ev.beat > bHi) continue;
+          const tb = beatToSecondsMultiBpm(ev.beat, bpm, offset, bpmlist);
+          const { py } = worldToPixel(tb, 0, cssW, cssH, curTime);
+          if (py < field.top - 20 || py > field.top + field.height + 20) continue;
+          vis.push({ ev, py });
+        }
+        vis.sort((a, b) => a.py - b.py);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        // 单事件文字：按类型着色展示。
+        const drawEventText = (ev: EventData, cx: number, cy: number) => {
+          if (ev.eventType === 'speed_change') {
+            ctx.fillStyle = '#e9d5ff'; // 淡紫
+            const sp = typeof ev.speed === 'number'
+              ? (ev.speed % 1 === 0 ? ev.speed.toFixed(0) : ev.speed.toFixed(1))
+              : '?';
+            ctx.fillText('x' + sp, cx, cy);
+          } else if (ev.eventType === 'note_color_change') {
+            ctx.fillStyle = ev.noteColor || '#00f0ff';
+            ctx.fillText('N', cx, cy);
+          } else if (ev.eventType === 'bg_change') {
+            const grd = ctx.createLinearGradient(cx - 7, cy, cx + 7, cy);
+            grd.addColorStop(0, ev.gradientStart || '#050c1e');
+            grd.addColorStop(1, ev.gradientEnd || '#1b072c');
+            ctx.fillStyle = grd;
+            ctx.fillText('B', cx, cy);
+          } else {
+            ctx.fillStyle = '#fde047'; // 黄色 T
+            ctx.fillText('T', cx, cy);
+          }
+        };
+
+        /* 同一 / 极近时刻（间距 < CHIP_H）的多事件聚成一簇：
+         *   - 簇内只有一个事件 → 文字标记（变速 x/音符色 N/背景色 B/文字 T）；
+         *   - 簇内多个事件 → 点状：横向错开排布，颜色即各自类型，互不遮挡。 */
+        let ci = 0;
+        while (ci < vis.length) {
+          let cj = ci + 1;
+          while (cj < vis.length && vis[cj].py - vis[ci].py < CHIP_H) cj++;
+          const n = cj - ci;
+          for (let k = 0; k < n; k++) {
+            const v = vis[ci + k];
+            const st = EVENT_STYLE[v.ev.eventType] || EVENT_STYLE.bg_change;
+            if (n === 1) {
+              ctx.font = '700 10px ui-sans-serif, system-ui, sans-serif';
+              drawEventText(v.ev, railX + railW / 2, v.py);
+            } else {
+              // 点状：横向错开避免完全重合，颜色即类型。
+              const dx = (k - (n - 1) / 2) * Math.min(railW / n, 8);
+              ctx.fillStyle = v.ev.eventType === 'text_display' ? '#fde047' : st.solid;
+              ctx.beginPath();
+              ctx.arc(railX + railW / 2 + dx, v.py, 3.5, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          ci = cj;
+        }
+        ctx.restore();
+      }
+
       // Draw notes (future first so near-line notes draw on top)
       const multiIds = selectedIdsRef.current;
       if (multiSetCache.ids !== multiIds) {
@@ -865,8 +975,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     // incremental commits, so deltas can never accumulate.
     if (drag.isMultiDrag && drag.multiSnapshot) {
       const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-      /* 拖动过程中不吸附节拍，松手时统一吸附（见 onPointerUp）。 */
-      const grabBeat = round9(timeToBeat(t - drag.offBeat, segsRef.current));
+      /* 拖动过程中即吸附节拍：以被抓取音符吸附后的位移作为统一增量，
+       * 与松手时的处理一致（始终吸附）。 */
+      const grabBeat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
       const grabX = round9(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1)));
       // Delta from the grabbed note's original position.
       const grabSnap = drag.multiSnapshot.find((s) => s.id === drag.multiGrabId);
@@ -890,8 +1001,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
     if (!drag.id) return;
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
-    /* 拖动过程中不吸附节拍（大节拍步进下会「跳格」），松手时再吸附（见 onPointerUp）。 */
-    const beat = round9(timeToBeat(t - drag.offBeat, segsRef.current));
+    /* 拖动过程中即吸附节拍（与松手规则一致，始终吸附）。 */
+    const beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     const x = round9(snap(worldX - drag.offX, xStep));
     drag.moved = true;
@@ -968,8 +1079,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       if (drag.moved) {
         const liveMap = multiLiveRef.current;
         if (liveMap) {
-          /* 松手吸附：以被抓取音符的最终位置为准吸附节拍，并对全部选中项施加同一增量，
-           * 保持多选之间的相对间距不变。 */
+          /* 松手收尾：拖动过程中已吸附，这里再吸附一次作兜底，并对全部选中项
+           * 施加同一增量，保持多选之间的相对间距不变。 */
           const grabLive = drag.multiGrabId ? liveMap.get(drag.multiGrabId) : undefined;
           const dBeat = grabLive ? round9(snap(grabLive.beat, snapRef.current)) - grabLive.beat : 0;
           const positions: Array<{ id: string; x: number; y: number; beat: number }> = [];
@@ -988,7 +1099,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       return;
     }
 
-    // Single-note drag: 松手时吸附节拍，然后提交最终位置并清除 live override。
+    // Single-note drag: 提交最终位置并清除 live override
+    //（拖动过程中已吸附，此处再吸附一次兜底）。
     if (dragLiveRef.current) {
       const m = dragLiveRef.current;
       dragLiveRef.current = { ...m, beat: round9(snap(m.beat, snapRef.current)) };

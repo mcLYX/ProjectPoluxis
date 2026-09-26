@@ -39,6 +39,7 @@ import { useI18n } from '../i18n';
 import { lintDsl, applyDslToNote } from '../utils/editorRules';
 import { useLiveDrag } from '../liveDragStore';
 import { editorTimeStore, useEditorTime } from '../editorTimeStore';
+import { EditorHeatScrubber } from './EditorHeatScrubber';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
 
@@ -447,21 +448,7 @@ const LiveBeatGate: React.FC<{ children: (beat: number) => React.ReactNode }> = 
   return <>{children(beat)}</>;
 };
 
-/** 时间轴拖拽条：`value` 必须随播放头实时更新，故单独订阅。 */
-const EditorScrubber: React.FC<{ max: number; step: number; onSeek: (beat: number) => void }> = ({ max, step, onSeek }) => {
-  const { beat } = useEditorTime();
-  return (
-    <input
-      type="range"
-      min="0"
-      max={max}
-      step={step}
-      value={beat}
-      onChange={(e) => onSeek(parseFloat(e.target.value) || 0)}
-      className="w-full accent-cyan-400 cursor-pointer h-2 bg-white/10 rounded-lg"
-    />
-  );
-};
+/* 时间轴拖拽条已由 EditorHeatScrubber（热力直方图）取代。 */
 
 export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   chart,
@@ -583,17 +570,39 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         let prevLabel = t('editor.headNode');
         for (let i = 0; i < note.nodes.length; i++) {
           const sn = note.nodes[i];
+          const nodeLabel = t('editor.nodeN', { n: i + 1 });
+          // 子节点同样要查负拍与坐标越界（此前只查了时间倒序）。
+          if (sn.beat < -1e-6) {
+            issues.push({
+              kind: 'negativeBeat',
+              cat: t('editor.checkCatNegative'),
+              detail: `${t('editor.checkTypeNote')} ${note.id} · ${nodeLabel} · ${t('editor.beat')} ${sn.beat.toFixed(2)}`,
+              targetBeat: sn.beat,
+              targetId: note.id,
+            });
+          }
+          const snx = typeof sn.x === 'number' ? sn.x : note.x;
+          const sny = typeof sn.y === 'number' ? sn.y : note.y;
+          if (snx < X_MIN - 1e-6 || snx > X_MAX + 1e-6 || sny < Y_MIN - 1e-6 || sny > Y_MAX + 1e-6) {
+            issues.push({
+              kind: 'coordRange',
+              cat: t('editor.checkCatCoord'),
+              detail: `${t('editor.checkTypeNote')} ${note.id} · ${nodeLabel} · x=${snx.toFixed(2)}, y=${sny.toFixed(2)}`,
+              targetBeat: sn.beat,
+              targetId: note.id,
+            });
+          }
           if (sn.beat < prevBeat - 1e-6) {
             issues.push({
               kind: 'chainOrder',
               cat: t('editor.checkCatChainOrder'),
-              detail: `${t('editor.checkTypeNote')} ${note.id} · ${t('editor.nodeN', { n: i + 1 })} (${t('editor.beat')} ${sn.beat.toFixed(2)}) < ${prevLabel} (${prevBeat.toFixed(2)})`,
+              detail: `${t('editor.checkTypeNote')} ${note.id} · ${nodeLabel} (${t('editor.beat')} ${sn.beat.toFixed(2)}) < ${prevLabel} (${prevBeat.toFixed(2)})`,
               targetBeat: sn.beat,
               targetId: note.id,
             });
           }
           prevBeat = sn.beat;
-          prevLabel = `${t('editor.nodeN', { n: i + 1 })}`;
+          prevLabel = nodeLabel;
         }
       }
     }
@@ -618,7 +627,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const jumpToIssue = (issue: CheckIssue) => {
     onSeekBeat(issue.targetBeat);
     if (issue.targetId) onSelectNote(issue.targetId);
-    setShowCheck(false);
+    // 跳转后保留问题列表，便于逐条核对（关闭由「关闭」按钮负责）。
   };
 
   // Dragging State for Floating Quick Edit and Snapping Panels
@@ -1660,14 +1669,16 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     <div className="absolute inset-0 pointer-events-none z-20 font-rajdhani select-none">
       {/* 1. Collapsible Left Sidebar */}
       <div
-        className={`absolute top-0 bottom-0 left-0 transition-all duration-300 pointer-events-auto flex flex-col bg-white/[0.05] backdrop-blur-xl border-r border-white/12 text-white shadow-2xl z-30 ${
+        className={`absolute top-0 bottom-0 left-0 transition-all duration-300 pointer-events-auto flex flex-col bg-white/[0.05] editor-sidebar-glass border-r border-white/12 text-white shadow-2xl z-30 overflow-hidden ${
           isSidebarExpanded ? 'w-80' : 'w-12'
         }`}
         style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.14)' }}
       >
-        <div className="flex items-center p-3 border-b border-white/10 bg-white/[0.03]">
+        {/* 标题绝对定位 + 不换行：宽度动画期间不重排；折叠按钮在流内 ml-auto，
+         *  展开时随容器变宽滑向右侧（原始设计的正常行为）。 */}
+        <div className="relative flex items-center h-12 p-3 border-b border-white/10 bg-white/[0.03]">
           {isSidebarExpanded && (
-            <div className="flex items-center gap-2">
+            <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-2 whitespace-nowrap">
               <div className="w-6 h-6 rounded bg-cyan-500/20 text-cyan-300 flex items-center justify-center font-bold text-xs border border-cyan-400/40">
                 ED
               </div>
@@ -1698,7 +1709,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         )}
 
         {isSidebarExpanded && (
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs w-80 shrink-0">
             {/* Beat HUD */}
             <div className="p-3 rounded-xl glass-sub border-white/12" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)' }}>
               <div className="text-[10px] uppercase font-bold text-white/50">{t('editor.curBeat')}</div>
@@ -2507,10 +2518,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
       </div>
 
       {/* 4. Bottom Timeline Scrub Bar (Adjusts left offset based on expanded sidebar state to avoid overlap) */}
+      {/* 左偏移用内联样式而非 left-[21rem] 任意值类：避免 Tailwind JIT 未编译
+       * 新增任意值类时 left 失效（退化为右锚定+内容收缩宽度）。21rem=20rem(w-80)+1rem，
+       * 4rem=3rem(w-12)+1rem，两种状态下与侧边栏的间隙恒为 1rem。 */}
       <div
-        className={`glass-panel-strong absolute bottom-4 right-20 pointer-events-auto border-white/15 rounded-2xl px-5 py-3 z-30 flex items-center gap-4 transition-all duration-300 ${
-          isSidebarExpanded ? 'left-[21.5rem]' : 'left-16'
-        }`}
+        className="glass-panel-strong absolute bottom-4 right-16 pointer-events-auto border-white/15 rounded-2xl px-3 py-1.5 z-30 flex items-center gap-3 transition-all duration-300"
+        style={{ left: isSidebarExpanded ? '21rem' : '4rem' }}
       >
         <button
           onClick={onTogglePlay}
@@ -2519,20 +2532,14 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           {isPlaying ? <Pause size={18} /> : <Play size={18} />}
         </button>
 
-        <button
-          onClick={() => onSeekBeat(0)}
-          className="p-2 rounded-xl glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer shrink-0"
-          title={t('editor.resetStart')}
-        >
-          <RotateCcw size={16} />
-        </button>
-
-        <div className="flex-1 flex flex-col gap-1">
-          <div className="flex justify-between text-[11px] font-mono text-white/70">
-            <span className="text-cyan-300 font-bold">Beat <LiveBeat /></span>
-            <span>{t('editor.totalLen')}: Beat {chartMaxBeat.toFixed(2)}</span>
-          </div>
-          <EditorScrubber max={maxBeat} step={snapSubdivision} onSeek={onSeekBeat} />
+        {/* 拍数与总长已画进条内，此处不再占独立信息行（见 EditorHeatScrubber）。 */}
+        <div className="flex-1 min-w-0 self-stretch">
+          <EditorHeatScrubber
+            chart={chart}
+            maxBeat={maxBeat}
+            snapSubdivision={snapSubdivision}
+            onSeek={onSeekBeat}
+          />
         </div>
       </div>
     </div>

@@ -35,6 +35,12 @@ import {
 } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt, scrollDistWindow, type ChartRuntime } from '../utils/chartRuntime';
 import { calculateNoteScore, evaluateJudgement } from '../utils/scoring';
+import {
+  processSlideCore,
+  recordBinding,
+  type SlideJudgePointer,
+  type SlideJudgeState,
+} from '../systems/slideJudge';
 import { EASING_FNS } from '../shared/easing';
 import { JUDGE_COLORS, JUDGE_SCALE } from '../shared/gameplaySpec';
 import {
@@ -48,6 +54,12 @@ import {
   TOUCH_SIZE,
 } from '../shared/gameplaySpec';
 import { globalAudio } from '../audio/AudioManager';
+// 快速制谱手势引擎：与 3D 渲染器共用同一份实现（渲染器只负责喂坐标 + 转发 delta）。
+import {
+  createQuickCreateController,
+  type QuickCreateDelta,
+  type QCTrack,
+} from '../systems/quickCreate';
 import { createFrameGate } from '../utils/frameLimiter';
 import { qualityStore } from '../qualityStore';
 
@@ -99,12 +111,17 @@ interface SlideNodeRt {
   lastInsideTime: number | null;
   lastInsidePointerId: string | null;
   arrivalChecked: boolean;
-  redWarn: boolean;
   tailLockedSPerfect: boolean;
+  /** Pre-window early S-Perfect lock (mirror of GameCanvas SlideNodeRt). */
+  earlySPLocked: boolean;
+  /** Head only: recorded pre-window finger ids (mirror of GameCanvas SlideNodeRt). */
+  earlyTouchIds: string[];
 }
 interface SlideRt {
   boundPointerIds: Record<string, boolean>;
   nodes: SlideNodeRt[];
+  /** 头节点特殊窗口内发生过「全松手」但尚未裁定（由判定核心就地改写）。 */
+  headReleasePending: boolean;
 }
 interface TouchRt {
   lastInsideTime: number | null;
@@ -138,10 +155,22 @@ export interface GameCanvas2DProps {
   autoPlay: boolean;
   onJudgement: (fb: JudgementFeedback) => void;
   onSongEnd: () => void;
+  /** 本局第一次把画面渲染到屏幕时回调一次（playSession/chart 变化后重新武装）。
+   *  App 用它把音频时钟的启动推迟到首帧之后，消除"黑屏期间谱面时间已在走"。 */
+  onFirstFrame?: () => void;
   /* ---- 编辑器模式（quality 'lite' 时替代 3D 编辑器视口） ---- */
   isEditorMode?: boolean;
   activeEditorTool?: EditorToolKind;
   selectedNoteId?: string | null;
+  /** 多选集合（note base id；可含子节点 id#i）。用于在 2D 视图为所有选中
+   *  note 绘制选中框，与 3D 视图保持一致。 */
+  selectedNoteIds?: string[];
+  /** 是否处于多选模式（含 Ctrl 临时）。为 true 时才绘制多选框。 */
+  isMultiSelect?: boolean;
+  /** 快速制谱的吸附细分（拍）。 */
+  snapSubdivision?: number;
+  /** 快速制谱手势产出的一批音符（与 3D 视图同一 payload）。 */
+  onApplyQuickCreateDelta?: (delta: QuickCreateDelta) => void;
   /** 编辑器非播放态的时间轴位置（秒）。 */
   gameTime?: number;
   onSelectEditorNote?: (id: string | null) => void;
@@ -164,6 +193,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
   propsRef.current = props;
   /** 由 mount effect 注入的重置函数，供 playSession 变化时调用。 */
   const resetRef = useRef<((chart: ChartData) => void) | null>(null);
+  /** 本局是否已上报过首帧（resetGame 内复位）。 */
+  const firstFrameReportedRef = useRef(false);
 
   /* playSession / chart 变化 → 重开一局。 */
   useEffect(() => {
@@ -197,6 +228,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       desynchronized: !desyncDisabled,
     });
     if (!ctx) return;
+    // 测试用：完全禁用图像缩放平滑（贴图放大不再双线性插值）。矢量填充的
+    // 抗锯齿 2D Canvas 无法关闭，此项只影响皮肤贴图等 drawImage 缩放。
+    ctx.imageSmoothingEnabled = false;
 
     /* ---------------- 视图 / 投影 ---------------- */
     const view = { w: 0, h: 0, aspect: 1, cd: 4.96, dpr: 1, pxPerUnit: 0 };
@@ -293,6 +327,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       cv.height = size;
       const c = cv.getContext('2d');
       if (c) {
+        c.imageSmoothingEnabled = false; // 染色离屏画布同样禁用缩放平滑
         c.drawImage(src, 0, 0, size, size);
         c.globalCompositeOperation = 'multiply';
         c.fillStyle = color;
@@ -459,9 +494,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       ctx!.restore();
     }
 
-    function drawPipeCap(p: P2, color: string, alpha: number, scale: number): void {
+    function drawPipeCap(p: P2, color: string, alpha: number, scale: number, vScale: number): void {
       if (!p) return;
-      const half = Math.max(1.5, SLIDE_HALF * view.pxPerUnit * scale);
+      const half = Math.max(1.5, SLIDE_HALF * view.pxPerUnit * scale * vScale);
       ctx!.save();
       ctx!.globalAlpha = Math.min(1, alpha * 0.35);
       ctx!.fillStyle = color;
@@ -480,13 +515,14 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       samples: { x: number; y: number; scale: number; alpha: number }[],
       color: string,
       brightness: number,
+      vScale: number,
     ): void {
       if (!samples || samples.length < 2) return;
       brightness = brightness || 1.0;
       const [cr, cg, cb] = rgbParts(color);
       const n = samples.length;
       const hw: number[] = [];
-      for (let i = 0; i < n; i++) hw.push(Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * samples[i].scale));
+      for (let i = 0; i < n; i++) hw.push(Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * samples[i].scale * vScale));
       const left: { x: number; y: number }[] = [];
       const right: { x: number; y: number }[] = [];
       for (let i = 0; i < n; i++) {
@@ -680,6 +716,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     function resetGame(chart: ChartData): void {
       // 谱面 / 局次变化 → 画面内容变了，按需渲染需补画一帧。
       renderState.dirty = true;
+      firstFrameReportedRef.current = false; // 新的一局：重新等待首帧上报
       const md = chart.metadata as ChartData['metadata'] & {
         noteColor?: string;
         bgScheme?: { gradientStart?: string; gradientEnd?: string; accentColor?: string };
@@ -729,27 +766,29 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     resetRef.current = resetGame;
 
     /* ---------------- 打击特效 ---------------- */
+    /* burst 对象池：drawBursts 回收失效特效至此，spawnBurst 复用，降低每命中 new 对象
+     * 与 GC 抖动（弱机多指连打时尤为明显）。 */
+    const burstPool: Burst[] = [];
     function spawnBurst(wx: number, wy: number, j: JudgementType, nt: NoteType, angle: number): void {
       const p = project(wx, wy, 0, -1000);
       if (!p) return;
       const vs = game.sizeScale;
       /* 镜像 3D：特效平面 = projSize(nt) 见方；默认环线宽 = defaultSkinJudgeWidth。
        * z=0 处 p.scale 恒为 1。 */
-      const sizeWorld = nt === 'touch' ? TOUCH_SIZE : nt === 'slide' ? SLIDE_SIZE : TAP_SIZE;
+      /* slide 用「菱形对角跨度」= SLIDE_HALF*2（数值等于 TAP_SIZE）而非 SLIDE_SIZE：
+       * SLIDE_SIZE 是菱形的一条边（0.707×tap），而 slide 音符本体按对角跨度绘制
+       * （贴图 TAP_SIZE 见方 / 无贴图时半对角线 SLIDE_HALF），用 SLIDE_SIZE 会让
+       * 特效比音符小 0.707 倍。touch 不受影响：TOUCH_SIZE 在音符侧是直径、在特效
+       * 侧是边长，数值恰好相同。落点指示（下面 drawProjection）保持 SLIDE_SIZE 不变。 */
+      const sizeWorld = nt === 'touch' ? TOUCH_SIZE : nt === 'slide' ? SLIDE_HALF * 2 : TAP_SIZE;
       const sizePx = sizeWorld * view.pxPerUnit * p.scale * vs;
       const lineWidthPx = Math.max(1, skin.judgeWidth * view.pxPerUnit * p.scale * vs);
-      game.bursts.push({
-        x: p.x,
-        y: p.y,
-        start: now(),
-        dur: 300,
-        color: JUDGE_COLORS[j],
-        kind: nt,
-        sizePx,
-        lineWidthPx,
-        scaleTarget: JUDGE_SCALE[j] || 1.0,
-        angle: typeof angle === 'number' ? angle : 0,
-      });
+      /* 复用池对象（字段全部重写，无需担心残留）。 */
+      const b: Burst = burstPool.pop() ?? { x: 0, y: 0, start: 0, dur: 0, color: '', kind: 'tap', sizePx: 0, lineWidthPx: 0, scaleTarget: 1, angle: 0 };
+      b.x = p.x; b.y = p.y; b.start = now(); b.dur = 300;
+      b.color = JUDGE_COLORS[j]; b.kind = nt; b.sizePx = sizePx; b.lineWidthPx = lineWidthPx;
+      b.scaleTarget = JUDGE_SCALE[j] || 1.0; b.angle = typeof angle === 'number' ? angle : 0;
+      game.bursts.push(b);
     }
 
     function drawBursts(): void {
@@ -757,7 +796,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const kept: Burst[] = [];
       for (const b of game.bursts) {
         const prog = (t - b.start) / b.dur;
-        if (prog >= 1) continue;
+        if (prog >= 1) { burstPool.push(b); continue; }
         const multiplier = 1 + (b.scaleTarget - 1) * Math.sin(prog * Math.PI * 0.5);
         const size = b.sizePx * multiplier;
         const alpha = 1 - prog;
@@ -942,7 +981,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     function getSlideRt(noteId: string, nodeCount: number): SlideRt {
       let rt = game.slideStates[noteId];
       if (!rt || rt.nodes.length !== nodeCount) {
-        rt = { boundPointerIds: {}, nodes: [] };
+        rt = { boundPointerIds: {}, nodes: [], headReleasePending: false };
         for (let i = 0; i < nodeCount; i++) {
           rt.nodes.push({
             judged: false,
@@ -951,8 +990,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             lastInsideTime: null,
             lastInsidePointerId: null,
             arrivalChecked: false,
-            redWarn: false,
             tailLockedSPerfect: false,
+            earlySPLocked: false,
+            earlyTouchIds: [],
           });
         }
         game.slideStates[noteId] = rt;
@@ -979,183 +1019,38 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       if (game.currentText && curTime > game.currentTextTimeout) game.currentText = null;
     }
 
-    /* ---------------- slide 判定（移植自 GameCanvas.processSlide） ---------------- */
+    /* ---------------- slide 判定 ----------------
+     * 判定规则统一走纯逻辑核心 systems/slideJudge.processSlideCore（3D / 2D / Lite 共用
+     * 同一套语义，消除此前三份实现各自复制导致的行为分叉）。这里只做适配：
+     * Record<string, PointerState> 指针 + Record<string, boolean> 绑定容器 → 核心的中立入参，
+     * 并把提交回调接到本端的计分 / 音效 / 特效上。 */
     function processSlide(note: ResolvedNote, curTime: number): void {
       const allNodes = getAllSlideNodes(note);
       const rt = getSlideRt(note.id, allNodes.length);
 
-      /* 1) 超窗 Miss（含 missLocked） */
-      for (let i = 0; i < allNodes.length; i++) {
-        const ns = rt.nodes[i];
-        if (ns.judged) continue;
-        const dtI = (curTime - allNodes[i].timeSec) * 1000;
-        if (dtI > HIT_WINDOW_MS) {
-          ns.judged = true;
-          ns.redWarn = false;
-          commitJudge(note.id + '#' + i, 'Miss', dtI, allNodes[i].x, allNodes[i].y, 'slide', allNodes[i].angle);
-        }
+      const pointers: SlideJudgePointer<string>[] = [];
+      for (const pid of Object.keys(game.pointers)) {
+        const p = game.pointers[pid];
+        pointers.push({ id: pid, x: p.x, y: p.y, down: p.down });
       }
 
-      let nextIdx = -1;
-      for (let k0 = 0; k0 < rt.nodes.length; k0++) {
-        if (!rt.nodes[k0].judged) {
-          nextIdx = k0;
-          break;
-        }
-      }
-      const ndForCheck = nextIdx >= 0 ? allNodes[nextIdx] : null;
-
-      /* 2) 松手检测 + 离节点剪枝 */
-      const boundKeys = Object.keys(rt.boundPointerIds);
-      if (boundKeys.length > 0) {
-        let allReleased = true;
-        for (const bpid of boundKeys) {
-          const bp = game.pointers[bpid];
-          if (bp && bp.down) allReleased = false;
-          else delete rt.boundPointerIds[bpid];
-        }
-        if (ndForCheck && Object.keys(rt.boundPointerIds).length > 0) {
-          const onNode: string[] = [];
-          const offNode: string[] = [];
-          for (const pidc of Object.keys(rt.boundPointerIds)) {
-            const bpc = game.pointers[pidc];
-            const isOn =
-              !!bpc &&
-              bpc.down &&
-              Math.abs(bpc.x - ndForCheck.x) < SLIDE_HIT_HALF &&
-              Math.abs(bpc.y - ndForCheck.y) < SLIDE_HIT_HALF;
-            (isOn ? onNode : offNode).push(pidc);
-          }
-          if (onNode.length > 0) for (const o of offNode) delete rt.boundPointerIds[o];
-        }
-        if (allReleased && Object.keys(rt.boundPointerIds).length === 0 && nextIdx >= 0) {
-          const nns = rt.nodes[nextIdx];
-          if (!nns.judged && !nns.tailLockedSPerfect) {
-            nns.missLocked = true;
-            nns.redWarn = false;
-          }
-        }
-      }
-
-      if (nextIdx < 0) return;
-      const cns = rt.nodes[nextIdx];
-      const cnd = allNodes[nextIdx];
-      const dt = (curTime - cnd.timeSec) * 1000;
-
-      if (game.autoPlay) {
-        if (dt >= 0 && !cns.judged) {
-          cns.judged = true;
-          commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
-          globalAudio.playHitSound('slide');
-          spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
-        }
-        cns.redWarn = false;
-        return;
-      }
-
-      if (cns.missLocked) {
-        cns.redWarn = false;
-        return;
-      }
-
-      /* tail 节点放宽：判定窗内任一绑定指针仍按住即锁 S-Perfect */
-      const isTail = nextIdx === allNodes.length - 1;
-      if (isTail && !cns.tailLockedSPerfect && dt >= -HIT_WINDOW_MS) {
-        let hasBound = false;
-        for (const tpid of Object.keys(rt.boundPointerIds)) {
-          hasBound = true;
-          const bpp = game.pointers[tpid];
-          if (bpp && bpp.down) {
-            cns.tailLockedSPerfect = true;
-            break;
-          }
-        }
-        if (!hasBound) {
-          for (const tpid of Object.keys(game.pointers)) {
-            if (game.pointers[tpid].down) {
-              cns.tailLockedSPerfect = true;
-              break;
-            }
-          }
-        }
-      }
-
-      const boundCount = Object.keys(rt.boundPointerIds).length;
-      const onNodePids: string[] = [];
-      if (boundCount > 0) {
-        for (const bpid3 of Object.keys(rt.boundPointerIds)) {
-          const p = game.pointers[bpid3];
-          if (
-            p &&
-            p.down &&
-            Math.abs(p.x - cnd.x) < SLIDE_HIT_HALF &&
-            Math.abs(p.y - cnd.y) < SLIDE_HIT_HALF
-          ) {
-            onNodePids.push(bpid3);
-          }
-        }
-      } else {
-        for (const pid of Object.keys(game.pointers)) {
-          const p2 = game.pointers[pid];
-          if (!p2.down) continue;
-          if (Math.abs(p2.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p2.y - cnd.y) < SLIDE_HIT_HALF) onNodePids.push(pid);
-        }
-      }
-
-      if (boundCount > 0 && onNodePids.length > 0) cns.everInZone = true;
-
-      if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNodePids.length > 0) {
-        cns.lastInsideTime = curTime;
-        cns.lastInsidePointerId = onNodePids[0];
-      }
-
-      if (dt >= 0 && !cns.judged) {
-        if (isTail && cns.tailLockedSPerfect) {
-          cns.judged = true;
-          if (boundCount === 0) {
-            for (const tpid of Object.keys(game.pointers)) {
-              if (game.pointers[tpid].down) rt.boundPointerIds[tpid] = true;
-            }
-          }
-          commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
-          globalAudio.playHitSound('slide');
-          spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
-        } else if (!cns.arrivalChecked) {
-          cns.arrivalChecked = true;
-          if (onNodePids.length > 0) {
-            cns.judged = true;
-            for (const pid of onNodePids) rt.boundPointerIds[pid] = true;
-            commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
+      processSlideCore<string>({
+        nodes: allNodes,
+        rt: rt as unknown as SlideJudgeState<string>,
+        bound: recordBinding(rt.boundPointerIds),
+        pointers,
+        curTime,
+        autoPlay: game.autoPlay,
+        commit: (idx, j, dtMs) => {
+          const nd = allNodes[idx];
+          commitJudge(note.id + '#' + idx, j, dtMs);
+          // 与原本 2D 行为一致：Miss 不出音效 / 特效。
+          if (j !== 'Miss') {
             globalAudio.playHitSound('slide');
-            spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
+            spawnBurst(nd.x, nd.y, j, 'slide', nd.angle);
           }
-        } else if (onNodePids.length > 0 && dt <= HIT_WINDOW_MS) {
-          const j2 = evaluateJudgement(dt);
-          if (j2) {
-            cns.judged = true;
-            for (const pid of onNodePids) rt.boundPointerIds[pid] = true;
-            commitJudge(note.id + '#' + nextIdx, j2, dt);
-            globalAudio.playHitSound('slide');
-            spawnBurst(cnd.x, cnd.y, j2, 'slide', cnd.angle);
-          }
-        }
-      }
-
-      /* 4) 红警：绑定的指针都不在节点上，但有其它按下的指针在节点上 */
-      cns.redWarn = false;
-      if (!cns.judged && boundCount > 0 && onNodePids.length === 0 && dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS) {
-        // for...in 而非 Object.keys：避免每个 slide 节点每帧分配一个键数组
-        // （对齐 Lite 版 `09-engine.js` 的写法）。
-        for (const pid2 in game.pointers) {
-          if (rt.boundPointerIds[pid2]) continue;
-          const p3 = game.pointers[pid2];
-          if (!p3.down) continue;
-          if (Math.abs(p3.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(p3.y - cnd.y) < SLIDE_HIT_HALF) {
-            cns.redWarn = true;
-            break;
-          }
-        }
-      }
+        },
+      });
     }
 
     /* ---------------- touch 判定（悬停触发） ---------------- */
@@ -1408,10 +1303,10 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             }
             if (samples.length < 2) continue;
 
-            /* 管道颜色/亮度：红警/按住高亮 */
+            /* 管道颜色/亮度：红锁/按住高亮 */
             const slideRt = getSlideRt(note.id, allNodes.length);
             const nextNodeRt = slideRt.nodes[pi + 1];
-            const isRed = !!nextNodeRt && (nextNodeRt.missLocked || nextNodeRt.redWarn) && !judgedB;
+            const isRed = !!nextNodeRt && nextNodeRt.missLocked && !judgedB;
             let isHolding = false;
             if (!isRed) {
               let hasAnyBound = false;
@@ -1448,7 +1343,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             if (isHolding) brightness = isRed ? 2.7 : 2.3;
             else if (isRed) brightness = 1.7;
             const pipeColor = isRed ? SLIDE_RED : nc;
-            drawPipeCurve(samples, pipeColor, brightness);
+            drawPipeCurve(samples, pipeColor, brightness, vScale);
 
             /* 两端截面 cap，靠近判定面时平滑淡入 */
             const capZ = 0.4;
@@ -1458,11 +1353,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             const capAN = Math.max(0, 1 - Math.abs(wzN) / capZ);
             if (capA0 > 0.01) {
               const cp0 = project(nodeA.x + easeFn(visLo) * ex, nodeA.y + easeFn(visLo) * ey, wz0, spawnLimit);
-              if (cp0) drawPipeCap(cp0, pipeColor, capA0 * Math.min(1, brightness), cp0.scale);
+              if (cp0) drawPipeCap(cp0, pipeColor, capA0 * Math.min(1, brightness), cp0.scale, vScale);
             }
             if (capAN > 0.01) {
               const cpN = project(nodeA.x + easeFn(visHi) * ex, nodeA.y + easeFn(visHi) * ey, wzN, spawnLimit);
-              if (cpN) drawPipeCap(cpN, pipeColor, capAN * Math.min(1, brightness), cpN.scale);
+              if (cpN) drawPipeCap(cpN, pipeColor, capAN * Math.min(1, brightness), cpN.scale, vScale);
             }
           }
           /* slide 节点 + 落地投影引导 */
@@ -1519,17 +1414,29 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         if (item.kind === 'tap') drawTap(item.p, item.color, vScale, item.angle, fade);
         else if (item.kind === 'touch') drawTouch(item.p, item.color, vScale, fade);
         else {
-          const rt = game.slideStates[item.noteId];
-          const isRed = !!(rt && rt.nodes[item.nodeIdx] && rt.nodes[item.nodeIdx].redWarn);
-          drawSlideNode(item.p, isRed ? SLIDE_RED : item.color, vScale, item.isHead, item.angle, fade);
+          drawSlideNode(item.p, item.color, vScale, item.isHead, item.angle, fade);
         }
       }
 
-      /* 编辑器：选中音符高亮 */
+      /* 编辑器：选中音符高亮（单选焦点） */
       if (propsRef.current.isEditorMode && propsRef.current.selectedNoteId) {
         const sel = propsRef.current.selectedNoteId;
         for (const item of toDraw) {
           if (item.id === sel) drawEditorSelection(item.p, item.kind, vScale, item.angle);
+        }
+      }
+
+      /* 编辑器：多选高亮。与 3D 一致 —— 仅在多选模式下绘制，且跳过焦点音符
+       * （它已由上面的单选高亮绘制，避免双框重叠）。 */
+      if (propsRef.current.isEditorMode && propsRef.current.isMultiSelect) {
+        const selIds = propsRef.current.selectedNoteIds;
+        if (selIds && selIds.length > 0) {
+          const focus = propsRef.current.selectedNoteId;
+          const selSet = new Set(selIds);
+          for (const item of toDraw) {
+            if (item.id === focus) continue;
+            if (selSet.has(item.id)) drawEditorSelection(item.p, item.kind, vScale, item.angle);
+          }
         }
       }
 
@@ -1570,13 +1477,39 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     }
 
     /** tap 命中（pointerdown 即时判定）；含同刻重叠合并（方案二）。 */
+    /* tap 音符子集（按 timeSec 升序，与 game.notes 同源）。findHitTapNote 只扫这个子集，
+     * 不再逐音符跳过非 tap。按 game.notes 引用缓存，换谱时自动失效重建。 */
+    let tapNotesCache: ResolvedNote[] | null = null;
+    let tapNotesCacheKey: ResolvedNote[] | null = null;
+    function getTapNotes(): ResolvedNote[] {
+      if (tapNotesCache && tapNotesCacheKey === game.notes) return tapNotesCache;
+      tapNotesCache = game.notes.filter((n) => n.type === 'tap');
+      tapNotesCacheKey = game.notes;
+      return tapNotesCache;
+    }
+
+    /* 通用时间窗二分（对任意按 timeSec 升序的数组），供 tap 子集复用。 */
+    function timeWindowOf(notes: ResolvedNote[], curTime: number, spawnLimit: number): { first: number; last: number } {
+      const speed = game.speed * game.speedMul;
+      const pastBuffer = 0.3 + (game.maxSlideSpan || 0);
+      const futureBuffer = -spawnLimit / speed + 0.3;
+      const pastTh = curTime - pastBuffer;
+      const futureTh = curTime + futureBuffer;
+      let lo = 0, hi = notes.length, mid = 0;
+      while (lo < hi) { mid = (lo + hi) >> 1; if (notes[mid].timeSec < pastTh) lo = mid + 1; else hi = mid; }
+      const first = lo; lo = first; hi = notes.length;
+      while (lo < hi) { mid = (lo + hi) >> 1; if (notes[mid].timeSec <= futureTh) lo = mid + 1; else hi = mid; }
+      return { first, last: lo };
+    }
+
     function findHitTapNote(wx: number, wy: number, curTime: number): ResolvedNote | null {
+      const tapNotes = getTapNotes();
       const overlapSet: ResolvedNote[] = [];
-      // 命中判定用时间窗（与流速符号无关）。
-      const win = timeWindow(curTime, -game.renderDist);
+      // 命中判定用时间窗（与流速符号无关）。只扫 tap 子集，避免每次 pointerdown
+      // 对窗口内所有音符（含 touch/slide）做无谓的距离判定。
+      const win = timeWindowOf(tapNotes, curTime, -game.renderDist);
       for (let i = win.first; i < win.last; i++) {
-        const n = game.notes[i];
-        if (n.type !== 'tap') continue;
+        const n = tapNotes[i];
         if (game.judged[n.id]) continue;
         const dtMs = Math.abs((curTime - n.timeSec) * 1000);
         if (dtMs >= HIT_WINDOW_MS) continue;
@@ -1686,6 +1619,23 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return p.isPlaying ? globalAudio.getCurrentTime() : (p.gameTime ?? 0);
     }
 
+    /** 编辑器当前拍（含 bpmlist 变速，与 3D 的 chartTimeToBeat 同一算法）。 */
+    function editorCurBeat(): number {
+      const md = game.chart?.metadata;
+      if (!md) return 0;
+      return secondsToBeatMultiBpm(editorCurTime(), md.bpm, md.offset || 0, md.bpmlist);
+    }
+
+    /* ---- 快速制谱：与 3D 渲染器共用 ../systems/quickCreate 的同一份手势引擎，
+     *      本文件只负责喂 (beat, x, y) 并转发 delta ---- */
+    const qcTracks: Record<string, QCTrack> = {};
+    const qc = createQuickCreateController({
+      getSnapSubdivision: () => propsRef.current.snapSubdivision ?? 0.25,
+      dispatch: (delta: QuickCreateDelta) => {
+        try { propsRef.current.onApplyQuickCreateDelta?.(delta); } catch { /* swallow */ }
+      },
+    });
+
     /** 命中最近的音符/子节点 id（判定面世界坐标；仅限 [curBeat-0.1, curBeat+0.5]）。 */
     function hitTestEditorNote(wx: number, wy: number): string | null {
       const chart = game.chart;
@@ -1725,6 +1675,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const p = propsRef.current;
       const w = screenToWorld(sx, sy);
       const tool = p.activeEditorTool || 'select';
+      if (tool === 'quick-create') {
+        // 与 3D 一致：按下不落音，等移动/抬起时按手势分类产出音符。
+        qcTracks[pid] = qc.createTrack(editorCurTime(), editorCurBeat(), w.x, w.y);
+        return;
+      }
       if (tool === 'place-tap' || tool === 'place-touch' || tool === 'place-slide') {
         const cx = Math.round(Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, w.x)) * 10) / 10;
         const cy = Math.round(Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, w.y)) * 10) / 10;
@@ -1798,6 +1753,15 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           const ev = e as PointerEvent;
           const p = offset(ev);
           const pr = propsRef.current;
+          /* 快速制谱：手势分类依赖即时的速度/位移采样，不走 pendingMoves 的每帧
+           * 合并（等价 3D 版 onPointerMove 的 inQC 分支）。 */
+          const qcTrack = qcTracks[String(ev.pointerId)];
+          if (qcTrack) {
+            const qcW = screenToWorld(p.x, p.y);
+            qc.pushSample(qcTrack, editorCurTime(), editorCurBeat(), qcW.x, qcW.y);
+            qc.move(qcTrack, editorCurBeat());
+            return;
+          }
           /* 编辑器拖拽：仅发起拖拽的那个指针可移动选中音符。
            * 与 3D 版一致（GameCanvas.tsx 的 drag 分支）：x/y 钳制到
            * ±NOTE_X_RANGE / ±NOTE_Y_RANGE 并按 0.1 取整，防止把音符拖出判定平面范围。 */
@@ -1823,6 +1787,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           } catch {
             /* ignore */
           }
+          // cancel / leave：丢弃手势，不落音（与 3D 的 onPointerCancel/Leave 一致）。
+          delete qcTracks[String(pid)];
           if (editorDragPid === String(pid)) {
             editorDragging = false;
             editorDragPid = null;
@@ -1831,7 +1797,18 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           delete pendingMoves[String(pid)];
           handleReleaseInput(String(pid));
         };
-        add(el, 'pointerup', (e) => release((e as PointerEvent).pointerId));
+        add(el, 'pointerup', (e) => {
+          const pid = (e as PointerEvent).pointerId;
+          const qcTrack = qcTracks[String(pid)];
+          if (qcTrack) {
+            // 补一个释放时刻的采样后结算手势（位置沿用最后一个采样点）。
+            const last = qcTrack.trajectory[qcTrack.trajectory.length - 1];
+            if (last) qc.pushSample(qcTrack, editorCurTime(), editorCurBeat(), last.x, last.y);
+            qc.up(qcTrack);
+            delete qcTracks[String(pid)];
+          }
+          release(pid);
+        });
         add(el, 'pointercancel', (e) => release((e as PointerEvent).pointerId));
         add(el, 'pointerleave', (e) => release((e as PointerEvent).pointerId));
         return () => removers.forEach((r) => r());
@@ -1969,6 +1946,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         renderState.dirty = false;
         if (p.isPlaying) flushPointerMoves();
         render();
+        // 首帧上报：本局第一次真正画到屏幕。App 以此为锚点启动音频时钟。
+        if (!firstFrameReportedRef.current) {
+          firstFrameReportedRef.current = true;
+          p.onFirstFrame?.();
+        }
       }
       raf = requestAnimationFrame(loop);
     }
@@ -1983,7 +1965,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="block h-full w-full touch-none" data-renderer="2d" />;
+  return <canvas ref={canvasRef} className="block h-full w-full touch-none" data-renderer="2d" style={{ imageRendering: 'pixelated' }} />;
 }
 
 /**

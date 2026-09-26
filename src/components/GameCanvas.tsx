@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, QualityMode, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt, scrollDistWindow } from '../utils/chartRuntime';
@@ -12,26 +12,24 @@ import { EASING_FNS } from '../utils/easing';
 import { WORLD_UNITS_PER_SECOND, withinHitWindow } from '../systems/judge';
 import { expandRing, type RingPt } from '../systems/geometry';
 import { TAP_SIZE, TOUCH_SIZE, SLIDE_SIZE, SLIDE_HALF, BLOOM_LAYER, JUDGE_Z, SLIDE_HIT_HALF, HIT_WINDOW_MS, TAP_RING_OUTER, TOUCH_RING_OUTER, SLIDE_RING_OUTER } from '../gameplayConstants';
+// 快速制谱手势引擎：渲染器无关，3D 与 2D(GameCanvas2D / Lite 画质) 共用同一份实现。
+import {
+  createQuickCreateController,
+  type QuickCreateDelta,
+  type QuickCreateController,
+} from '../systems/quickCreate';
 import { createSceneGroups, disposeSceneGroups, type SceneGroups } from '../scenes/sceneGroups';
 import { usePropRefs } from '../hooks/usePropRefs';
 import type { JudgeSystemContext } from '../hooks/judgeContext';
 import { useJudgeSystem } from '../hooks/useJudgeSystem';
-import { useNoteEffects } from '../hooks/useNoteEffects';
+import { useNoteEffects, recycleBurst, recycleShatter, disposeEffectPools } from '../hooks/useNoteEffects';
 import { useEditorGestures } from '../hooks/useEditorGestures';
 import { setCanvasCapturer } from '../utils/canvasCapture';
 
 import { globalAudio } from '../audio/AudioManager';
 import { liveDragStore } from '../liveDragStore';
 
-interface QuickCreateDelta {
-  taps?: Array<{ beat: number; x: number; y: number }>;
-  touches?: Array<{ beat: number; x: number; y: number }>;
-  slides?: Array<{
-    headBeat: number; headX: number; headY: number;
-    nodes: Array<{ beat: number; x: number; y: number }>;
-  }>;
-  suppressSelection?: boolean;
-}
+// QuickCreateDelta 已迁至 ../systems/quickCreate（3D / 2D 共用同一份定义）。
 
 interface GameCanvasProps {
   chart: ChartData;
@@ -47,8 +45,7 @@ interface GameCanvasProps {
   projectionLeadMs: number;
   noteRenderDistance?: number;
   noteSizeScale?: number;
-  qualityMode?: QualityMode;
-  /** 抗锯齿开关（自定义档位下由用户控制；其余档位按预设推导后传入）。 */
+  /** 抗锯齿开关：由 qualityStore 的 customAntialias 直接传入（预设已回填）。 */
   antialias?: boolean;
   /** 是否允许 Bloom 辉光（仍会受谱面 effectToggles.bloom 进一步约束）。 */
   allowBloom?: boolean;
@@ -73,6 +70,9 @@ interface GameCanvasProps {
   snapSubdivision?: number;
   onJudgement?: (feedback: JudgementFeedback) => void;
   onSongEnd?: () => void;
+  /** 本局第一次把画面渲染到屏幕时回调一次（每次 playSession/chart 变化后重新武装）。
+   *  App 用它把音频时钟的启动推迟到首帧之后，消除"黑屏期间谱面时间已在走"。 */
+  onFirstFrame?: () => void;
   onSelectEditorNote?: (id: string | null) => void;
   onMoveEditorNote?: (id: string, x: number, y: number) => void;
   onPlaceEditorNote?: (x: number, y: number) => void;
@@ -342,7 +342,7 @@ function isSharedGeo(geo: THREE.BufferGeometry | undefined | null): boolean {
 
 // Generic 1×1 plane: default-skin rings / fills attach a soft-edged CanvasTexture
 // and scale the MESH to the texture's world size (keeps a single shared geometry).
-const _unitGeo = markShared(new THREE.PlaneGeometry(1, 1));
+export const _unitGeo = markShared(new THREE.PlaneGeometry(1, 1));
 
 // Full-size planes used when a skin texture *fully* replaces a note (no colored
 // border). The texture's own alpha defines the note shape; we tint via
@@ -383,7 +383,7 @@ function softShapeBBox(pts: RingPt[]) {
 }
 
 /** 软边环形纹理：以线宽 thickness（世界单位）沿多边形描边，环带落在 [maxR-thickness, maxR]。 */
-function makeSoftRingTexture(outer: RingPt[], thickness: number): SoftShapeTex {
+export function makeSoftRingTexture(outer: RingPt[], thickness: number): SoftShapeTex {
   const key = `r|${JSON.stringify(outer)}|${thickness.toFixed(4)}`;
   const hit = softShapeTexCache.get(key);
   if (hit) return hit;
@@ -526,17 +526,22 @@ interface SlideNodeRt {
   lastInsideTime: number | null;
   lastInsidePointerId: number | null;
   arrivalChecked: boolean;
-  /** In time window + a non-bound pointer is on the node (recoverable warning, red). */
-  redWarn: boolean;
-  /** Tail-node special rule: when true, the node is locked for S-Perfect at dt>=0
-   *  as long as the bound pointer is still on screen (doesn't need to be in zone). */
   tailLockedSPerfect: boolean;
+  /** Pre-window early S-Perfect lock: a finger was inside the hit box during
+   *  -HIT_WINDOW_MS <= dt < 0, so commit S-Perfect once dt >= 0 (lenient early sweep). */
+  earlySPLocked: boolean;
+  /** Head only: ids of every finger that entered the box during the pre-window,
+   *  recorded so we can bind them (incl. out-of-box) and require at least one still down. */
+  earlyTouchIds: number[];
 }
 
 /** Runtime state per slide chain */
 export interface SlideRt {
   boundPointerIds: Set<number>;
   nodes: SlideNodeRt[];
+  /** 头节点特殊窗口内发生过「全松手」但尚未裁定：窗口结束才决定要不要红锁
+   *  （期间允许目标手指自由加绑接管链）。 */
+  headReleasePending?: boolean;
 }
 
 interface SlideMeshSet {
@@ -607,7 +612,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   projectionLeadMs,
   noteRenderDistance = 70,
   noteSizeScale = 1.0,
-  qualityMode = 'standard',
   antialias = true,
   allowBloom = false,
   allowParticles = false,
@@ -624,6 +628,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   snapSubdivision = 0.25,
   onJudgement,
   onSongEnd,
+  onFirstFrame,
   onSelectEditorNote,
   onMoveEditorNote,
   onPlaceEditorNote,
@@ -750,7 +755,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   // 命名场景图分组句柄（setup 内创建并写入，运行时 ensure*/spawnBurst 经此挂载）。
   const groupsRef = useRef<SceneGroups | null>(null);
-  /** Post-processing composer — only created when qualityMode >= 'high' AND
+  /** Post-processing composer — only created when allowBloom AND
    *  chart.metadata.effectToggles.bloom is true. Otherwise null and the renderer
    *  falls back to a direct `renderer.render(scene, camera)` call. */
   const composerRef = useRef<EffectComposer | null>(null);
@@ -766,7 +771,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     overlayCam: THREE.OrthographicCamera;
     overlayMat: THREE.ShaderMaterial;
   } | null>(null);
-  /** Ambient particle field for qualityMode >= 'high' when chart.effectToggles.particles. */
+  /** Ambient particle field for allowParticles when chart.effectToggles.particles. */
   const particleFieldRef = useRef<THREE.Points | null>(null);
   /** Particle velocity buffer (one vec3 per point) for the ambient field. */
   const particleVelRef = useRef<Float32Array | null>(null);
@@ -855,7 +860,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const defaultSkinOuterColorRef = useRef(defaultSkinOuterColor);
   const defaultSkinOuterAlphaRef = useRef(defaultSkinOuterAlpha);
   const defaultSkinJudgeWidthRef = useRef(defaultSkinJudgeWidth);
-  const lowQualityModeRef = useRef(qualityMode === 'low');
   const antialiasRef = useRef(antialias);
   const renderScaleRef = useRef(renderScale);
   const allowBloomRef = useRef(allowBloom);
@@ -885,25 +889,30 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const onPlaceEditorNoteRef = useRef(onPlaceEditorNote);
   const onJudgementRef = useRef(onJudgement);
   const onSongEndRef = useRef(onSongEnd);
+  const onFirstFrameRef = useRef(onFirstFrame);
+  /** 本局是否已上报过首帧（playSession/chart 变化时复位，见 resetPlayState effect）。 */
+  const firstFrameReportedRef = useRef(false);
 
   // R4-3：批量同步纯 prop→ref 镜像（带副作用的 skinTextures/defaultSkin/effectToggles 仍保留独立 effect）。
   usePropRefs(
     {
       isPlaying, isPaused, gameTime, speedMultiplier, projectionLeadMs, noteRenderDistance, noteSizeScale,
-      lowQuality: qualityMode === 'low', antialias, renderScale, allowBloom, allowParticles,
+      antialias, renderScale, allowBloom, allowParticles,
       allowDynamicLighting, allowHitEffects, autoPlay, isEditorMode, activeEditorTool, snapSubdivision,
       selectedNoteId, chart, speedPoints,
       onSelectEditorNote, onMoveEditorNote, onPlaceEditorNote, onApplyQuickCreateDelta, onJudgement, onSongEnd,
+      onFirstFrame,
     },
     {
       isPlaying: isPlayingRef, isPaused: isPausedRef, gameTime: gameTimeRef, speedMultiplier: speedRef,
       projectionLeadMs: projectionLeadRef, noteRenderDistance: renderDistRef, noteSizeScale: sizeScaleRef,
-      lowQuality: lowQualityModeRef, antialias: antialiasRef, renderScale: renderScaleRef, allowBloom: allowBloomRef,
+      antialias: antialiasRef, renderScale: renderScaleRef, allowBloom: allowBloomRef,
       allowParticles: allowParticlesRef, allowDynamicLighting: allowDynamicLightingRef, allowHitEffects: allowHitEffectsRef,
       autoPlay: autoPlayRef, isEditorMode: isEditorModeRef, activeEditorTool: activeToolRef, snapSubdivision: snapSubdivisionRef,
       selectedNoteId: selectedNoteIdRef, chart: chartRef, speedPoints: speedPointsRef,
       onSelectEditorNote: onSelectEditorNoteRef, onMoveEditorNote: onMoveEditorNoteRef, onPlaceEditorNote: onPlaceEditorNoteRef,
       onApplyQuickCreateDelta: onApplyQuickCreateDeltaRef, onJudgement: onJudgementRef, onSongEnd: onSongEndRef,
+      onFirstFrame: onFirstFrameRef,
     },
   );
   /**
@@ -1081,7 +1090,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       });
     });
     slideMeshesRef.current.clear();
-    activeBurstsRef.current.forEach((b) => { b.group.removeFromParent(); });
+    activeBurstsRef.current.forEach((b) => { b.group.removeFromParent(); recycleBurst(b.group); });
     activeBurstsRef.current = [];
     judgedNotesRef.current.clear();
     songEndedRef.current = false;
@@ -1184,7 +1193,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     }
   };
 
-  useEffect(() => { resetPlayState(); }, [playSession, chart]);
+  useEffect(() => {
+    resetPlayState();
+    firstFrameReportedRef.current = false; // 新的一局：重新等待首帧上报
+  }, [playSession, chart]);
 
   // 返回菜单 / 结算（非 暂停、非编辑器）时清空所有 note / projection / slide / burst
   // 网格，避免中途退出后 projection 等残留在屏幕上不消失。
@@ -1679,10 +1691,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       }
       shatterSystemsRef.current.forEach((s) => {
         s.points.removeFromParent();
-        s.points.geometry.dispose();
-        (s.points.material as THREE.Material).dispose();
+        recycleShatter(s.points);
       });
       shatterSystemsRef.current.length = 0;
+      disposeEffectPools();
       // Dispose ultra light pool
       ultraLightPoolRef.current.forEach((pl) => { pl.removeFromParent(); });
       ultraLightPoolRef.current = [];
@@ -1713,7 +1725,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       liveDragStore.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, qualityMode, antialias, renderScale, allowBloom, allowParticles, allowDynamicLighting, allowHitEffects, vpKey]);
+  }, [chart.metadata.bgScheme.accentColor, chart.metadata.bgScheme.gradientStart, chart.metadata.bgScheme.gradientEnd, chart.metadata.noteColor, chart.metadata.effectToggles?.bloom, chart.metadata.effectToggles?.particles, chart.metadata.effectToggles?.gridLines, chart.metadata.effectToggles?.projection, antialias, renderScale, allowBloom, allowParticles, allowDynamicLighting, allowHitEffects, vpKey]);
 
   // ====== Quick-Create time/beat helpers =========================================
   /** Chart-clock timestamp -> beat, via the shared inverse in beatTime.ts.
@@ -1724,51 +1736,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     return secondsToBeatMultiBpm(tSec, m.bpm, m.offset || 0, m.bpmlist);
   };
 
-  /** Snap grid step (in beats). The user's snapSubdivision is honoured, but it
-   *  is never finer than 1/16 beat (per spec: "最少1/16拍，如果选的自由也按1/16计算").
-   *  NOTE: previously this used Math.min(1/16, snap) which ALWAYS picked 1/16 —
-   *  that's why notes ignored the 1/4 (0.25) setting. We want the user setting
-   *  when it is coarser than 1/16, hence Math.max. */
-  const qcStep = (): number =>
-    Math.max(1 / 16, snapSubdivisionRef.current > 0 ? snapSubdivisionRef.current : 1 / 16);
-
-  /** Round beat to the nearest grid line using the current snap step. */
-  const qcSnapBeat = (beat: number): number => {
-    const step = qcStep();
-    return Math.round(beat / step) * step;
-  };
-
-  /** Sample the finger's (x,y) position at a given beat by linearly
-   *  interpolating the recorded trajectory. This is what makes slide nodes and
-   *  touch notes truly FOLLOW the finger instead of piling at the cursor. */
-  const qcSampleAtBeat = (
-    traj: Array<{ tSec: number; beat: number; x: number; y: number }>,
-    beat: number
-  ): { x: number; y: number } => {
-    if (traj.length === 0) return { x: 0, y: 0 };
-    if (beat <= traj[0].beat) return { x: traj[0].x, y: traj[0].y };
-    const last = traj[traj.length - 1];
-    if (beat >= last.beat) return { x: last.x, y: last.y };
-    for (let i = 1; i < traj.length; i++) {
-      if (traj[i].beat >= beat) {
-        const a = traj[i - 1];
-        const b = traj[i];
-        const u = (beat - a.beat) / Math.max(b.beat - a.beat, 1e-6);
-        return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u };
-      }
-    }
-    return { x: last.x, y: last.y };
-  };
-
-  /** Displacement (note-plane units) from the press point during the FIRST
-   *  beat. If the finger stays within this radius for the whole first beat the
-   *  gesture becomes a SLIDE; beyond it becomes a TOUCH stream. Per spec the
-   *  slide/touch decision is made ONLY from the first-beat displacement and is
-   *  then locked. */
-  const QC_STATIC_MOVE_PX = 0.22; // ~14% of note-plane half-width
-  /** Beat duration (in beats) after which the slide/touch decision is locked
-   *  and a press that is still held can no longer be a tap. */
-  const QC_FIRST_BEAT = 1.0;
+  /* 吸附步长 / 轨迹插值 / 分类阈值已迁至 ../systems/quickCreate（3D 与 2D 共用）。 */
 
   /** Dispatch a QuickCreateDelta payload to the parent. If the parent hasn't
    *  wired up the callback, fall back to emulating the existing per-note
@@ -1794,6 +1762,17 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     for (const t of delta.taps ?? []) place('tap', t.x, t.y);
     for (const t of delta.touches ?? []) place('touch', t.x, t.y);
   };
+
+  /** 快速制谱手势控制器。分类与落音逻辑在 ../systems/quickCreate，与 2D 渲染器
+   *  共用；本组件只负责喂指针坐标（世界坐标 + beat）并转发 delta。 */
+  const qcControllerRef = useRef<QuickCreateController | null>(null);
+  if (!qcControllerRef.current) {
+    qcControllerRef.current = createQuickCreateController({
+      getSnapSubdivision: () => snapSubdivisionRef.current,
+      dispatch: qcDispatchDelta,
+    });
+  }
+  const qc = qcControllerRef.current;
 
   // 触摸/指针数学缓存：复用 Raycaster/向量/平面，避免每次 pointer 事件分配对象
   // 并在 GC 压力下造成点击停顿（HarmonyOS 平板实测，见性能修复）。
@@ -2482,7 +2461,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const key = `${note.id}#${i}`;
           const judged = judgedNotesRef.current.has(key);
           const nodeRt = rt?.nodes[i];
-          const isRed = !!nodeRt && (nodeRt.missLocked || nodeRt.redWarn) && !judged;
+          const isRed = !!nodeRt && nodeRt.missLocked && !judged;
           // Respsect "音符渲染距离" in both gameplay and editor mode.
           // In editor mode, also hide notes whose time has already passed —
           // with negative scroll speed a note can come back into the visible
@@ -2634,9 +2613,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           if (targetClipped) {
             // Engage immediately: no stale frame can flash past the judgement plane.
             pipe.clipAmount = 1;
-          } else if (lowQualityModeRef.current) {
-            // Low quality: binary on/off — skip the smooth exp release entirely.
-            pipe.clipAmount = 0;
           } else {
             // Release smoothly over roughly 220ms. The endpoint starts at Z=0 and
             // travels outward instead of the full outside section appearing at once.
@@ -2758,7 +2734,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           pipe.mid.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
 
           const nodeRt = rt?.nodes[i + 1];
-          const isRed = !!nodeRt && (nodeRt.missLocked || nodeRt.redWarn) && !nextJudged;
+          const isRed = !!nodeRt && nodeRt.missLocked && !nextJudged;
           pipe.mat.color.copy(cachedColor(isRed ? SLIDE_RED : noteEffectiveColor));
           const pipeFadeAlpha = isEditorModeRef.current
             ? 1
@@ -3008,6 +2984,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const p = (now - b.startTime) / b.duration;
       if (p >= 1) {
         b.group.removeFromParent();
+        recycleBurst(b.group);
         // Skip copying → effectively removed.
         continue;
       }
@@ -3075,8 +3052,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const p = (now - s.startMs) / s.duration;
       if (p >= 1) {
         s.points.removeFromParent();
-        s.points.geometry.dispose();
-        (s.points.material as THREE.Material).dispose();
+        recycleShatter(s.points);
         continue;
       }
       const posAttr = s.points.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -3158,172 +3134,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     } else {
       renderer.render(scene, camera);
     }
+
+    // 首帧上报：本局第一次真正把画面画到屏幕上。App 以此为锚点启动音频时钟
+    // （pendingAudioStart），彻底消除"黑屏期间谱面时间已在走"。
+    if (!firstFrameReportedRef.current) {
+      firstFrameReportedRef.current = true;
+      onFirstFrameRef.current?.();
+    }
   };
 
   // ====== Quick-Create gesture dispatcher =======================================
-  /** Called on pointer DOWN in quick-create mode. Sets up a new QCTrack and
-   *  does NOT dispatch any notes yet (note decisions happen on move / up).
-   *  The existing place-tap/touch/slide flows are bypassed entirely for this
-   *  pointer until release so that selection / move logic never kicks in. */
-  const qcOnDown = (track: QCTrack) => {
-    // No dispatch on press — we need the release to classify. But we DO
-    // want to "eat" the event so handlePointerInteraction doesn't try to
-    // place a single tap note or select anything.
-    void track;
-  };
 
-  /** Called on pointer MOVE while in quick-create mode and a press is active.
-   *  Emits touch-stream notes in real-time as the finger crosses grid lines,
-   *  and appends slide nodes for slide-classified gestures. */
-  const qcOnMove = (track: QCTrack, nowBeat: number) => {
-    const totalHoldBeats = nowBeat - track.pressBeat;
 
-    // ----- Decide the gesture ONCE, at the end of the first beat, and lock it.
-    //  Per spec: SLIDE vs TOUCH is determined ONLY by the displacement during
-    //  the first beat after pressing; later movement does not change it.
-    if (track.gesture === 'undecided') {
-      if (totalHoldBeats >= QC_FIRST_BEAT) {
-        let maxDisp = 0;
-        for (const s of track.trajectory) {
-          maxDisp = Math.max(maxDisp, Math.hypot(s.x - track.pressX, s.y - track.pressY));
-        }
-        track.gesture = maxDisp > QC_STATIC_MOVE_PX ? 'touch-stream' : 'slide';
-      } else {
-        // Still within the first beat: nothing to emit yet (could become a tap).
-        return;
-      }
-    }
-
-    // ----- TOUCH stream: one touch note per snap-step, position follows finger.
-    if (track.gesture === 'touch-stream') {
-      const step = qcStep();
-      const startBeat = track.lastPlacedBeat === null
-        ? qcSnapBeat(track.pressBeat)
-        : track.lastPlacedBeat + step;
-      const endBeat = qcSnapBeat(nowBeat);
-      const notesOut: Array<{ beat: number; x: number; y: number }> = [];
-      // Sample the finger position from the recorded trajectory at each step
-      // beat so the notes truly follow the finger (not piled at the cursor).
-      for (let b = startBeat; b <= endBeat + 1e-6; b = +(b + step).toFixed(6)) {
-        const sb = qcSnapBeat(b);
-        const p = qcSampleAtBeat(track.trajectory, sb);
-        notesOut.push({ beat: sb, x: roundXY(p.x), y: roundXY(p.y) });
-      }
-      if (notesOut.length > 0) {
-        track.lastPlacedBeat = notesOut[notesOut.length - 1].beat;
-        qcDispatchDelta({ touches: notesOut, suppressSelection: true });
-      }
-      return;
-    }
-
-    // ----- SLIDE: head at press beat, then one node per beat, position follows
-    //  the finger trajectory (sampled at each node beat). The whole node list
-    //  is recomputed every move so earlier nodes update as the finger moves.
-    if (track.gesture === 'slide') {
-      const headSnap = qcSnapBeat(track.pressBeat);
-      const nodes: Array<{ beat: number; x: number; y: number }> = [];
-      for (let n = 1; ; n++) {
-        const nb = track.pressBeat + n; // one node per beat from press time
-        if (nb > nowBeat + 1e-6) break;
-        const sb = qcSnapBeat(nb);
-        if (sb <= headSnap + 1e-6) continue;
-        const p = qcSampleAtBeat(track.trajectory, sb);
-        nodes.push({ beat: sb, x: roundXY(p.x), y: roundXY(p.y) });
-      }
-      qcDispatchDelta({
-        slides: [{
-          headBeat: headSnap,
-          headX: roundXY(track.pressX),
-          headY: roundXY(track.pressY),
-          nodes,
-        }],
-        suppressSelection: true,
-      });
-      return;
-    }
-    // 'undecided' (within first beat) or 'tap' (tap only fires on release).
-  };
-
-  const roundXY = (v: number) => Math.round(THREE.MathUtils.clamp(v, -2.4, 2.4) * 10) / 10;
-
-  /** Called on pointer UP in quick-create mode. Finalises classification and
-   *  emits any pending notes (tap / slide tail). */
-  const qcOnUp = (track: QCTrack) => {
-    const last = track.trajectory[track.trajectory.length - 1];
-    const totalHoldBeats = last.beat - track.pressBeat;
-
-    // ----- Final classification if still undecided (released within first beat) -----
-    if (track.gesture === 'undecided') {
-      let maxDisp = 0;
-      for (const s of track.trajectory) {
-        maxDisp = Math.max(maxDisp, Math.hypot(s.x - track.pressX, s.y - track.pressY));
-      }
-      if (totalHoldBeats < QC_FIRST_BEAT && maxDisp < QC_STATIC_MOVE_PX * 2) {
-        track.gesture = 'tap'; // quick press → release: a single TAP
-      } else {
-        // Held ≥ 1 beat (or moved a lot) but the move handler never locked it
-        // (e.g. released exactly at ~1 beat). Decide now from whole-trajectory
-        // displacement, then fall through to emit the gesture's notes.
-        track.gesture = maxDisp > QC_STATIC_MOVE_PX ? 'touch-stream' : 'slide';
-      }
-    }
-
-    switch (track.gesture) {
-      case 'tap': {
-        // Single beat-snapped TAP at press position & press time.
-        qcDispatchDelta({
-          taps: [{ beat: qcSnapBeat(track.pressBeat), x: roundXY(track.pressX), y: roundXY(track.pressY) }],
-          suppressSelection: true,
-        });
-        return;
-      }
-      case 'slide': {
-        // Head at press beat; one node per beat up to release time, each node's
-        // position sampled from the finger trajectory (follows the finger).
-        const headSnap = qcSnapBeat(track.pressBeat);
-        const nodes: Array<{ beat: number; x: number; y: number }> = [];
-        for (let n = 1; ; n++) {
-          const nb = track.pressBeat + n;
-          if (nb > last.beat + 1e-6) break;
-          const sb = qcSnapBeat(nb);
-          if (sb <= headSnap + 1e-6) continue;
-          const p = qcSampleAtBeat(track.trajectory, sb);
-          nodes.push({ beat: sb, x: roundXY(p.x), y: roundXY(p.y) });
-        }
-        qcDispatchDelta({
-          slides: [{
-            headBeat: headSnap,
-            headX: roundXY(track.pressX),
-            headY: roundXY(track.pressY),
-            nodes,
-          }],
-          suppressSelection: true,
-        });
-        return;
-      }
-      case 'touch-stream': {
-        // Final catch-up: emit touches for the remaining snap steps up to the
-        // release beat, sampling finger positions from the trajectory.
-        const step = qcStep();
-        const startBeat = track.lastPlacedBeat === null
-          ? qcSnapBeat(track.pressBeat)
-          : track.lastPlacedBeat + step;
-        const endBeat = qcSnapBeat(last.beat);
-        if (startBeat <= endBeat + 1e-6) {
-          const notesOut: Array<{ beat: number; x: number; y: number }> = [];
-          for (let b = startBeat; b <= endBeat + 1e-6; b = +(b + step).toFixed(6)) {
-            const sb = qcSnapBeat(b);
-            const p = qcSampleAtBeat(track.trajectory, sb);
-            notesOut.push({ beat: sb, x: roundXY(p.x), y: roundXY(p.y) });
-          }
-          if (notesOut.length > 0) {
-            qcDispatchDelta({ touches: notesOut, suppressSelection: true });
-          }
-        }
-        return;
-      }
-    }
-  };
+  /* 手势分类与落音已迁至 ../systems/quickCreate（3D/2D 共用）；本文件仅保留事件接线。 */
 
   // iOS Safari 15+ shows a text-selection "loupe" (magnifier) on double-tap +
   // hold that CSS alone cannot suppress. The only reliable fix is preventDefault
@@ -3366,7 +3189,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             gesture: 'undecided',
           };
           qcTracksRef.current.set(e.pointerId, track);
-          qcOnDown(track);
           // capture the pointer so drags outside the viewport still produce
           // onpointerup events on this element.
           (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -3388,10 +3210,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const playing = isPlayingRef.current && !isPausedRef.current;
           const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
           const beat = chartTimeToBeat(tSec);
-          track.trajectory.push({ tSec, beat, x: p.x, y: p.y });
-          // Keep trajectory from growing unbounded during long presses.
-          if (track.trajectory.length > 120) track.trajectory.splice(0, track.trajectory.length - 120);
-          qcOnMove(track, beat);
+          qc.pushSample(track, tSec, beat, p.x, p.y);
+          qc.move(track, beat);
           return;
         }
         // 非 QC：rAF 节流合并同帧多次 move，避免触摸拖动时的高频分配 + layout 读。
@@ -3404,10 +3224,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             const pending = pendingMoveRef.current;
             if (pending.size === 0) return;
             for (const [pid, m] of pending) {
-              // 若期间已 up/removePointer 删除，跳过，避免幽灵指针。
+              // 允许悬停（未按下）的指针也进入 pointersRef：touch 音符是悬停触发，
+              // 若仅更新已存在的指针，未按下过的鼠标/触摸永远不会被记录，悬停判定失效。
+              // 已 up/removePointer 删除的幽灵指针由 removePointer 负责，此处无需跳过。
               const existing = pointersRef.current.get(pid);
-              if (!existing) continue;
-              updatePointer(pid, m.cx, m.cy, existing.down, m.pointerType);
+              const down = existing ? existing.down : false;
+              updatePointer(pid, m.cx, m.cy, down, m.pointerType);
             }
             pending.clear();
           });
@@ -3422,8 +3244,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const tSec = playing ? globalAudio.getCurrentTime() : gameTimeRef.current;
           const beat = chartTimeToBeat(tSec);
           const p = pointersRef.current.get(e.pointerId);
-          if (p) track.trajectory.push({ tSec, beat, x: p.x, y: p.y });
-          qcOnUp(track);
+          if (p) qc.pushSample(track, tSec, beat, p.x, p.y);
+          qc.up(track);
           qcTracksRef.current.delete(e.pointerId);
         }
         removePointer(e.pointerId);
@@ -3433,10 +3255,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         removePointer(e.pointerId);
       }}
       onPointerLeave={(e) => {
-        if (e.pointerType === 'touch' || e.pointerType === 'pen') {
-          qcTracksRef.current.delete(e.pointerId);
-          removePointer(e.pointerId);
-        }
+        // 拖拽中的指针（slide/编辑器）不在此移除，否则指针离开元素即中断判定。
+        if (dragPointerIdRef.current === e.pointerId) return;
+        qcTracksRef.current.delete(e.pointerId);
+        removePointer(e.pointerId);
       }}
     >
       <div
@@ -3472,7 +3294,7 @@ const arePropsEqual = (prev: GameCanvasProps, next: GameCanvasProps): boolean =>
   for (const key of Object.keys(next) as Array<keyof GameCanvasProps>) {
     // During playback, gameTime prop is read from globalAudio instead — skip it.
     if (playing && key === 'gameTime') continue;
-    // quality 派生 props（qualityMode/antialias/allow*/renderScale）为低频稳定项，
+    // quality 派生 props（antialias/allow*/renderScale）为低频稳定项，
     // 仅设置弹窗变更（R4-6 起经 qualityStore 驱动），此处浅比较已正确避免误重渲。
     if (prev[key] !== next[key]) return false;
   }

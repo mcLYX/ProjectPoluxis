@@ -216,6 +216,38 @@ html, body {
   transform: scale(0.97);
 }
 
+/* 仅结算成绩框：补 -webkit-backdrop-filter 前缀。HarmonyOS ArkWeb（内核 99）等
+   只认 -webkit- 前缀的内核，原本的 backdrop-blur-xl（仅 unprefixed）渲染不出磨砂，
+   导致只剩 6% 白底、近乎透明。这里只补前缀、不改背景色，保持原本轻量磨砂观感。 */
+.result-card-blur {
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+}
+
+/* 给裸 Tailwind backdrop-blur 工具类补 -webkit- 前缀。与上方 .result-card-blur 修复
+   同一问题：HarmonyOS ArkWeb（内核 99）等只认 -webkit- 前缀的内核，原本 unprefixed 的
+   backdrop-filter 渲染不出磨砂。这里只补前缀、不改背景色，桌面/现代浏览器用 unprefixed
+   原值、观感不变；也不像之前那样把界面整体压深。覆盖实际用到的档位（含任意值）。 */
+.backdrop-blur { -webkit-backdrop-filter: blur(8px); }
+.backdrop-blur-sm { -webkit-backdrop-filter: blur(4px); }
+.backdrop-blur-md { -webkit-backdrop-filter: blur(12px); }
+.backdrop-blur-lg { -webkit-backdrop-filter: blur(16px); }
+.backdrop-blur-xl { -webkit-backdrop-filter: blur(24px); }
+.backdrop-blur-2xl { -webkit-backdrop-filter: blur(40px); }
+.backdrop-blur-3xl { -webkit-backdrop-filter: blur(64px); }
+.backdrop-blur-\[8px\] { -webkit-backdrop-filter: blur(8px); }
+.backdrop-blur-\[4px\] { -webkit-backdrop-filter: blur(4px); }
+
+/* 编辑器左侧栏：与原始 backdrop-blur-xl 完全等价（纯 blur(24px)，无 saturate），
+   额外加 translateZ(0) 强制独立合成层。实测 hmos4 上裸 backdrop-blur-xl 在大尺寸、
+   overflow-hidden、且自身无 transform 的元素上，背景是 WebGL canvas 时采不到背景而
+   退化；提升为独立合成层后可正常磨砂。本类不改背景色（底色由组件自身 bg-white/[0.05] 决定）。 */
+.editor-sidebar-glass {
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  transform: translateZ(0);
+}
+
 /* 引擎完全不支持 backdrop-filter 时（老 Android WebView / 旧内核），把玻璃底
    烘焙得更实：此时退化成"深色半透明面板"而不是"几乎透明"，可读性优先。
    支持模糊的引擎（含现代 Android WebView / Chromium）走上面的轻量底，保持

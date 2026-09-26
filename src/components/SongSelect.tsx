@@ -78,6 +78,55 @@ export interface ResultInfo {
   meta: { title: string; artist: string; difficulty: string; bpm: number };
 }
 
+/* ============================ 开始加载状态模型 ============================
+ * 开始一首谱面需要两份资源：音频（按曲共享、跨难度不变）与谱面（按难度）。
+ * 展开卡片即后台预载（音频 → 谱面顺序）；点击开始若预载未完则等待并展示真实进度。
+ * 所有加载方（预览预载与开始补载）都把事件写入同一份 loadStateRef"地面真相"，
+ * 按钮文案由 loadStageLabel 纯函数推导 —— 状态只有一份，展示不会各说各话。
+ * 关键点：音频"就绪"必须可验证（AudioManager.getActiveURL() === 本曲 URL），
+ * 缓存命中时 loadAudioURL 不发任何进度事件，所以不能依赖事件流推断就绪。 */
+type StagePhase = 'idle' | 'download' | 'decode' | 'ready';
+interface StageState {
+  phase: StagePhase;
+  /** 已接收 / 总字节（仅 download 阶段有意义；total 0 = 服务器未返回 Content-Length）。 */
+  loaded: number;
+  total: number;
+}
+interface LoadState {
+  songId: string;
+  audio: StageState;
+  chart: StageState;
+}
+const idleStage = (): StageState => ({ phase: 'idle', loaded: 0, total: 0 });
+
+/** 由加载状态推导按钮文案；全部就绪返回 null（无需任何加载展示）。
+ *  展示优先级 = 加载管线顺序：音频下载 → 解码 → 谱面下载 → 全部就绪。 */
+function loadStageLabel(st: LoadState, t: (key: string) => string): string | null {
+  const pctOf = (s: StageState): string =>
+    s.total > 0 ? `${Math.min(100, Math.round((s.loaded / s.total) * 100))}%` : '';
+  if (st.audio.phase === 'download') {
+    const pct = pctOf(st.audio);
+    return pct ? `${t('songcard.loadingAudio')} ${pct}` : t('songcard.loadingAudio');
+  }
+  if (st.audio.phase === 'decode') return t('songcard.decoding');
+  if (st.audio.phase === 'ready') {
+    if (st.chart.phase === 'download') {
+      const pct = pctOf(st.chart);
+      return pct ? `${t('songcard.loadingChart')} ${pct}` : t('songcard.loadingChart');
+    }
+    if (st.chart.phase === 'ready') return null;
+    // 音频已就绪、谱面尚未开跑（预览仍在音频阶段，或谱面将由开始流程现场加载）。
+    return `${t('songcard.loadingAudio')} 100%`;
+  }
+  // 音频 idle：合成器曲目（无音频文件），展示由谱面驱动。
+  if (st.chart.phase === 'download') {
+    const pct = pctOf(st.chart);
+    return pct ? `${t('songcard.loadingChart')} ${pct}` : t('songcard.loadingChart');
+  }
+  if (st.chart.phase === 'ready') return null;
+  return t('songcard.loading');
+}
+
 interface SongSelectProps {
   autoPlay: boolean;
   initialState?: SongSelectNavState;
@@ -162,6 +211,10 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
   // 加载阶段文案（「谱面 42%」/「音频 87%」/「解码中」）。与 loadingSongId 同生命周期。
   const [startPhase, setStartPhase] = useState<string | null>(null);
+  /* 开局会话令牌：每次点击开始自增。异步加载期间玩家又点了别的歌时，旧会话在各
+   * await 之后检查令牌并静默退出（不回调 onStartGame、不复位闸门），保证
+   * "最后点击的那首"才是真正进入的谱面。 */
+  const startSessionRef = useRef(0);
   const isStartingGameRef = useRef(false);
   /* 当前正在"开始"的那首曲目。isStartingGameRef 成功开局后不会复位（它还要阻止
    * 预览的清理逻辑停掉游戏音频），所以仅凭它做闸门的话，玩过一局之后再浏览卡片，
@@ -171,39 +224,45 @@ export const SongSelect: React.FC<SongSelectProps> = ({
    * 发起的，都走这里 —— 玩家按下开始后若预载仍在进行，就能立刻看到真实阶段与
    * 百分比，而不是干等一个笼统的「加载中」。
    * 只在"这一首正在开始"时写入状态。百分比只在整数变化时更新（字节回调上百次）。 */
-  const phasePctRef = useRef(-1);
+  /* 开始加载的"地面真相"（模型见文件顶部 LoadState）：预览预载与开始补载都写这里，
+   * 且无论是否处于"开始"闸门 —— 只有这样，点击开始时才能立刻把按钮对齐到真实阶段
+   * （缓存命中不发事件、解码是单次事件不再重发，这些坑都靠"状态常驻"绕开）。 */
+  const loadStateRef = useRef<LoadState>({ songId: '', audio: idleStage(), chart: idleStage() });
+  /* 唯一的 UI 写入口：把地面真相推导成文案并同步到按钮。仅在"这一首正在开始"时生效。 */
+  const syncStartPhase = useCallback((): void => {
+    if (!isStartingGameRef.current) return;
+    const startingId = startingSongIdRef.current;
+    if (!startingId || startingId !== loadStateRef.current.songId) return;
+    setStartPhase(loadStageLabel(loadStateRef.current, t));
+  }, [t]);
+  /* 各加载方的统一上报口。非当前歌曲的迟到事件直接忽略（如切卡后旧下载的进度回调）。 */
   const reportPhase = useCallback(
     (
       songId: string,
-      phase: 'chart' | 'audio' | 'decode',
+      kind: 'audio' | 'chart',
+      phase: StagePhase,
       loaded?: number,
       total?: number,
     ): void => {
-      if (!isStartingGameRef.current || startingSongIdRef.current !== songId) return;
-      if (phase === 'decode') {
-        phasePctRef.current = -1;
-        setStartPhase(t('songcard.decoding'));
-        return;
-      }
-      const label = phase === 'chart' ? t('songcard.loadingChart') : t('songcard.loadingAudio');
-      if (loaded === undefined || total === undefined || total <= 0) {
-        // 无 Content-Length：只报阶段，不带百分比。
-        phasePctRef.current = -1;
-        setStartPhase(label);
-        return;
-      }
-      const pct = Math.min(100, Math.round((loaded / total) * 100));
-      if (pct === phasePctRef.current) return;
-      phasePctRef.current = pct;
-      setStartPhase(`${label} ${pct}%`);
+      const st = loadStateRef.current;
+      if (st.songId !== songId) return;
+      st[kind] = {
+        phase,
+        loaded: phase === 'download' ? loaded ?? 0 : 0,
+        total: phase === 'download' ? total ?? 0 : 0,
+      };
+      syncStartPhase();
     },
-    [t],
+    [syncStartPhase],
   );
   // In-flight preview preload (audio + chart) per expanded song. The Start
   // button stays enabled during preload; if the player hits Start before it
   // finishes, handleStartGame awaits this promise (showing the loading state)
   // to avoid racing the audio buffer swap.
   const previewLoadRef = useRef<{ songId: string; promise: Promise<void> } | null>(null);
+  /* 预览预载已完成的谱面（含所属难度）。点击开始时若难度未变则直接复用，避免
+   * 重复 fetch 同一份谱面文件（原先在 await 预览后还会无条件再 loadChartForDifficulty 一次）。 */
+  const previewChartRef = useRef<{ songId: string; diffIdx: number; chart: ChartData } | null>(null);
   // Album transition animation state
   const [albumAnimPhase, setAlbumAnimPhase] = useState<'idle' | 'exit' | 'enter-start' | 'enter'>('idle');
   const [albumAnimDir, setAlbumAnimDir] = useState<'in' | 'out'>('in'); // 'in' = going into album, 'out' = going back
@@ -341,6 +400,10 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   // Exit result mode: clear the result, then briefly flag the siblings so they
   // slide/fade back into view on the song-select carousel.
   const exitResultMode = useCallback(() => {
+    // 一局真正结束：复位"开始"闸门，使下一首歌的加载流程与首首一致
+    // （否则 isStartingGameRef 会残留为 true，跨歌曲持久化造成状态错乱）。
+    isStartingGameRef.current = false;
+    startingSongIdRef.current = null;
     setJustExitedResult(true);
     window.setTimeout(() => setJustExitedResult(false), 600);
     onClearResult?.();
@@ -435,8 +498,13 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     if (song.difficulties.length === 0) return;
 
     let cancelled = false;
+    // 切走卡片（expandedId 变化）时中止本曲仍在途的下载，不浪费带宽/CPU。
+    const abort = new AbortController();
     // NOTE: do NOT set loadingSongId here — the Start button should be
     // immediately usable. handleStartGame awaits previewLoadRef if needed.
+    // 新的一首：重置地面真相，本曲的所有加载事件都归到它名下（旧歌的迟到回调
+    // 会因 songId 不符被 reportPhase 丢弃）。
+    loadStateRef.current = { songId: song.id, audio: idleStage(), chart: idleStage() };
 
     const loadPromise = (async () => {
       try {
@@ -450,12 +518,12 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         if (song.audio) {
           try {
             await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true, (p) => {
-              // 预览预载也会上报阶段；reportPhase 在未点"开始"时直接忽略。
-              if (p.phase === 'decode') reportPhase(song.id, 'decode');
-              else reportPhase(song.id, 'audio', p.loaded, p.total);
-            });
+              if (p.phase === 'decode') reportPhase(song.id, 'audio', 'decode');
+              else reportPhase(song.id, 'audio', 'download', p.loaded, p.total);
+            }, abort.signal);
+            if (!cancelled) reportPhase(song.id, 'audio', 'ready');
           } catch (e) {
-            console.warn('Failed to load preview audio:', e);
+            if (!cancelled) console.warn('Failed to load preview audio:', e);
           }
         } else {
           // No audio for this song — switch to synth so we don't play
@@ -463,11 +531,25 @@ export const SongSelect: React.FC<SongSelectProps> = ({
           globalAudio.setSynthesizedTrack(song.bpm || 140);
         }
 
-        // Preload chart for current difficulty
+        // Preload chart for current difficulty。同曲同难度已预载过（反复切卡回来）
+        // 则直接复用，不重复下载。
         const diffIdx = selectedDifficultiesRef.current[song.id] ?? 0;
-        await loadChartForDifficulty(song, diffIdx, (loaded, total) =>
-          reportPhase(song.id, 'chart', loaded, total),
-        );
+        const cachedChart = previewChartRef.current;
+        if (cachedChart && cachedChart.songId === song.id && cachedChart.diffIdx === diffIdx) {
+          if (!cancelled) reportPhase(song.id, 'chart', 'ready');
+        } else {
+          const chart = await loadChartForDifficulty(
+            song,
+            diffIdx,
+            (loaded, total) => reportPhase(song.id, 'chart', 'download', loaded, total),
+            abort.signal,
+          );
+          // 已切走：不覆盖新歌的预载结果，也不写状态。
+          if (!cancelled) {
+            reportPhase(song.id, 'chart', 'ready');
+            previewChartRef.current = { songId: song.id, diffIdx, chart };
+          }
+        }
 
         if (!cancelled && !isStartingGameRef.current) {
           // Preview play at low volume from ~10% in
@@ -491,6 +573,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
     return () => {
       cancelled = true;
+      abort.abort();
       if (previewLoadRef.current?.songId === song.id) {
         previewLoadRef.current = null;
       }
@@ -527,76 +610,94 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     const diff = song.difficulties[diffIdx];
     if (!diff) return;
 
-    setLoadingSongId(song.id);
-    /* 阶段文案（与 Lite 一致）：起步是笼统的「加载中」——此刻可能仍在等展开
-     * 卡片时启动的预览预载，而那个 Promise 同时含谱面+音频、分辨不出卡在哪一步。
-     * 预载自己的进度回调会在 isStartingGameRef 置位后接管这里，把文案细化成
-     * 「谱面 42%」/「音频 87%」/「解码中」。 */
-    setStartPhase(t('songcard.loading'));
-    phasePctRef.current = -1;
+    const session = ++startSessionRef.current;
+    const stale = (): boolean => session !== startSessionRef.current;
+
+    /* ===== 就绪判定（全部可验证，不靠猜测）=====
+     * - 音频：AudioManager 记录了活动缓冲的归属 URL（getActiveURL），等于本曲
+     *   音频 URL 才算就绪 —— 杜绝"上一首残留缓冲被误认成本曲已就绪"；
+     *   缓存命中时 loadAudioURL 不发进度事件，所以不能靠事件流推断就绪。
+     * - 谱面：预览预载完成且难度一致才复用；否则开始流程现场加载（带进度）。
+     * - 预览预载在途则等待，避免与音频缓冲切换竞争。 */
+    const audioUrl = song.audio ? resolveBeatmapUrl(song.audio) : '';
+    const audioReady = !song.audio || globalAudio.getActiveURL?.() === audioUrl;
+    const previewChart = previewChartRef.current;
+    const chartReady =
+      !!previewChart && previewChart.songId === song.id && previewChart.diffIdx === diffIdx;
+    const previewPending = previewLoadRef.current?.songId === song.id;
+
     isStartingGameRef.current = true;
     startingSongIdRef.current = song.id;
-    try {
-      // If the preview preload (audio + chart) for this song is still in
-      // flight, wait for it first — the button shows "加载中" only from
-      // this point on, not during background preloading.
-      if (previewLoadRef.current?.songId === song.id) {
-        await previewLoadRef.current.promise;
-      }
+    /* 认领地面真相：正常时预览 effect 已把状态归到本曲名下；若预览因故未跑
+     * （如无难度曲目），在这里认领，保证本曲的进度上报不被 songId 守卫丢弃。 */
+    if (loadStateRef.current.songId !== song.id) {
+      loadStateRef.current = { songId: song.id, audio: idleStage(), chart: idleStage() };
+    }
 
-      // Load chart
-      let chart: ChartData | null = null;
+    /* 一切就绪且无在途预载 → 直接开局，不闪加载展示。 */
+    if (audioReady && chartReady && !previewPending) {
+      globalAudio.stop();
+      startingSongIdRef.current = null;
+      onStartGame(previewChart!.chart, !!song.audio, song.id, getScoreKey(song.id, song.source), diff.name);
+      return;
+    }
+
+    /* 需要加载：进入加载展示。文案立刻按地面真相推导（「音频 100%」/「音频 37%」/
+     * 「解码中」/「谱面 64%」/「加载中」），后续事件持续刷新。 */
+    setLoadingSongId(song.id);
+    syncStartPhase();
+    try {
+      if (previewPending) {
+        await previewLoadRef.current!.promise;
+      }
+      // 等待期间玩家又点了别的歌：本会话已过期，静默退出（新会话已接管闸门与 UI）。
+      if (stale()) return;
+
+      // 谱面：预览已备好则复用，否则现场加载（带下载进度）。
+      let chart: ChartData;
       if (isFallbackSong(song.id)) {
         chart = getFallbackChart(song.id);
+      } else if (chartReady) {
+        chart = previewChart!.chart;
       } else {
-        reportPhase(song.id, 'chart');
         chart = await loadChartForDifficulty(song, diffIdx, (loaded, total) =>
-          reportPhase(song.id, 'chart', loaded, total),
+          reportPhase(song.id, 'chart', 'download', loaded, total),
         );
-      }
-      if (!chart) {
-        setLoadingSongId(null);
-        setStartPhase(null);
-        isStartingGameRef.current = false;
-        startingSongIdRef.current = null;
-        return;
+        if (stale()) return;
+        reportPhase(song.id, 'chart', 'ready');
+        previewChartRef.current = { songId: song.id, diffIdx, chart };
       }
 
       // Stop preview
       globalAudio.stop();
 
-      // Start game
+      // 音频：确认活动缓冲确为本曲；不是（预览失败 / 从未预载）则现场加载。
       const hasAudio = !!song.audio;
-      if (hasAudio) {
-        // Audio already loaded in preview; if not, load now
-        if (!globalAudio.getActiveBuffer?.()) {
-          reportPhase(song.id, 'audio');
-          await globalAudio.loadAudioURL(resolveBeatmapUrl(song.audio), true, (p) => {
-            if (p.phase === 'decode') {
-              // 字节已到齐：解码没有百分比，只报阶段。
-              reportPhase(song.id, 'decode');
-              return;
-            }
-            reportPhase(song.id, 'audio', p.loaded, p.total);
-          });
-        }
+      if (hasAudio && globalAudio.getActiveURL?.() !== audioUrl) {
+        await globalAudio.loadAudioURL(audioUrl, true, (p) => {
+          if (p.phase === 'decode') reportPhase(song.id, 'audio', 'decode');
+          else reportPhase(song.id, 'audio', 'download', p.loaded, p.total);
+        });
+        if (stale()) return;
+        reportPhase(song.id, 'audio', 'ready');
       }
+
       // scoreKey 按来源加命名空间，避免同一在线曲目下载前后的成绩互通。
-      const scoreKey = getScoreKey(song.id, song.source);
       setStartPhase(null);
       // 关卡已交出去：关闭阶段闸门，避免之后的预览预载继续写状态。
       startingSongIdRef.current = null;
-      onStartGame(chart, hasAudio, song.id, scoreKey, diff.name);
+      onStartGame(chart, hasAudio, song.id, getScoreKey(song.id, song.source), diff.name);
     } catch (e) {
+      if (stale()) return; // 过期会话不得复位新会话的闸门/状态
       console.error('Failed to start game:', e);
       setLoadingSongId(null);
       setStartPhase(null);
       isStartingGameRef.current = false;
       startingSongIdRef.current = null;
     }
-    // t / reportPhase 分别只在切换语言时变化（useI18n 与 reportPhase 内部都是
-    // useCallback([t])），放入依赖是安全的。
-  }, [onStartGame, t, reportPhase]);
+    // syncStartPhase / reportPhase 均以 t 为依赖（useCallback 链），切换语言时
+    // 身份会更新，放入依赖是安全的。
+  }, [onStartGame, syncStartPhase, reportPhase]);
 
   // Click outside to collapse (in result mode: exit result, keep card expanded)
   const handleContainerClick = useCallback((e: React.MouseEvent) => {

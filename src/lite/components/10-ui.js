@@ -42,6 +42,13 @@
    * pressed card stuck on "加载中…" with no owner left to restore it. */
   var busyBtn = null;
 
+  /* 开局会话令牌：每次 startGame() 自增。A 的加载途中又按下 B 的开始时，A 会话
+   * 在各异步回调里发现自己已过期即静默退出 —— 不再写按钮/状态、不再进入游戏，
+   * 最后按下的那首才是真正进入的谱面。过期的在途下载让它自然完成并落入
+   * chartCache / audioCache（lite 无预取，这些字节本就是用户显式请求的，缓存
+   * 复用不浪费），因此无需中止请求。 */
+  var startSession = 0;
+
   /* Put a card's START button into / out of its busy state.
    * `text === null` restores the original label. The original is remembered on
    * the element so prefetch/retry cycles can't lose it. */
@@ -391,9 +398,12 @@
   function startGame() {
     if (!selectedKey) return;
 
+    var session = ++startSession;
+    function stale() { return session !== startSession; }
+
     /* Built-in chart: use DEMO_CHARTS directly (nothing to download) */
     if (DEMO_CHARTS[selectedKey]) {
-      startGameWithChart(DEMO_CHARTS[selectedKey]);
+      startGameWithChart(DEMO_CHARTS[selectedKey], null, session);
       return;
     }
 
@@ -409,23 +419,31 @@
 
     /* Immediate feedback: the very button the user pressed becomes the progress
      * readout. Previously a slow chart download showed NOTHING AT ALL — this is
-     * the reported "卡加载且没有任何提示". */
+     * the reported "卡加载且没有任何提示".
+     * 先归还上一个会话钉住的按钮（恢复其原文案），再把本卡的按钮置忙 —— 否则
+     * B 的进度文字会写进仍在加载中的 A 的按钮。 */
     clearStatus();
+    setStartLoading(null);
     setStartLoading(L('loading'));
     loadChartCached(song.id + '_' + selectedDiffIdx, resolveServerUrl(diff.chartFile),
       function (chart) {
-        startGameWithChart(chart, song);
+        if (stale()) return;
+        startGameWithChart(chart, song, session);
       },
       function (err) {
+        if (stale()) return;
         setStartLoading(null);
         setStatus(L('loadFailHint', { err: (err && err.message) || err }));
       },
       function (loaded, total) {
+        if (stale()) return;
         setStartLoading(loadProgressText('loadPhaseChart', loaded, total, 'loading'));
       });
   }
 
-  function startGameWithChart(chart, songItem) {
+  function startGameWithChart(chart, songItem, session) {
+    if (session == null) session = ++startSession;
+    function stale() { return session !== startSession; }
     Theme.apply(chart.metadata.bgScheme);
     resetGame(chart);
     game.autoPlay = document.getElementById('autoplay-toggle').checked;
@@ -461,6 +479,7 @@
        * not every path here downloads audio (a chart without an `audio` field
        * goes straight to playing), and without this the pressed card would keep
        * showing "加载中…" after returning to the menu. */
+      if (stale()) return; /* 期间玩家已按下另一首歌：本会话不得进入游戏 */
       setStartLoading(null);
       manualClock.time = 0; manualClock.lastStamp = 0;
       game.state = STATE.PLAYING;
@@ -483,6 +502,7 @@
      * prefetch (or by a previous attempt) is adopted and playback starts with
      * no further network traffic. */
     var useSynth = function (err) {
+      if (stale()) return;
       console.warn('[Lite] Audio load failed, using synth:', err);
       setStartLoading(null);
       setStatus(L('audioFailSynth', { err: (err && err.message) || err }));
@@ -503,18 +523,24 @@
       if (audio.useHtml5) {
         /* IE11 without Web Audio: no buffer to cache, the <audio> element path
          * (which has its own timeout) is used instead. */
-        audio.loadAudioUrl(aurl, function () { setStartLoading(null); startPlaying(); }, useSynth);
+        audio.loadAudioUrl(aurl, function () {
+          if (stale()) return;
+          setStartLoading(null); startPlaying();
+        }, useSynth);
       } else {
         loadAudioCached(aurl, function (buffer) {
+          if (stale()) return;
           adoptBuffer(buffer);
           setStartLoading(null);
           startPlaying();
         }, useSynth, function (loaded, total) {
+          if (stale()) return;
           /* Last byte arrived → the remaining wait is decoding, which has no
            * percentage. Showing a word beats a frozen "音频 100%". */
           if (total > 0 && loaded >= total) { setStartLoading(L('audioDecoding')); return; }
           setStartLoading(loadProgressText('loadPhaseAudio', loaded, total, 'loading'));
         }, function () {
+          if (stale()) return;
           /* Covers responses served from the HTTP cache, where no progress event
            * fires at all: decode is still ahead, so say so. */
           setStartLoading(L('audioDecoding'));
@@ -766,7 +792,7 @@
           meta = (item.artist || 'Various Artists') + ' · ' + (item.songs ? item.songs.length : 0) + L('songsSuffix');
         } else {
           var n = idx + 1;
-          kindLabel = L('trackKw') + ' ' + (n < 10 ? '0' + n : '' + n);
+          kindLabel = L('trackKw');
           meta = item.artist || 'Unknown';
         }
 

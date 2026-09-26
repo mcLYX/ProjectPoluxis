@@ -1,8 +1,13 @@
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 // 重度/非首屏组件按需懒加载，降低菜单首屏 JS 体积（three 等仅在使用时下载）。
-const GameCanvas = lazy(() => import('./components/GameCanvas').then(m => ({ default: m.GameCanvas })));
+/* 渲染器代码块加载器：lazy 挂载与开局预热共用同一 promise（模块去重），
+ * 开局流程用它确保 chunk 下载+解析完成后才启动游戏时钟，消除首局黑屏竞走。 */
+const loadRenderer3D = (): Promise<typeof import('./components/GameCanvas')> => import('./components/GameCanvas');
+const loadRenderer2D = (): Promise<typeof import('./components/GameCanvas2D')> => import('./components/GameCanvas2D');
+
+const GameCanvas = lazy(() => loadRenderer3D().then(m => ({ default: m.GameCanvas })));
 // 2D canvas renderer (quality 'lite'). Does NOT import three.js, so its chunk stays tiny.
-const GameCanvas2D = lazy(() => import('./components/GameCanvas2D').then(m => ({ default: m.GameCanvas2D })));
+const GameCanvas2D = lazy(() => loadRenderer2D().then(m => ({ default: m.GameCanvas2D })));
 const Editor2DCanvas = lazy(() => import('./components/Editor2DCanvas').then(m => ({ default: m.Editor2DCanvas })));
 const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').then(m => ({ default: m.VisualChartEditor })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
@@ -85,9 +90,11 @@ const DEFAULT_SETTINGS = {
   // 渲染帧率上限（0 = 不限帧）。默认 60：高刷屏上省电明显，视觉影响很小。
   maxFps: 60,
   musicVolume: 0.8,
-  effectVolume: 0.9,
+  effectVolume: 0.5,
   // 兼容模式（HarmonyOS 弱设备音频时钟停滞时）：谱面走墙钟、音频跟随谱面校准。
-  compatMode: false,
+  // 默认开启：多数设备关闭后音画同步更好，但部分设备音频时钟不稳会出问题，
+  // 故以兼容模式为默认，异常时反而更稳。
+  compatMode: true,
   // 当前选中的皮肤 id；null 表示使用默认纯色外观。
   selectedSkinId: null as string | null,
   // 默认皮肤（未选皮肤包时）的自定义项。
@@ -106,21 +113,6 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
     if (!saved) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(saved);
     const result: typeof DEFAULT_SETTINGS = { ...DEFAULT_SETTINGS };
-    // Migrate legacy `lowQualityMode: boolean` → `qualityMode: 'low'|'standard'`.
-    if (parsed && typeof parsed.lowQualityMode === 'boolean' && parsed.qualityMode === undefined) {
-      result.qualityMode = parsed.lowQualityMode ? 'low' : 'standard';
-      delete parsed.lowQualityMode;
-    }
-    // Migrate legacy `defaultSkinInnerWidth/OuterWidth` (number) → enabled booleans.
-    if (parsed && typeof parsed.defaultSkinInnerWidth === 'number') {
-      result.defaultSkinInnerEnabled = parsed.defaultSkinInnerWidth > 0;
-      delete parsed.defaultSkinInnerWidth;
-    }
-    if (parsed && typeof parsed.defaultSkinOuterWidth === 'number') {
-      result.defaultSkinOuterEnabled = parsed.defaultSkinOuterWidth > 0;
-      if (parsed.defaultSkinOuterWidth > 0) result.defaultSkinOuterWidth = parsed.defaultSkinOuterWidth;
-      delete parsed.defaultSkinOuterWidth;
-    }
     const r = result as Record<keyof typeof DEFAULT_SETTINGS, unknown>;
     for (const k of Object.keys(result) as Array<keyof typeof DEFAULT_SETTINGS>) {
       const val = parsed[k];
@@ -530,37 +522,47 @@ export function App() {
     });
   }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, compatMode, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
-  // 选中皮肤变化时，预加载贴图（灰度图→THREE.Texture）。失败/无皮肤则回退纯色。
-  // 菜单态不预加载：避免把 three 拉进首屏；进入游戏/编辑器（GameCanvas 挂载）前才按需下载贴图。
-  useEffect(() => {
-    if (gameState === 'menu') return;
-    let cancelled = false;
-    (async () => {
+  // 皮肤资产按需加载（去重 + 可等待）：key = 皮肤 id | 渲染器种类。
+  // - 菜单态不加载：避免把 three 拉进首屏（保持原有约束）；
+  // - 结果缓存为 promise：开局预热与挂载后 effect 重复调用只跑一次，
+  //   不再每次进游戏都重新下载/解码皮肤；
+  // - 令牌失效：换皮肤/换画质时，旧的在途加载结果被丢弃，不会覆盖新选择。
+  const skinLoadRef = useRef<{ key: string; token: number; promise: Promise<void> }>({ key: '', token: 0, promise: Promise.resolve() });
+  const ensureSkinAssets = useCallback((lite: boolean): Promise<void> => {
+    const key = `${selectedSkinId ?? ''}|${lite ? '2d' : '3d'}`;
+    const cached = skinLoadRef.current;
+    if (cached.key === key) return cached.promise;
+    const token = cached.token + 1;
+    const promise = (async () => {
       if (!selectedSkinId) {
         setSkinTextures(null);
         setSkinImages(null);
         return;
       }
       const meta = await getSkin(selectedSkinId);
-      if (quality.qualityMode === 'lite') {
+      if (token !== skinLoadRef.current.token) return; // 已被更新的选择取代
+      if (lite) {
         // 2D 渲染器：加载纯图片皮肤（不导入 three.js）。
         const imgs = await loadSkinImages(meta);
-        if (!cancelled) {
-          setSkinImages(imgs);
-          setSkinTextures(null);
-        }
+        if (token !== skinLoadRef.current.token) return;
+        setSkinImages(imgs);
+        setSkinTextures(null);
       } else {
         const tex = await loadSkinTextures(meta);
-        if (!cancelled) {
-          setSkinTextures(tex);
-          setSkinImages(null);
-        }
+        if (token !== skinLoadRef.current.token) return;
+        setSkinTextures(tex);
+        setSkinImages(null);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedSkinId, gameState, quality.qualityMode]);
+    skinLoadRef.current = { key, token, promise };
+    return promise;
+  }, [selectedSkinId]);
+
+  // 进入游戏/编辑器（含局间重开）时确保皮肤资产就绪。
+  useEffect(() => {
+    if (gameState === 'menu') return;
+    void ensureSkinAssets(quality.qualityMode === 'lite');
+  }, [gameState, quality.qualityMode, ensureSkinAssets]);
 
   // 标记渲染器已预热（按当前画质种类分别记录，避免 Lite 会话后返回菜单时误加载 three）。
   useEffect(() => {
@@ -591,6 +593,28 @@ export function App() {
     editorTimeStore.set({ timeSec: gameTime, beat: currentBeat });
   }, [gameTime, currentBeat]);
 
+  /* ===== 首帧后才启动音频时钟 =====
+   * 开局把 play() 挂起为 pending，等画布上报第一帧（GameCanvas/GameCanvas2D 的
+   * onFirstFrame）再真正起走 —— 挂载、WebGL/2D 初始化、首帧渲染的耗时全部落在
+   * 时钟启动之前，黑屏期间谱面时间不再竞走。等待期间画布以 t=0 渲染场景
+   * （AudioManager.resetClock 保证 getCurrentTime 回退值为 0）。
+   * 5s 兜底：画布万一异常未上报，也要保证游戏能开局。 */
+  const pendingAudioStartRef = useRef<{ startSec: number; leadIn: number } | null>(null);
+  const audioStartFallbackRef = useRef<number | null>(null);
+  const clearPendingAudioStart = useCallback(() => {
+    pendingAudioStartRef.current = null;
+    if (audioStartFallbackRef.current) {
+      window.clearTimeout(audioStartFallbackRef.current);
+      audioStartFallbackRef.current = null;
+    }
+  }, []);
+  const startPendingAudio = useCallback(() => {
+    const p = pendingAudioStartRef.current;
+    if (!p) return;
+    clearPendingAudioStart();
+    globalAudio.play(p.startSec, p.leadIn);
+  }, [clearPendingAudioStart]);
+
   const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string) => {
     // Reset the end-of-song lock BEFORE the fade-out timer starts, so the
     // player can pause during the lead-in of the *next* song if they want.
@@ -600,8 +624,18 @@ export function App() {
       window.clearTimeout(transitionTimerRef.current);
       transitionTimerRef.current = null;
     }
+    /* 并行预热（与 200ms 淡出重叠进行）：渲染器代码块（首局需下载+解析 three /
+     * 2D 渲染器）+ 皮肤资产。预热完成前不启动音频时钟 —— 否则弱机/慢网下画布
+     * 尚未挂载、黑屏期间谱面时间已在走，玩家会白丢开头的判定窗口。 */
+    const lite = quality.qualityMode === 'lite';
+    const rendererReady = (lite ? loadRenderer2D() : loadRenderer3D()).catch((e) => {
+      console.error('渲染器加载失败，仍尝试进入游戏', e);
+    });
+    const skinReady = ensureSkinAssets(lite).catch(() => { /* 皮肤加载失败：回退纯色渲染 */ });
     setTransitionPhase('fade-out');
     transitionTimerRef.current = window.setTimeout(() => {
+      void (async () => {
+      await Promise.all([rendererReady, skinReady]);
       globalAudio.stop();
       if (countdownTimerRef.current) {
         window.clearInterval(countdownTimerRef.current);
@@ -617,7 +651,12 @@ export function App() {
       // offset is not part of it (AudioManager applies the offset internally).
       const firstNoteTime = getFirstNoteTime(chartData);
       const leadIn = Math.max(0, 2 - firstNoteTime);
-      globalAudio.play(0, leadIn);
+      // 时钟不在这里启动：挂起为 pending，等画布渲染出第一帧（onFirstFrame）再
+      // play()。等待期间画布以 t=0 渲染场景（resetClock 保证回退值为 0），
+      // 挂载/初始化/首帧的耗时全部落在时钟启动之前。
+      globalAudio.resetClock();
+      pendingAudioStartRef.current = { startSec: 0, leadIn };
+      audioStartFallbackRef.current = window.setTimeout(startPendingAudio, 5000);
 
       setCurrentChart(chartData);
       setHasCustomAudio(useCustomAudio);
@@ -642,8 +681,9 @@ export function App() {
         setTransitionPhase('idle');
         transitionTimerRef.current = null;
       }, 300);
+      })();
     }, 200);
-  }, [currentChart, hasCustomAudio, audioOffsetMs]);
+  }, [currentChart, hasCustomAudio, audioOffsetMs, quality.qualityMode, ensureSkinAssets]);
 
   /**
    * Start play-test mode from the editor.
@@ -772,6 +812,7 @@ export function App() {
     setTransitionPhase('fade-out');
     transitionTimerRef.current = window.setTimeout(() => {
       globalAudio.stop();
+      clearPendingAudioStart();
       setGameState('menu');
       setTransitionPhase('fade-in');
       transitionTimerRef.current = window.setTimeout(() => {
@@ -887,7 +928,9 @@ export function App() {
   // 依据上下文构建谱面（无可用谱面文件时作为兜底，生成空白谱面）。
   const buildLaunchChart = (info: EditorLaunchInfo, copyTemplate: boolean): ChartData => {
     if (copyTemplate) {
-      const tpl = structuredClone(DEMO_CHARTS['neon-cyberspace']);
+      // 不用 structuredClone：它要求 Chrome 98+，会把最低可用版本从 73 抬到 98。
+      // 谱面数据是纯 JSON 结构（无 Map/Set/Date/函数），JSON 往返克隆等价且兼容更早内核。
+      const tpl = JSON.parse(JSON.stringify(DEMO_CHARTS['neon-cyberspace'])) as ChartData;
       tpl.metadata = {
         ...tpl.metadata,
         title: info.songTitle,
@@ -1138,6 +1181,7 @@ export function App() {
         // Back to song select in "result card" mode (bars hidden, enlarged card)
         const showResult = () => {
           setResultInfo(info);
+          clearPendingAudioStart();
           setGameState('menu');
           setTransitionPhase('fade-in');
           transitionTimerRef.current = window.setTimeout(() => {
@@ -1232,6 +1276,8 @@ export function App() {
     // If playing, pause instantly and cancel any existing countdowns
     if (gameState === 'playing') {
       globalAudio.pause();
+      // 玩家在首帧等待窗口内暂停：接管时钟控制，丢弃挂起的自动启动。
+      clearPendingAudioStart();
       if (countdownTimerRef.current) {
         window.clearInterval(countdownTimerRef.current);
         countdownTimerRef.current = null;
@@ -1822,9 +1868,10 @@ export function App() {
   //  - 'lite': the editor AND gameplay both use the 2D canvas renderer
   //    (GameCanvas2D) — three.js is never loaded.
   //  - otherwise: the Three.js scene (GameCanvas) is used for both.
-  //  - The custom* options only tune the 3D scene.
+  //  - 画面特效不再按 named 档位(low/standard/high/ultra)分派，统一由 qualityStore
+  //    的 custom* 标志驱动（预设已在 qualityStore 内回填这些标志），故 3D 渲染
+  //    直接消费 custom*，无需再把档位名映射成各项开关。
   const isLiteRenderer = quality.qualityMode === 'lite';
-  const quality3D: QualityMode = isLiteRenderer ? 'low' : quality.qualityMode;
   // Lazy mount: the renderer is only pulled in when entering the editor or a chart
   // — never on a cold start at the menu. Once it has been warmed (played/edited at
   // least once) it stays mounted so the menu's blurred backdrop still shows the
@@ -1872,13 +1919,12 @@ export function App() {
           projectionLeadMs={projectionLeadMs}
           noteRenderDistance={noteRenderDistance}
           noteSizeScale={noteSizeScale}
-          qualityMode={quality3D}
-          antialias={quality3D === 'custom' ? quality.customAntialias : quality3D !== 'low'}
-          allowBloom={quality3D === 'custom' ? quality.customBloom : (quality3D === 'high' || quality3D === 'ultra')}
-          allowParticles={quality3D === 'custom' ? quality.customParticles : (quality3D === 'high' || quality3D === 'ultra')}
-          allowDynamicLighting={quality3D === 'custom' ? quality.customDynamicLighting : quality3D === 'ultra'}
-          allowHitEffects={quality3D === 'custom' ? quality.customHitEffects : quality3D === 'ultra'}
-          renderScale={quality3D === 'custom' ? quality.customRenderScale : (quality3D === 'low' ? 0.75 : 1.0)}
+          antialias={quality.customAntialias}
+          allowBloom={quality.customBloom}
+          allowParticles={quality.customParticles}
+          allowDynamicLighting={quality.customDynamicLighting}
+          allowHitEffects={quality.customHitEffects}
+          renderScale={quality.customRenderScale}
           autoPlay={autoPlay}
           playSession={playSession}
           isEditorMode={gameState === 'editor'}
@@ -1889,6 +1935,7 @@ export function App() {
           snapSubdivision={snapSubdivision}
           onJudgement={handleJudgementStable}
           onSongEnd={handleSongEnd}
+          onFirstFrame={startPendingAudio}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
           onPlaceEditorNote={handlePlaceEditorNote}
@@ -1921,6 +1968,9 @@ export function App() {
           isEditorMode={gameState === 'editor'}
           activeEditorTool={effectiveEditorTool}
           selectedNoteId={selectedNoteId}
+          selectedNoteIds={selectedNoteIds}
+          isMultiSelect={effectiveMultiSelect}
+          snapSubdivision={snapSubdivision}
           gameTime={gameTime}
           playSession={playSession}
           speedMultiplier={speedMultiplier}
@@ -1930,9 +1980,11 @@ export function App() {
           autoPlay={autoPlay}
           onJudgement={handleJudgementStable}
           onSongEnd={handleSongEnd}
+          onFirstFrame={startPendingAudio}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
           onPlaceEditorNote={handlePlaceEditorNote}
+          onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           skinImages={skinImages}
           defaultSkinInnerEnabled={defaultSkinInnerEnabled}
           defaultSkinOuterEnabled={defaultSkinOuterEnabled}

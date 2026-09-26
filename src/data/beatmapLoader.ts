@@ -39,10 +39,20 @@ export function getFallbackChart(_id?: string): ChartData {
   return getFallbackChartData();
 }
 
+/* ---------- 谱面 JSON 缓存（会话内） ----------
+ * 键 = chartFile 原始引用。重试 / 暂停重来 / 换难度再切回 / 预览后开局都直接命中，
+ * 不再重复 fetch（此前完整版没有谱面缓存，只靠浏览器 HTTP 缓存兜底）。
+ * 命中与写入都返回深拷贝：游玩运行时与编辑器可能持有并修改谱面对象，共享同一
+ * 实例会把上一局的修改泄漏进下一局。上限防长会话累积；加载失败回落 fallback
+ * 不入缓存，下次仍会真实重试。 */
+const chartJsonCache = new Map<string, ChartData>();
+const CHART_JSON_CACHE_MAX = 16;
+
 export async function loadChartForDifficulty(
   item: SongItem,
   difficultyIndex: number,
   onProgress?: BodyProgress,
+  signal?: AbortSignal,
 ): Promise<ChartData> {
   const diff = item.difficulties[difficultyIndex];
   if (!diff) throw new Error('难度索引无效');
@@ -55,9 +65,11 @@ export async function loadChartForDifficulty(
     if (chart) return JSON.parse(JSON.stringify(chart));
     return getFallbackChart();
   }
+  const cachedChart = chartJsonCache.get(raw);
+  if (cachedChart) return JSON.parse(JSON.stringify(cachedChart));
   try {
     const url = raw.startsWith('idb://') ? await resolveIdbUrl(raw) : resolveBeatmapUrl(raw);
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error(`谱面加载失败: ${res.status}`);
     /* 无进度回调时保留 res.json()（与既有行为一致）；需要进度时才把 body 当流读，
      * 再自行按 UTF-8 解码（body 只能被消费一次，二者互斥）。 */
@@ -69,8 +81,17 @@ export async function loadChartForDifficulty(
     if (result.warnings?.length) {
       console.warn(`谱面「${item.title}」已修补加载:`, result.warnings);
     }
-    return result.chart;
+    chartJsonCache.set(raw, result.chart);
+    while (chartJsonCache.size > CHART_JSON_CACHE_MAX) {
+      const oldest = chartJsonCache.keys().next().value;
+      if (oldest === undefined) break;
+      chartJsonCache.delete(oldest);
+    }
+    // 返回副本，缓存原件保持不被调用方修改
+    return JSON.parse(JSON.stringify(result.chart));
   } catch (e) {
+    // 调用方主动中止（如玩家切走卡片）：向上抛出，不回落 fallback、不报错误日志。
+    if (signal?.aborted) throw e;
     console.error('加载谱面出错', e);
     return getFallbackChart();
   }
