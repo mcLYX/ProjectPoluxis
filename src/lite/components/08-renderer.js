@@ -318,12 +318,12 @@
     }
     ctx.restore();
   }
-  /* Background gradient from chart bgScheme. */
+  /* 背景渐变：使用 game.bgStart / game.bgEnd 这一「当前背景」可变状态，
+   * 使 bg_change 事件能在游戏过程中实时切换渐变（与完整版行为一致）。 */
   function drawBackground(chart) {
-    var bg = chart.metadata.bgScheme;
     var g = ctx.createLinearGradient(0, 0, 0, view.h);
-    g.addColorStop(0, bg.gradientStart);
-    g.addColorStop(1, bg.gradientEnd);
+    g.addColorStop(0, game.bgStart);
+    g.addColorStop(1, game.bgEnd);
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, view.w, view.h);
   }

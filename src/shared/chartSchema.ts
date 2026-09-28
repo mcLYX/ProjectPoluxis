@@ -196,16 +196,18 @@ export function parseAndValidateChart(input: unknown): {
         warnings.push('事件 #' + (ei + 1) + ' 缺少有效 beat，已丢弃。');
         continue;
       }
-      events.push({
-        id: typeof e.id === 'string' && e.id ? e.id : 'evt-' + (ei + 1),
-        type: 'event',
-        eventType: typeof e.eventType === 'string' && e.eventType ? e.eventType : 'speed_change',
-        beat: eBeat,
-        speed: isNum(e.speed) ? e.speed : undefined,
-        text: typeof e.text === 'string' ? e.text : undefined,
-        textDuration: isNum(e.textDuration) ? e.textDuration : undefined,
-        color: typeof e.color === 'string' ? e.color : undefined,
-      });
+      // 复制事件的全部自有字段（含 bg_change 的 gradientStart/gradientEnd、
+      // text_display 的 x/y/fontSize 等），再统一规整 id/type/eventType/beat。
+      // 原先只显式列出 speed/text/textDuration/color，会丢弃 bg_change 的渐变色，
+      // 导致 bg_change 事件虽被解析却不携带任何颜色而静默失效。
+      var outEvt: any = { beat: eBeat };
+      for (var ek in e) {
+        if (e.hasOwnProperty(ek) && ek !== 'beat' && ek !== 'time') outEvt[ek] = (e as any)[ek];
+      }
+      outEvt.id = typeof e.id === 'string' && e.id ? e.id : 'evt-' + (ei + 1);
+      outEvt.type = 'event';
+      outEvt.eventType = typeof e.eventType === 'string' && e.eventType ? e.eventType : 'speed_change';
+      events.push(outEvt);
     }
   }
   if (Array.isArray(data.speedEvents)) {

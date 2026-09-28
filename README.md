@@ -260,12 +260,14 @@ node update-beatmaps.mjs
 
 ### 3. 让站点加载这些谱面
 
-`public/beatmaps/` 在构建时会被原样复制到 `dist/beatmaps/`，选歌界面会读取其中的 `beatmaps.json` 自动列出你的专辑与歌曲。
+> **部署者私有内容**：`public/beatmaps/`、`public/sounds/` 属于部署者私有内容，**不会**在构建时进入 `dist`——构建流程会在打包阶段主动剔除它们，改由部署者在其服务器上自行提供（详见[如何部署](#如何部署)）。游戏内置的示范谱面（硬编码于 `src/shared/demoCharts.ts`）与合成器音效始终可玩，不受此影响。
+
+`public/beatmaps/` 的本地索引会被选歌界面读取以列出专辑与歌曲；构建后需由部署者把谱面 / 音效放到其服务器对应路径（`/beatmaps`、`/sounds`，或「在线谱面服务器」）。
 
 ```bash
-node update-beatmaps.mjs   # 生成 / 更新索引
-npm run build              # 构建，public/beatmaps 会进入 dist/
-npm run preview            # 本地预览，确认专辑已出现
+node update-beatmaps.mjs   # 生成 / 更新索引（本地用，供 dev server 或部署者取用）
+npm run build              # 构建（谱面 / 音效不进 dist，由部署者提供）
+npm run preview            # 本地预览（未带私有内容时仅显示内置示范谱面）
 ```
 
 > 注意：因为 `beatmaps/` 与 `public/beatmaps/` 都默认被 `.gitignore` 忽略，它们**不会上传到远程仓库**。请自行备份这些个人内容，或在自己的私有仓库 / 网盘里管理。
@@ -480,6 +482,11 @@ npm run build     # 产物输出到 dist/
 - **Nginx / OpenResty / Apache**：将 `dist/` 作为网站根目录。
 - **GitHub Pages / Vercel / Netlify / Cloudflare Pages / 对象存储**：直接关联仓库或拖拽上传 `dist/`。
 
+> **部署者私有内容不在 `dist` 内**：谱面（`beatmaps/`）与音效（`sounds/`）属于部署者私有内容，构建时**不会**随 `dist` 分发（构建流程会主动剔除）。请由部署者自行提供：
+> - 放到部署站点的 `/beatmaps`、`/sounds` 路径下（游戏内置「本机服务器」默认指向站点根 `/beatmaps`）；或
+> - 在「设置 → 网络」中添加一台「在线谱面服务器」指向你的谱面目录 URL。
+> 未提供时，游戏会自动回退到内置示范谱面与合成器音效，保证始终可玩。
+
 > 默认 `base` 为相对路径 `./`，放在域名根目录或子目录都能正常加载。若部署到子目录（如 `https://域名/poly/`），把 `vite.config.ts` 里的 `base` 改为 `'/poly/'` 再重新构建即可。
 
 ### 3. 打包安卓 App（Capacitor）
@@ -640,7 +647,7 @@ dist/
 
 ## 自定义 UI 与打击音效（sounds）
 
-游戏的命中音效、UI 点击音效默认由**代码内合成器**实时生成，开箱即用、无需任何音频文件。如果你想换成自己的音效，只需在 `public/sounds/` 目录放入对应的 `.ogg` 文件，构建后会被复制到 `dist/sounds/` 并自动加载。
+游戏的命中音效、UI 点击音效默认由**代码内合成器**实时生成，开箱即用、无需任何音频文件。如果你想换成自己的音效，只需在 `public/sounds/` 目录放入对应的音频文件；这部分属于**部署者私有内容，构建时不会进入 `dist`**（见[如何部署](#如何部署)），需由部署者随其服务器一起提供，运行时会自动加载。
 
 > 同 `beatmaps/`，`public/sounds/` 默认被 `.gitignore` 忽略，**不会随仓库提交**（避免携带有版权的音频）。放入自己的音效文件即可，缺失时自动回退到合成器音效，游戏不会静音。
 
@@ -662,9 +669,9 @@ dist/
 ### 2. 让音效生效
 
 ```bash
-# 把你的音效放到 public/sounds/ 后构建
+# 把你的音效放到 public/sounds/（由部署者随服务器提供，不进 dist）
 npm run build
-npm run preview   # 试听效果
+npm run preview   # 试听效果（需部署者已提供 /sounds 或依赖合成器兜底）
 ```
 
 只要 `public/sounds/tap.mp3` 等存在且能正常解码，就会**优先于合成器音效**播放。

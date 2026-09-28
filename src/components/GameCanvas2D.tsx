@@ -1013,6 +1013,10 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           game.currentTextTimeout = curTime + dur;
         } else if (evt.eventType === 'note_color_change' && evt.noteColor) {
           game.currentNoteColor = evt.noteColor;
+        } else if (evt.eventType === 'bg_change') {
+          // 背景渐变缓存键含 game.bgStart|game.bgEnd，修改后会自动重建渐变。
+          if (typeof evt.gradientStart === 'string') game.bgStart = evt.gradientStart;
+          if (typeof evt.gradientEnd === 'string') game.bgEnd = evt.gradientEnd;
         }
         game.nextEventIdx++;
       }

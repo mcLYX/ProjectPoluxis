@@ -15,3 +15,9 @@ declare module 'virtual:toy-platform' {
   const platform: import('./platform/adapter').GamePlatform;
   export default platform;
 }
+
+// 构建期脚本（如 scripts/exclude-public-content.mjs）以纯 JS 编写、无类型声明，
+// 仅供 vite.config.ts 等构建配置 import，运行时由 esbuild/node 直接执行。
+declare module '*.mjs' {
+  export const excludePublicContent: () => import('vite').Plugin;
+}

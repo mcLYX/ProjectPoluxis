@@ -86,6 +86,8 @@ interface GameCanvasProps {
   defaultSkinOuterColor?: string;
   defaultSkinOuterAlpha?: number;
   defaultSkinJudgeWidth?: number;
+  /** 画布后方的环境背景 DOM 层（App 内 `ambientBgRef`）。bg_change 事件据此实时更新渐变。 */
+  ambientBgRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 // 共享游戏常数（TAP_SIZE/SLIDE_HALF/BLOOM_LAYER/JUDGE_Z/判定窗口/ring 外观等）
@@ -634,6 +636,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   onPlaceEditorNote,
   onApplyQuickCreateDelta,
   skinTextures,
+  ambientBgRef,
   defaultSkinInnerEnabled = true,
   defaultSkinOuterEnabled = false,
   defaultSkinOuterWidth = 0.05,
@@ -723,6 +726,19 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const currentTextRef = useRef<{ text: string; endTime: number | null; x?: number; y?: number; fontSize?: number; color?: string } | null>(null);
   const currentNoteColorRef = useRef<string | null>(null);
   const currentBgRef = useRef<{ gradientStart: string; gradientEnd: string } | null>(null);
+  /** 把一组背景配色应用到画布后方的环境背景 DOM 层（ambientBgRef）。
+   *  渐变公式与 App.tsx 中逐谱面基础背景保持一致，确保 bg_change 与基础背景视觉统一。 */
+  const applyAmbientBg = (scheme: { gradientStart: string; gradientEnd: string }) => {
+    const el = ambientBgRef?.current;
+    if (!el) return;
+    el.style.background =
+      `radial-gradient(circle at 50% 50%, ${scheme.gradientEnd} 21.6%, ${scheme.gradientStart} 90%)`;
+  };
+  /** 将环境背景恢复为当前谱面 metadata.bgScheme 的基础配色（开局 / 重置 / 反向 seek 后调用）。 */
+  const resetAmbientBg = () => {
+    const bg = chartRef.current?.metadata.bgScheme;
+    if (bg) applyAmbientBg({ gradientStart: bg.gradientStart, gradientEnd: bg.gradientEnd });
+  };
   const eventTextRef = useRef<HTMLDivElement>(null);
   // Cached last-applied text styles so we only touch the DOM when a value
   // actually changes (avoids redundant style recalcs at 144Hz).
@@ -925,6 +941,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     currentTextRef.current = null;
     currentNoteColorRef.current = null;
     currentBgRef.current = null;
+    resetAmbientBg();
 
     while (nextEventIdxRef.current < events.length && events[nextEventIdxRef.current].timeSec <= upToTime) {
       const evt = events[nextEventIdxRef.current];
@@ -951,6 +968,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         case 'bg_change':
           if (evt.gradientStart && evt.gradientEnd) {
             currentBgRef.current = { gradientStart: evt.gradientStart, gradientEnd: evt.gradientEnd };
+            applyAmbientBg({ gradientStart: evt.gradientStart, gradientEnd: evt.gradientEnd });
           }
           break;
         default:
@@ -1149,6 +1167,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     currentTextRef.current = null;
     currentNoteColorRef.current = null;
     currentBgRef.current = null;
+    resetAmbientBg();
     lastTickTimeRef.current = 0;
   };
 
@@ -1186,6 +1205,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             gradientStart: evt.gradientStart,
             gradientEnd: evt.gradientEnd,
           };
+          applyAmbientBg({ gradientStart: evt.gradientStart, gradientEnd: evt.gradientEnd });
         }
         break;
       default:

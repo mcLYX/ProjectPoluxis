@@ -1911,6 +1911,7 @@ export function App() {
         <Suspense fallback={null}>
         <GameCanvas
           chart={currentChart}
+          ambientBgRef={ambientBgRef}
           viewportActive={viewportActive}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}

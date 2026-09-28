@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+import { excludePublicContent } from "./scripts/exclude-public-content.mjs";
 import packageJson from "./package.json";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -281,6 +282,8 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    // 部署者私有内容（谱面 / 音效）不随构建产物分发，由部署者在其服务器提供。
+    excludePublicContent(),
     VitePWA({
       // 自动在页面注入 manifest 链接与 SW 注册脚本（全版本 SPA 入口）。
       registerType: "autoUpdate",

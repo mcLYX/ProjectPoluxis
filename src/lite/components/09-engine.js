@@ -5,6 +5,8 @@
     chart: null, notes: [], totalNotes: 0, lastNoteTime: 0,
     events: [], speedPoints: [], nextEventIdx: 0,
     currentSpeedMul: 1.0, currentNoteColor: null, currentText: null, currentTextTimeout: 0,
+    /* 背景渐变当前状态：随 bg_change 事件变化（见 processEvents），开局用谱面 bgScheme 初始化。 */
+    bgStart: null, bgEnd: null,
     speed: 36, speedMul: 1.0, renderDist: 70, sizeScale: 1.0, autoPlay: false,
     curTime: 0, judged: {}, judgedCount: 0,
     score: 0, combo: 0, maxCombo: 0, counts: { 'S-Perfect': 0, 'Perfect': 0, 'Good': 0, 'Miss': 0 },
@@ -95,6 +97,10 @@
     game.currentNoteColor = null;
     game.currentText = null;
     game.currentTextTimeout = 0;
+    /* 初始化背景渐变：用谱面 bgScheme 作为基础配色（bg_change 事件会覆盖）。 */
+    var _bg = (chart.metadata && chart.metadata.bgScheme) || {};
+    game.bgStart = typeof _bg.gradientStart === 'string' ? _bg.gradientStart : '#050816';
+    game.bgEnd = typeof _bg.gradientEnd === 'string' ? _bg.gradientEnd : '#02040c';
     game.totalNotes = countPlayableNotes(chart);
     game.lastNoteTime = 0;
     /* maxSlideSpan = max over slides of (lastChildTime - headTime).
@@ -1221,8 +1227,11 @@
         game.currentTextTimeout = curTime + dur;
       } else if (evt.eventType === 'note_color_change' && evt.noteColor) {
         game.currentNoteColor = evt.noteColor;
+      } else if (evt.eventType === 'bg_change') {
+        /* 背景渐变缓存（drawBackground）每帧重建，这里只需更新当前 bgStart/bgEnd。 */
+        if (typeof evt.gradientStart === 'string') game.bgStart = evt.gradientStart;
+        if (typeof evt.gradientEnd === 'string') game.bgEnd = evt.gradientEnd;
       }
-      /* bg_change: stubbed per user spec — background color switching left for later */
       game.nextEventIdx++;
     }
     /* Clear text if timeout expired */
