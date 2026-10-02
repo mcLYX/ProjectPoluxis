@@ -4,7 +4,12 @@
  * 根据 beatmaps/ 文件夹的内容自动生成 public/beatmaps/beatmaps.json
  * 原文件会生成备份（带时间戳）
  *
- * 若专辑/曲目目录内存在 cover.jpg，会自动提取封面的 Vibrant 主题色写入 accentColor。
+ * 约定命名（歌曲目录内）：
+ *   音频 base.mp3 · 封面 cover.jpg · 谱面 0.json/1.json/…（0 起编号）
+ *   视频背景 bga.mp4 · 图片背景 bg.jpg · 故事板 story.js（占位，尚未实现）
+ * 若歌曲目录内有 info.json（格式与 beatmaps.json 的 "type":"song" 条目类似，
+ * 路径相对歌曲目录），则其字段优先，未提供的字段回落到约定命名扫描。
+ * 若专辑/曲目目录内存在封面，会自动提取 Vibrant 主题色写入 accentColor。
  * 提取失败或没有封面时，保留原来的默认值 / metadata.bgScheme.accentColor。
  */
 
@@ -21,6 +26,21 @@ const OUTPUT_FILE = path.join(BEATMAPS_PUBLIC, 'beatmaps.json');
 
 // 难度名称映射（按文件名数字排序）
 const DIFFICULTY_NAMES = ['Easy', 'Normal', 'Hard', 'Insane', 'Another'];
+
+// 约定命名（歌曲目录内）。info.json 未覆盖的字段按这里找。
+const CONV_AUDIO = 'base.mp3';
+const CONV_COVER = 'cover.jpg';
+const CONV_BG_IMAGE = 'bg.jpg';
+const CONV_BG_VIDEO = 'bga.mp4';
+const CONV_STORYBOARD = 'story.js';
+const CONV_CHART_RE = /^\d+\.json$/;
+
+/** info.json 里的相对路径 → 相对 beatmaps 根的路径（拼上歌曲目录）。绝对地址原样保留。 */
+function songRel(albumName, songName, p) {
+  if (typeof p !== 'string' || !p) return '';
+  if (/^https?:\/\//i.test(p) || p.startsWith('/')) return p;
+  return path.join(albumName, songName, p).replace(/\\/g, '/');
+}
 
 // 懒加载 Vibrant。就算没装 node-vibrant，脚本也能跑，只是不会自动取色。
 let _VibrantPromise = null;
@@ -118,58 +138,62 @@ async function scanAlbums() {
     for (const songName of songDirs) {
       const songPath = path.join(albumPath, songName);
       const songFiles = fs.readdirSync(songPath);
+      const songRelPath = (f) => path.join(albumName, songName, f).replace(/\\/g, '/');
 
-      // 查找谱面文件（数字.json）
+      // info.json 优先：格式与 beatmaps.json 的 "type":"song" 条目类似，路径相对歌曲目录。
+      // 未提供的字段回落到约定命名扫描。
+      let info = null;
+      if (songFiles.includes('info.json')) {
+        try {
+          info = JSON.parse(fs.readFileSync(path.join(songPath, 'info.json'), 'utf-8'));
+        } catch (e) {
+          console.warn(`  警告: 无法读取 ${songName}/info.json: ${e.message}，回落约定命名`);
+        }
+      }
+
+      // 谱面：info.difficulties 优先，否则约定命名 N.json（0 起编号，按数字排序）。
       const chartFiles = songFiles
-        .filter(f => /^\d+\.json$/.test(f))
+        .filter(f => CONV_CHART_RE.test(f))
         .sort((a, b) => parseInt(a) - parseInt(b));
+      const infoDiffs = info && Array.isArray(info.difficulties) ? info.difficulties : null;
+      if (!infoDiffs && chartFiles.length === 0) continue;
 
-      if (chartFiles.length === 0) continue;
-
-      // 读取第一个谱面获取歌曲信息
+      // 读取第一个谱面获取歌曲信息（title/artist/bpm 兜底）
       let firstChart = null;
-      try {
-        firstChart = JSON.parse(fs.readFileSync(path.join(songPath, chartFiles[0]), 'utf-8'));
-      } catch (e) {
-        console.warn(`  警告: 无法读取 ${songName}/${chartFiles[0]}: ${e.message}`);
-        continue;
-      }
-
-      const meta = firstChart.metadata || {};
-
-      // 查找音频文件
-      let audioFile = '';
-      const audioExts = ['base.mp3', 'audio.mp3', 'song.mp3'];
-      for (const ext of audioExts) {
-        if (songFiles.includes(ext)) {
-          audioFile = path.join(albumName, songName, ext).replace(/\\/g, '/');
-          break;
+      if (chartFiles.length > 0) {
+        try {
+          firstChart = JSON.parse(fs.readFileSync(path.join(songPath, chartFiles[0]), 'utf-8'));
+        } catch (e) {
+          console.warn(`  警告: 无法读取 ${songName}/${chartFiles[0]}: ${e.message}`);
         }
       }
-      // 找任意 mp3 文件
-      if (!audioFile) {
-        const mp3Files = songFiles.filter(f => f.endsWith('.mp3'));
-        if (mp3Files.length > 0) {
-          audioFile = path.join(albumName, songName, mp3Files[0]).replace(/\\/g, '/');
-        }
-      }
+      const meta = (firstChart && firstChart.metadata) || {};
 
-      // 查找封面
-      const songCoverAbsPath = songFiles.includes('cover.jpg')
-        ? path.join(songPath, 'cover.jpg')
-        : '';
-      const coverFile = songCoverAbsPath
-        ? path.join(albumName, songName, 'cover.jpg').replace(/\\/g, '/')
-        : '';
+      // 音频 / 封面 / 背景 / 故事板：info 字段优先，否则约定命名。
+      const audioFile = songRel(albumName, songName, info && info.audio)
+        || (songFiles.includes(CONV_AUDIO) ? songRelPath(CONV_AUDIO) : '');
+      const infoCoverRel = songRel(albumName, songName, info && info.cover);
+      const coverFile = infoCoverRel
+        || (songFiles.includes(CONV_COVER) ? songRelPath(CONV_COVER) : '');
+      // 用于取色的本地封面绝对路径（info 指向远程地址时取不了色）。
+      const coverAbs = info && info.cover && infoCoverRel && !/^https?:\/\//i.test(infoCoverRel)
+        ? path.join(songPath, info.cover)
+        : (songFiles.includes(CONV_COVER) ? path.join(songPath, CONV_COVER) : '');
+      const bgImage = songRel(albumName, songName, info && info.bgImage)
+        || (songFiles.includes(CONV_BG_IMAGE) ? songRelPath(CONV_BG_IMAGE) : '');
+      const bgVideo = songRel(albumName, songName, info && info.bgVideo)
+        || (songFiles.includes(CONV_BG_VIDEO) ? songRelPath(CONV_BG_VIDEO) : '');
+      const storyboard = songRel(albumName, songName, info && info.storyboard)
+        || (songFiles.includes(CONV_STORYBOARD) ? songRelPath(CONV_STORYBOARD) : '');
 
       // accentColor 优先级：
       //   1) 歌曲 cover 取色（封面主题色最贴近视觉）
-      //   2) metadata.bgScheme.accentColor（谱面内手工指定的强调色，作为封面缺失时的补充）
+      //   2) info.accentColor / metadata.bgScheme.accentColor
       //   3) 专辑 accentColor（上面已经由封面取色或默认色）
       //   4) 兜底 #f43f5e
-      let songAccent = songCoverAbsPath ? await extractAccentColorFromCover(songCoverAbsPath) : null;
+      let songAccent = coverAbs ? await extractAccentColorFromCover(coverAbs) : null;
       if (!songAccent) {
-        songAccent = (meta.bgScheme && meta.bgScheme.accentColor) || null;
+        songAccent = (info && info.accentColor) || (meta.bgScheme && meta.bgScheme.accentColor) || null;
       }
       if (!songAccent) {
         songAccent = album.accentColor || '#f43f5e';
@@ -178,39 +202,67 @@ async function scanAlbums() {
       const song = {
         type: 'song',
         id: songName.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-        title: meta.title || songName,
-        artist: meta.artist || 'Unknown',
-        bpm: meta.bpm || 140,
+        title: (info && info.title) || meta.title || songName,
+        artist: (info && info.artist) || meta.artist || 'Unknown',
+        bpm: (info && info.bpm) || meta.bpm || 140,
         cover: coverFile,
         accentColor: songAccent,
         audio: audioFile,
-        basePath: path.join(albumName, songName).replace(/\\/g, '/'),
+        basePath: songRelPath(''),
         difficulties: [],
       };
+      if (bgImage) song.bgImage = bgImage;
+      if (bgVideo) song.bgVideo = bgVideo;
+      if (storyboard) song.storyboard = storyboard;
 
       // 解析所有难度
-      for (let i = 0; i < chartFiles.length; i++) {
-        const chartFile = chartFiles[i];
-        const chartPath = path.join(songPath, chartFile);
-        let chartData = null;
-        try {
-          chartData = JSON.parse(fs.readFileSync(chartPath, 'utf-8'));
-        } catch (e) {
-          console.warn(`  警告: 无法读取 ${songName}/${chartFile}: ${e.message}`);
-          continue;
+      if (infoDiffs) {
+        for (let i = 0; i < infoDiffs.length; i++) {
+          const d = infoDiffs[i] || {};
+          const chartFile = songRel(albumName, songName, d.chartFile);
+          if (!chartFile) continue;
+          let level = typeof d.level === 'number' ? d.level : undefined;
+          if (level === undefined) {
+            // 尝试从本地谱面读取 metadata.difficulty 的 Lv.x
+            const absChart = path.join(songPath, path.basename(String(d.chartFile || '')));
+            if (fs.existsSync(absChart)) {
+              try {
+                const cd = JSON.parse(fs.readFileSync(absChart, 'utf-8'));
+                const lv = extractLevel(cd.metadata && cd.metadata.difficulty);
+                if (lv) level = lv;
+              } catch (e) { /* 读取失败不影响导入 */ }
+            }
+          }
+          song.difficulties.push({
+            name: d.name || DIFFICULTY_NAMES[i] || `D${i + 1}`,
+            level: level,
+            chartFile: chartFile,
+          });
         }
+      } else {
+        for (let i = 0; i < chartFiles.length; i++) {
+          const chartFile = chartFiles[i];
+          const chartPath = path.join(songPath, chartFile);
+          let chartData = null;
+          try {
+            chartData = JSON.parse(fs.readFileSync(chartPath, 'utf-8'));
+          } catch (e) {
+            console.warn(`  警告: 无法读取 ${songName}/${chartFile}: ${e.message}`);
+            continue;
+          }
 
-        const chartMeta = chartData.metadata || {};
-        const level = extractLevel(chartMeta.difficulty) || (i + 1) * 3;
-        const diffName = chartMeta.difficulty && chartMeta.difficulty.replace(/\s*Lv\.?\s*\d+\s*/i, '').trim()
-          ? chartMeta.difficulty.replace(/\s*Lv\.?\s*\d+\s*/i, '').trim()
-          : DIFFICULTY_NAMES[i] || `D${i + 1}`;
+          const chartMeta = chartData.metadata || {};
+          const level = extractLevel(chartMeta.difficulty) || (i + 1) * 3;
+          const diffName = chartMeta.difficulty && chartMeta.difficulty.replace(/\s*Lv\.?\s*\d+\s*/i, '').trim()
+            ? chartMeta.difficulty.replace(/\s*Lv\.?\s*\d+\s*/i, '').trim()
+            : DIFFICULTY_NAMES[i] || `D${i + 1}`;
 
-        song.difficulties.push({
-          name: diffName,
-          level: level,
-          chartFile: path.join(albumName, songName, chartFile).replace(/\\/g, '/'),
-        });
+          song.difficulties.push({
+            name: diffName,
+            level: level,
+            chartFile: songRelPath(chartFile),
+          });
+        }
       }
 
       if (song.difficulties.length > 0) {

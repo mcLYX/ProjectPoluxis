@@ -78,7 +78,13 @@ export interface SkinImageSet {
  *  Used by the slide pipe renderer to bend the pipe between two nodes. */
 export type EasingType = 'linear' | 'sine-in' | 'sine-out' | 'sine-io';
 
-export type EventType = 'speed_change' | 'text_display' | 'bg_change' | 'note_color_change';
+export type EventType =
+  | 'speed_change'
+  | 'text_display'
+  | 'bg_change'
+  | 'note_color_change'
+  /** 图层坐标偏移：把所属图层的偏移通道设为目标值（可带过渡）。 */
+  | 'offset_change';
 
 export type JudgementType = 'S-Perfect' | 'Perfect' | 'Good' | 'Miss';
 
@@ -139,6 +145,19 @@ export interface EventData {
   gradientEnd?: string;
   /** note_color_change: new note color */
   noteColor?: string;
+  /** offset_change: 目标偏移量 x（判定面坐标，单位同 note.x） */
+  offsetX?: number;
+  /** offset_change: 目标偏移量 y（判定面坐标，单位同 note.y） */
+  offsetY?: number;
+  /** 时间过渡时长。缺省 0 = 瞬时跳变（等价于旧行为）。
+   *  单位按事件类型区分：**offset_change 为拍数**（谱面以拍为主思维），
+   *  其余（speed_change / bg_change / note_color_change）为秒。
+   *  运行时换算：offset_change 的秒数 = beatToSec(beat+拍数) − beatToSec(beat)。 */
+  duration?: number;
+  /** 时间过渡缓动。缺省 'linear'。 */
+  easing?: EasingType;
+  /** speed_change 过渡的起点速度。缺省 = 过渡开始时的当前速度。 */
+  speedFrom?: number;
 }
 
 export interface NoteData {
@@ -160,7 +179,36 @@ export interface NoteData {
   hit?: boolean;
   judgement?: JudgementType;
   deltaT?: number;
-  speedMul?: number;
+  /** 所属图层 id。**省略 = 默认根图层**（与旧谱面完全等价的形态）。
+   *  音符的运动偏移、流速、音符色都继承自该图层及其祖先。 */
+  layerId?: string;
+  /** 假音符：完全不参与判定 —— 不命中、不产生 Miss、不计入总数、不打断连击、无特效音频。 */
+  fake?: boolean;
+  /** 不计分音符：参与判定，但击中与漏掉均不计分、不计数量（totalNotes）、不计连击。 */
+  noScore?: boolean;
+  /** 音符触发器（§3.4）：被特定判定等级击中 / 漏掉时触发事件。 */
+  trigger?: NoteTrigger;
+}
+
+/**
+ * 触发器动作：要么引用谱面里已定义的事件（按 id），要么内联一份迷你事件。
+ */
+export type TriggerAction =
+  | { ref: string }
+  | ({ eventType: EventType } & Partial<EventData>);
+
+/**
+ * 音符触发器（§3.4）。
+ *
+ * - `onMiss`：漏掉时触发；
+ * - `onHit`：命中时触发 —— 可**按判定等级**分别指定，未指定该等级时回退 `default`。
+ *
+ * ⚠️ `speed_change` / `offset_change` 已预先积分进滚动距离与落点，
+ * 判定时刻无法再改变 → 这类动作运行时不生效（编辑器会给出 warning）。
+ */
+export interface NoteTrigger {
+  onHit?: { default?: TriggerAction[] } & Partial<Record<JudgementType, TriggerAction[]>>;
+  onMiss?: TriggerAction[];
 }
 
 export interface ResolvedSlideNode extends SlideNodeData {
@@ -169,10 +217,15 @@ export interface ResolvedSlideNode extends SlideNodeData {
   angle: number;
   /** Effective (resolved) easing for the segment leading into this node. */
   easing: EasingType;
-  /** 预计算的滚动距离：等价于 getScrollDistance(timeSec, speedPoints)，
-   *  由 `utils/chartRuntime.buildChartRuntime` 一次性填充。运行期只读，
-   *  避免每帧对变速点做线性扫描。未填充时为 undefined（调用方需回退）。 */
+  /** 该节点**所在图层**时间轴下的滚动距离（含图层流速积分），由预处理层填充。 */
   scrollDist?: number;
+  /** 图层下标（运行期由预处理层填充，缺省 0 = 默认根图层）。 */
+  layerIdx?: number;
+  /** 全局时间轴下的滚动距离（不含图层流速）。仅供负流速下的距离窗排序使用。 */
+  globalDist?: number;
+  /** @deprecated 图层流速已改为「按图层各自积分滚动距离」，倍率已并入 scrollDist，
+   *  不再单独乘用。保留字段仅为兼容旧运行期数据。 */
+  layerSpeedMul?: number;
 }
 
 /** A rectangular hit region (axis-aligned) in note-space, used by the
@@ -196,10 +249,20 @@ export interface ResolvedNote extends NoteData {
   /** Extra hit regions (besides the note's own TAP_HIT_HALF box) gained from
    *  consuming other overlapping same-time taps. Runtime-only, reset per play. */
   extraHitRegions?: HitRegion[];
-  /** 预计算的滚动距离：等价于 getScrollDistance(timeSec, speedPoints)，由
-   *  `utils/chartRuntime.buildChartRuntime` 一次性填充（slide 的 resolvedNodes
-   *  同样会填）。运行期只读；未填充时为 undefined（调用方需回退现算）。 */
+  /** 该音符**所在图层**时间轴下的滚动距离（含图层流速积分），由预处理层填充。 */
   scrollDist?: number;
+  /** 图层下标（运行期由预处理层填充，缺省 0 = 默认根图层）。 */
+  layerIdx?: number;
+  /** 全局时间轴下的滚动距离（不含图层流速）。仅供负流速下的距离窗排序使用。 */
+  globalDist?: number;
+  /**
+   * 该音符**所在图层**时间轴下的滚动距离（已含图层流速/自身变速的积分）。
+   * z 公式统一为 `JUDGE_Z − (scrollDist − S_layer(curTime))·unit`，
+   * 判定时刻（t = timeSec）恒为 0，不受流速影响。
+   *
+   * @deprecated 倍率已并入上者，不再单独乘用。保留字段仅为兼容旧运行期数据。
+   */
+  layerSpeedMul?: number;
 }
 
 /** Runtime-resolved event with absolute time in seconds */
@@ -221,8 +284,16 @@ export interface ChartMetadata {
     gradientStart: string;
     gradientEnd: string;
     accentColor: string;
+    /**
+     * 图片/视频背景**不再**存于谱面：由歌曲目录约定文件（bg.jpg / bga.mp4）提供，
+     * 经 SongItem.bgImage/bgVideo → 渲染器 bgMedia prop 注入，优先级 视频>图片>渐变。
+     * 旧谱面里的 bgType/bgImage/bgVideo/bgFit/bgOpacity 读取时直接忽略、导出时剥离。
+     */
   };
   noteColor: string;
+  /** 谱面格式版本。缺省/absent = v1（旧格式）。出现显式图层时为 'v2'。
+   *  仅用于未来可能的破坏性变更；读取时不影响任何语义。 */
+  schemaVersion?: string;
   effectToggles: {
     bloom: boolean;
     particles: boolean;
@@ -231,13 +302,49 @@ export interface ChartMetadata {
   };
 }
 
+/**
+ * 图层（Layer）。图层构成一棵树，节点缺失 `parentId` 即为根图层。
+ *
+ * 同一图层内的音符共享三条通道：**坐标偏移 / 流速 / 音符色**。
+ * 子图层的有效值是 自身 与 所有祖先 的合成，且**三条通道的合成规则各不相同**：
+ *
+ * | 通道 | 合成规则 | 缺省 |
+ * |---|---|---|
+ * | 坐标偏移 offset | **相加**：`自身 + Σ 祖先` | 0 |
+ * | 流速 speed | **相乘**：`自身 × Π 祖先` | 1 |
+ * | 音符色 noteColor | **就近继承**：自身未取则取最近祖先，再无则取 `metadata.noteColor` | 继承 |
+ *
+ * 注意：**背景色不属于图层**（`bg_change` 写在任意图层都全局生效，见 docs 决策 7）。
+ */
+export interface LayerData {
+  id: string;
+  /** 省略 = 根图层。谱面至少存在一个根图层。 */
+  parentId?: string;
+  /** 编辑器展示名（可选，不影响任何行为）。 */
+  name?: string;
+  /** 图层级事件时间轴。偏移/流速/音符色事件挂在所属图层上；
+   *  `bg_change` 挂在这里也全局生效（但会被谱面检查判为不良写法）。 */
+  events?: EventData[];
+  /** 静态初始偏移（可选）。等价于在 beat 0 放一个瞬时 `offset_change`。 */
+  offsetX?: number;
+  offsetY?: number;
+  /** 图层流速倍率（参与树上的连乘；缺省 1）。 */
+  speedMul?: number;
+  /** 图层音符色（就近继承；缺省继续向上找，最终落到全局 noteColor）。 */
+  noteColor?: string;
+}
+
 export interface ChartData {
   metadata: ChartMetadata;
   notes: NoteData[];
   /** @deprecated Use events array with speed_change type instead. Kept for backward compat. */
   speedEvents?: Array<{ beat: number; speed: number }>;
-  /** Events mixed into the chart — resolved alongside notes, triggered at their time. */
+  /** Events mixed into the chart — resolved alongside notes, triggered at their time.
+   *  顶层 events 在语义上属于**默认根图层**的事件轴（保持旧格式不变）。 */
   events?: EventData[];
+  /** 显式图层。**省略 = 只有默认根图层的旧形态**（旧谱面/旧版本对此完全兼容）。
+   *  一旦出现本字段，`metadata.schemaVersion` 应为 'v2'。 */
+  layers?: LayerData[];
 }
 
 export interface JudgementFeedback {
@@ -249,6 +356,8 @@ export interface JudgementFeedback {
   scoreGained: number;
   createdAt: number;
   noteType: NoteType;
+  /** 不计分音符的判定：App 统计层据此整条跳过（不计分/数量/连击）。 */
+  noScore?: boolean;
 }
 
 export interface GameStats {

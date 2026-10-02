@@ -4,6 +4,7 @@ import type {
   ChartData,
   EasingType,
   JudgementFeedback,
+  JudgementType,
   NoteType,
   ResolvedNote,
 } from '../types/game';
@@ -11,6 +12,14 @@ import type { SceneGroups } from '../scenes/sceneGroups';
 import type { RingPt } from '../systems/geometry';
 // SlideRt 在 GameCanvas 中定义（与 slide 运行态绑定），此处仅作类型引用。
 import type { SlideRt } from '../components/GameCanvas';
+
+/**
+ * 音符触发器（§3.4）的分发回调：判定提交后由渲染器执行该音符触发的事件。
+ *
+ * 未注入 = 不支持触发器（2D / Lite 若不实现则自动降级为无触发）。
+ * 幂等由 `judgedNotesRef` 保证：一个音符只会被判定一次 → 只触发一次。
+ */
+export type DispatchNoteTrigger = (note: ResolvedNote, judgement: JudgementType) => void;
 
 /** 指针运行态（与 GameCanvas 内联类型保持一致）。 */
 export interface PointerState {
@@ -95,6 +104,24 @@ export interface JudgeSystemContext {
     angle: number;
     easing: EasingType;
   }>;
+  /**
+   * 图层（Layer）偏移后的音符位置。未提供 = 无图层概念，按原坐标判定（旧行为，
+   * 2D / Lite 目前不提供）。slide 子节点由调用方按头节点图层换算。
+   */
+  getEffectivePos?: (note: ResolvedNote) => { x: number; y: number };
+  /** 音符触发器（§3.4）：分发该音符在此判定下触发的事件。可选，未注入则不触发。 */
+  dispatchNoteTrigger?: DispatchNoteTrigger;
+  /**
+   * 判定**落位**处的音符位置（按音符 / slide 子节点自己的 timeSec 求图层偏移）。
+   * 打击特效与判定反馈钉在落位（不随播放中的整列平移跑动）；slide 子节点经
+   * `childIdx`（1-based，与 id 后缀一致）取各自坐标。未提供时退回 getEffectivePos。
+   */
+  getLandingPos?: (note: ResolvedNote, childIdx?: number) => { x: number; y: number };
+  /**
+   * 音符的**有效音符色**：note.color → 图层色（就近继承 / 图层内 note_color_change 事件）
+   * → 全局 noteColor。未提供时退回旧的全局单值链。
+   */
+  getNoteColor?: (note: ResolvedNote) => string;
   makeRingMesh: (
     outer: RingPt[],
     thickness: number,

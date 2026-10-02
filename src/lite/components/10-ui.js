@@ -446,6 +446,12 @@
     function stale() { return session !== startSession; }
     Theme.apply(chart.metadata.bgScheme);
     resetGame(chart);
+    /* 背景媒体：歌曲目录约定文件 bg.jpg（songItem.bgImage 为索引相对路径，按服务器根
+     * 重写）。优先级 视频 > 图片，但 Lite 仅支持图片 → 有视频也回落图片（若同时提供）。
+     * 必须在 resetGame 之后设置（resetGame 会清空媒体层）。 */
+    if (songItem && songItem.bgImage) {
+      setBgImageLite(resolveServerUrl(songItem.bgImage));
+    }
     game.autoPlay = document.getElementById('autoplay-toggle').checked;
     audio.init();
     audio.setMusicVolume(settings.musicVolume);

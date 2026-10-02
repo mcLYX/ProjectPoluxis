@@ -4,7 +4,13 @@
     state: STATE.MENU,
     chart: null, notes: [], totalNotes: 0, lastNoteTime: 0,
     events: [], speedPoints: [], nextEventIdx: 0,
+    /* 图层（Layer）：树 + 每帧偏移 + 各图层滚动距离时间轴 / 当前距离。 */
+    layerTree: null, layerOffs: [], layerDist: [], layerCurDist: [], minLayerSpeed: 1,
     currentSpeedMul: 1.0, currentNoteColor: null, currentText: null, currentTextTimeout: 0,
+    /* 背景媒体层（§3.6，仅图片）。 */
+    bgImage: null, bgImgEl: null, bgFit: 'cover', bgOpacity: 1,
+    /* 触发器 { ref } 的 id→事件表（resetGame 建）。 */
+    eventById: {},
     /* 背景渐变当前状态：随 bg_change 事件变化（见 processEvents），开局用谱面 bgScheme 初始化。 */
     bgStart: null, bgEnd: null,
     speed: 36, speedMul: 1.0, renderDist: 70, sizeScale: 1.0, autoPlay: false,
@@ -57,7 +63,8 @@
     game.chart = chart;
     game.notes = resolveChart(chart);
     game.events = resolveEvents(chart);
-    game.speedPoints = extractSpeedPoints(game.events);
+    /* 传入 easing：speed_change 的 duration>0 时间过渡需要它来离散斜坡。 */
+    game.speedPoints = extractSpeedPoints(game.events, easeLite);
     /* ---- 谱面预处理（一次性，镜像完整版 utils/chartRuntime）----
      *  - 预计算每个音符 / slide 子节点的滚动距离（timeSec 一局内恒定）；
      *  - 预计算 hasNegativeSpeed / minSpeed，省掉每帧对变速点的两遍全扫；
@@ -72,15 +79,38 @@
     }
     game.hasNegativeSpeed = _hasNeg;
     game.minSpeed = _minSpeed;
+    /* 图层（Layer）运行时：树随谱面重建。
+     * 流速是 Π 相乘，各层自身的 speed_change 会让倍率**时变**，因此每个图层要有
+     * 自己的滚动距离时间轴 S_layer(t) = ∫(speed_global × Π 各层自身 speed × Π speedMul)；
+     * 只有链上各层都没有自身变速事件时，才退化为「全局距离 × 常数倍率」。 */
+    game.layerTree = buildLayerTreeLite(chart);
+    game.layerOffs = [];
+    game.layerDist = [];
+    var _minLayerSpeed = 1;
+    for (var _lt = 0; _lt < game.layerTree.nodes.length; _lt++) {
+      game.layerOffs.push({ x: 0, y: 0 });
+      var _lmul = layerSpeedMul(game.layerTree, _lt);
+      var _lpts = layerHasOwnSpeed(game.layerTree, _lt)
+        ? layerSpeedTimeline(game.layerTree, _lt, _sp)
+        : null;
+      game.layerDist.push({ mul: _lmul, globalBase: _lt === 0, points: _lpts });
+      var _lrel = layerMinRelSpeed(game.layerTree, _lt);
+      if (_lrel > 0 && _lrel < _minLayerSpeed) _minLayerSpeed = _lrel;
+    }
+    game.minLayerSpeed = _minLayerSpeed;
     var _maxSlideScrollSpan = 0;
     for (var _ni = 0; _ni < game.notes.length; _ni++) {
       var _n = game.notes[_ni];
-      var _nd = getScrollDistance(_n.timeSec, _sp);
+      var _li = noteLayerIdx(game.layerTree, _n);
+      _n.layerIdx = _li;
+      _n.globalDist = getScrollDistance(_n.timeSec, _sp);
+      var _nd = layerDistAt(_li, _n.timeSec);
       _n.scrollDist = _nd;
       if (_n.resolvedNodes) {
         for (var _ci = 0; _ci < _n.resolvedNodes.length; _ci++) {
           var _cn = _n.resolvedNodes[_ci];
-          _cn.scrollDist = getScrollDistance(_cn.timeSec, _sp);
+          _cn.globalDist = getScrollDistance(_cn.timeSec, _sp);
+          _cn.scrollDist = layerDistAt(_li, _cn.timeSec);
           var _ds = _cn.scrollDist - _nd;
           if (_ds < 0) _ds = -_ds;
           if (_ds > _maxSlideScrollSpan) _maxSlideScrollSpan = _ds;
@@ -90,7 +120,8 @@
     game.maxSlideScrollSpan = _maxSlideScrollSpan;
     var _order = [];
     for (var _oi = 0; _oi < game.notes.length; _oi++) _order.push(_oi);
-    _order.sort(function (a, b) { return game.notes[a].scrollDist - game.notes[b].scrollDist; });
+    /* 各图层距离尺度不同，排序统一走 globalDist（窗口另按 minLayerSpeed 扩宽）。 */
+    _order.sort(function (a, b) { return game.notes[a].globalDist - game.notes[b].globalDist; });
     game.notesByDist = _order;
     game.nextEventIdx = 0;
     game.currentSpeedMul = 1.0;
@@ -101,7 +132,27 @@
     var _bg = (chart.metadata && chart.metadata.bgScheme) || {};
     game.bgStart = typeof _bg.gradientStart === 'string' ? _bg.gradientStart : '#050816';
     game.bgEnd = typeof _bg.gradientEnd === 'string' ? _bg.gradientEnd : '#02040c';
+    /* 背景媒体层：图片来自歌曲目录约定文件 bg.jpg（由 10-ui 的 startGameWithChart
+     * 依据 songItem.bgImage 注入，Lite 仅支持图片）；谱面不再携带媒体背景。 */
+    game.bgFit = 'cover';
+    game.bgOpacity = 1;
+    setBgImageLite(null);
     game.totalNotes = countPlayableNotes(chart);
+    /* id→音符表供 commitJudge 查 noScore（图层树 / 图层距离已在上面建好）。 */
+    game.noteById = {};
+    for (var _nn = 0; _nn < game.notes.length; _nn++) game.noteById[game.notes[_nn].id] = game.notes[_nn];
+    /* 触发器 { ref } 查找表：顶层 events + 各图层事件轴。 */
+    game.eventById = {};
+    var _regEvt = function (ev) { if (ev && ev.id) game.eventById[ev.id] = ev; };
+    for (var _re = 0; _re < game.events.length; _re++) _regEvt(game.events[_re]);
+    var _lyrs = chart.layers;
+    if (_lyrs) {
+      for (var _rl = 0; _rl < _lyrs.length; _rl++) {
+        var _lev = _lyrs[_rl].events || [];
+        for (var _rl2 = 0; _rl2 < _lev.length; _rl2++) _regEvt(_lev[_rl2]);
+      }
+    }
+    slideViewCache = {};
     game.lastNoteTime = 0;
     /* maxSlideSpan = max over slides of (lastChildTime - headTime).
      * Ported from full version commit 9f04e42: without this, a slide whose
@@ -210,19 +261,51 @@
 
   function commitJudge(id, j, dt, wx, wy, nt, angle) {
     if (game.judged[id]) return;
-    game.judged[id] = true; game.judgedCount++;
-    var sc = calculateNoteScore(j, game.totalNotes);
-    game.score += sc;
-    if (j === 'Miss') { game.combo = 0; } else { game.combo++; if (game.combo > game.maxCombo) game.maxCombo = game.combo; }
-    game.counts[j]++;
-    if (j !== 'Miss' && game.combo > 0 && game.combo % 10 === 0) {
-      comboBursts.push({ value: game.combo, start: now(), dur: 600 });
+    game.judged[id] = true;
+    /* 不计分音符（noScore）：参与判定，但不计分 / 不计数量（judgedCount）/ 不计连击。
+     * id 形如 `headId` 或 `headId#idx`，按头节点查旗标（slide 子节点继承头语义）。 */
+    var _hn = game.noteById ? game.noteById[id.split('#')[0]] : null;
+    var noScore = !!(_hn && _hn.noScore);
+    if (!noScore) game.judgedCount++;
+    var sc = noScore ? 0 : calculateNoteScore(j, game.totalNotes);
+    if (!noScore) {
+      game.score += sc;
+      if (j === 'Miss') { game.combo = 0; } else { game.combo++; if (game.combo > game.maxCombo) game.maxCombo = game.combo; }
+      game.counts[j]++;
+      if (j !== 'Miss' && game.combo > 0 && game.combo % 10 === 0) {
+        comboBursts.push({ value: game.combo, start: now(), dur: 600 });
+      }
     }
     if (typeof wx === 'number' && typeof wy === 'number' && nt) {
       spawnBurst(wx, wy, j, nt, angle);
     }
+    /* 音符触发器（§3.4）：slide 子节点沿用头节点的 trigger。 */
+    if (_hn) dispatchTriggerLite(_hn, j);
     addTimingMarker(j, dt);
     return sc;
+  }
+
+  /* === 音符触发器（§3.4，ES5；与 3D/2D 同语义）===
+   * { ref } 形式需要 id → 事件表（顶层 + 各图层事件轴），在 resetGame 里建好。
+   * 只执行运行时可即时生效的类型：文本 / 音符色 / 背景。
+   * 变速与偏移已预先积分进滚动距离与落点，判定时刻无法改变 → 忽略。 */
+  function dispatchTriggerLite(note, j) {
+    if (!note.trigger) return;
+    var evts = resolveTriggerEvents(note, j, function (id) { return game.eventById[id]; });
+    for (var i = 0; i < evts.length; i++) {
+      var e = evts[i];
+      if (isTriggerEventUnsupported(e)) continue;
+      if (e.eventType === 'text_display') {
+        game.currentText = e.text || '';
+        var dur = (typeof e.textDuration === 'number') ? e.textDuration : 2;
+        game.currentTextTimeout = game.curTime + dur;
+      } else if (e.eventType === 'note_color_change' && e.noteColor) {
+        game.currentNoteColor = e.noteColor;
+      } else if (e.eventType === 'bg_change') {
+        if (typeof e.gradientStart === 'string') game.bgStart = e.gradientStart;
+        if (typeof e.gradientEnd === 'string') game.bgEnd = e.gradientEnd;
+      }
+    }
   }
 
   /* === Combo display + wireframe burst (mirrors App.tsx L473-504) ===
@@ -366,7 +449,10 @@
     if (timeToHitMs < 0 || timeToHitMs > leadMs) return;
     var po = Math.max(0, Math.min(0.95, 1 - timeToHitMs / leadMs));
     if (po <= 0.01) return;
-    var p = project(note.x, note.y, 0, -1000);
+    /* 投影引导 = 落点提示，钉在「最终落位」（base + 音符自己 timeSec 的图层偏移），
+     * 不随播放中的整列平移跑动（与完整版一致）。 */
+    var loff = landingOffOfLite(note);
+    var p = project(note.x + loff.x, note.y + loff.y, 0, -1000);
     if (!p) return;
     ctx.save();
     ctx.globalAlpha = po;
@@ -440,10 +526,61 @@
    * preventing teleportation artifacts when speed_change events trigger.
    * `noteDist` is the note's precomputed scroll distance (see resetGame) — passing
    * it avoids a per-note getScrollDistance() linear scan over speed points. */
-  function noteZPos(noteTimeSec, curTime, baseSpeed, noteDist) {
+  /* curDist = 该音符**所属图层**在当前时刻的滚动距离（图层流速已积分在内），
+   * 缺省时回退全局当前距离。判定时刻两者相等 → z = JUDGE_Z（不受流速影响）。 */
+  function noteZPos(noteTimeSec, curTime, baseSpeed, noteDist, curDist) {
     var nd = (noteDist === undefined || noteDist === null) ? getScrollDistance(noteTimeSec, game.speedPoints) : noteDist;
-    var curDist = (game.curScrollDist === undefined) ? getScrollDistance(curTime, game.speedPoints) : game.curScrollDist;
-    return JUDGE_Z - (nd - curDist) * baseSpeed;
+    var cd = (curDist === undefined || curDist === null)
+      ? ((game.curScrollDist === undefined) ? getScrollDistance(curTime, game.speedPoints) : game.curScrollDist)
+      : curDist;
+    return JUDGE_Z - (nd - cd) * baseSpeed;
+  }
+
+  /* —— 图层（Layer）运行时（与完整版 GameCanvas 同构；ES5）—— */
+  var ZERO_OFF_LITE = { x: 0, y: 0 };
+  /* shared/layers.ts 禁止运行时 import，beat→秒 / easing / 斜坡步进都要在这注入
+   * （完整版由 src/utils/layers.ts 注入）。⚠️ 直接调用 buildLayerTree(chart) 会因
+   * deps 缺失而抛错 —— 必须走这个包装。 */
+  function easeLite(name, t) {
+    var fn = EASING_FNS[name] || EASING_FNS.linear;
+    return fn(t);
+  }
+  function buildLayerTreeLite(chart) {
+    var meta = (chart && chart.metadata) || {};
+    return buildLayerTree(chart, {
+      beatToSec: function (beat) {
+        return beatToSecondsMultiBpm(beat, meta.bpm, meta.offset, meta.bpmlist);
+      },
+      ease: easeLite,
+      rampSteps: SPEED_RAMP_STEPS
+    });
+  }
+  /* 图层 li 在时刻 t 的滚动距离：有自身变速事件时走该层的时间轴，否则「全局 × 常数倍率」。 */
+  function layerDistAt(li, t) {
+    var ld = game.layerDist ? game.layerDist[li] : null;
+    if (ld && ld.points) return getScrollDistance(t, ld.points);
+    /* 只有默认根图层以顶层 events 为基底；其余图层基底 = 常数 1（距离 = t）。 */
+    var base = (ld && ld.globalBase) ? getScrollDistance(t, game.speedPoints) : t;
+    return (ld && ld.mul !== 1) ? ld.mul * base : base;
+  }
+  var slideViewCache = {};
+  function layerIdxOfLite(note) {
+    return game.layerTree ? noteLayerIdx(game.layerTree, note) : 0;
+  }
+  function offOfLite(note) {
+    if (!game.layerTree) return ZERO_OFF_LITE;
+    var idx = layerIdxOfLite(note);
+    var offs = game.layerOffs;
+    return idx >= 0 && idx < offs.length ? offs[idx] : ZERO_OFF_LITE;
+  }
+  function layerOffAtIdxLite(idx, t) {
+    return game.layerTree ? layerOffsetAt(game.layerTree, idx, t) : ZERO_OFF_LITE;
+  }
+  /* 判定落位偏移（按音符自己 timeSec）——投影引导/打击特效钉落位用。 */
+  function landingOffOfLite(note) {
+    if (!game.layerTree) return ZERO_OFF_LITE;
+    var t = (note && typeof note.timeSec === 'number') ? note.timeSec : 0;
+    return layerOffAtIdxLite(layerIdxOfLite(note), t);
   }
 
   function render() {
@@ -456,6 +593,16 @@
     game.curScrollDist = getScrollDistance(curTime, game.speedPoints);
     var vScale = game.sizeScale;
     var colorHex = game.currentNoteColor || chart.metadata.noteColor || '#00f0ff';
+
+    /* 图层偏移 + 各图层当前滚动距离：每帧每图层一次（与完整版同构）。 */
+    if (game.layerTree) {
+      if (!game.layerCurDist) game.layerCurDist = [];
+      for (var _li = 0; _li < game.layerTree.nodes.length; _li++) {
+        var _lo = layerOffsetAt(game.layerTree, _li, curTime);
+        game.layerOffs[_li].x = _lo.x; game.layerOffs[_li].y = _lo.y;
+        game.layerCurDist[_li] = layerDistAt(_li, curTime);
+      }
+    }
 
     /* Process events first (speed changes, text, note color, etc.) */
     processEvents(curTime);
@@ -482,7 +629,8 @@
     var toDrawNotes = [];
     for (var i = win.first; i < win.last; i++) {
       var note = _ord === null ? game.notes[i] : game.notes[_ord[i]];
-      var nc = note.color || colorHex;
+      /* 有效音符色：note.color → 图层色（就近继承 / 图层内 note_color_change）→ 全局 */
+    var nc = note.color || (game.layerTree ? layerColorAt(game.layerTree, layerIdxOfLite(note), curTime, colorHex) : colorHex);
 
       if (note.type === 'slide') {
         var allNodes = getAllSlideNodes(note);
@@ -500,8 +648,10 @@
         for (var pi = 0; pi < allNodes.length - 1; pi++) {
           var nodeA = allNodes[pi];
           var nodeB = allNodes[pi + 1];
-          var zA = noteZPos(nodeA.timeSec, curTime, baseSpeed, nodeA.scrollDist);
-          var zB = noteZPos(nodeB.timeSec, curTime, baseSpeed, nodeB.scrollDist);
+          /* 图层滚动距离：slide 子节点沿用头节点图层。 */
+          var slideCD = game.layerCurDist ? game.layerCurDist[note.layerIdx || 0] : undefined;
+          var zA = noteZPos(nodeA.timeSec, curTime, baseSpeed, nodeA.scrollDist, slideCD);
+          var zB = noteZPos(nodeB.timeSec, curTime, baseSpeed, nodeB.scrollDist, slideCD);
           var keyA = note.id + '#' + pi;
           var keyB = note.id + '#' + (pi + 1);
           var judgedA = !!game.judged[keyA];
@@ -533,15 +683,18 @@
           /* A speed_change strictly between A and B makes z(τ) non-linear; sample
            * the real scroll-distance profile so the pipe length / playhead honour
            * the speed change (mirrors GameCanvas's zAt). Otherwise cheap linear. */
-          var spArr = game.speedPoints;
+          /* 用该音符**所属图层**的时间轴采样（含图层自身的 speed_change）。 */
+          var nli2 = note.layerIdx || 0;
+          var ld2 = game.layerDist ? game.layerDist[nli2] : null;
+          var spArr = (ld2 && ld2.points) ? ld2.points : game.speedPoints;
           var midSpeed = false;
           for (var si = 0; si < spArr.length; si++) {
             if (spArr[si].timeSec > nodeA.timeSec && spArr[si].timeSec < nodeB.timeSec) { midSpeed = true; break; }
           }
-          var scrollDistA = midSpeed ? getScrollDistance(nodeA.timeSec, spArr) : 0;
+          var scrollDistA = midSpeed ? layerDistAt(nli2, nodeA.timeSec) : 0;
           function zAtTau(tt) {
             if (!midSpeed) return zA + tt * dz;
-            return zA - (getScrollDistance(nodeA.timeSec + tt * segDur, spArr) - scrollDistA) * baseSpeed;
+            return zA - (layerDistAt(nli2, nodeA.timeSec + tt * segDur) - scrollDistA) * baseSpeed;
           }
 
           /* Visible z-band τ-range (z ∈ [spawnLimit, 0]). Linear case solves
@@ -665,18 +818,20 @@
         for (var nj = 0; nj < allNodes.length; nj++) {
           var slideNodeKey = note.id + '#' + nj;
           if (game.judged[slideNodeKey]) continue;
-          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist);
+          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist, game.layerCurDist ? game.layerCurDist[note.layerIdx || 0] : undefined);
           var np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
           if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj, angle: allNodes[nj].angle });
-          /* Projection guide for slide head only (children inherit head's path). */
-          if (nj === 0) drawProjection({ type: 'slide', timeSec: allNodes[nj].timeSec, x: allNodes[nj].x, y: allNodes[nj].y, angle: allNodes[nj].angle }, nc, vScale, curTime);
+          /* Projection guide for slide head only (children inherit head's path).
+           * 传头节点原始 base（allNodes 已嵌入 curTime 偏移），由 drawProjection 内部钉落位。 */
+          if (nj === 0) drawProjection({ type: 'slide', timeSec: note.timeSec, x: note.x, y: note.y, angle: note.angle }, nc, vScale, curTime);
         }
       } else {
         /* tap / touch */
         var tkey = note.id;
         if (game.judged[tkey]) continue;
-        var tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist);
-        var tp = project(note.x, note.y, tz, spawnLimit);
+        var tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist, game.layerCurDist ? game.layerCurDist[note.layerIdx || 0] : undefined);
+        var tOff = offOfLite(note);
+        var tp = project(note.x + tOff.x, note.y + tOff.y, tz, spawnLimit);
         if (tp) {
           toDrawNotes.push({ p: tp, kind: note.type, color: nc, noteId: note.id, wx: note.x, wy: note.y, timeSec: note.timeSec, angle: note.angle });
           /* Landing projection guide at the judge plane. */
@@ -881,10 +1036,12 @@
     var win = findWindowOf(tapNotes, curTime, -game.renderDist);
     for (var i = win.first; i < win.last; i++) {
       var n = tapNotes[i];
-      if (game.judged[n.id]) continue;
+      if (game.judged[n.id] || n.fake) continue;
       var dtMs = Math.abs((curTime - n.timeSec) * 1000);
       if (dtMs >= HIT_WINDOW_MS) continue;
-      var inOwn = Math.abs(n.x - wx) < TAP_HIT_HALF && Math.abs(n.y - wy) < TAP_HIT_HALF;
+      /* 图层偏移：命中判定用「合成后位置」（渲染与判定同一份值） */
+      var nOff = offOfLite(n);
+      var inOwn = Math.abs(n.x + nOff.x - wx) < TAP_HIT_HALF && Math.abs(n.y + nOff.y - wy) < TAP_HIT_HALF;
       var extra = n.extraHitRegions;
       var inExtra = false;
       if (extra) {
@@ -911,12 +1068,14 @@
     for (var k2 = 0; k2 < overlapSet.length; k2++) {
       var m = overlapSet[k2];
       if (m.timeSec !== bestTimeSec) continue; // only the most-late time group
-      var dxm = m.x - wx, dym = m.y - wy;
+      var mOff = offOfLite(m);
+      var dxm = m.x + mOff.x - wx, dym = m.y + mOff.y - wy;
       var d = Math.sqrt(dxm * dxm + dym * dym);
       if (d < bestDist || (d === bestDist && best !== null && m.timeSec < best.timeSec)) { best = m; bestDist = d; }
     }
     if (best) {
-      var merged = { x: best.x, y: best.y, half: TAP_HIT_HALF };
+      var bOff = offOfLite(best);
+      var merged = { x: best.x + bOff.x, y: best.y + bOff.y, half: TAP_HIT_HALF };
       for (var j = 0; j < overlapSet.length; j++) {
         var other = overlapSet[j];
         // 方案二: merge ONLY into taps at the SAME timeSec. Never cross time
@@ -951,9 +1110,30 @@
 
   /* Slide chain state helpers — mirror GameCanvas slideStateRef. */
   function getAllSlideNodes(note) {
-    var nodes = [{ x: note.x, y: note.y, timeSec: note.timeSec, scrollDist: note.scrollDist }];
-    if (note.resolvedNodes) for (var s = 0; s < note.resolvedNodes.length; s++) nodes.push(note.resolvedNodes[s]);
-    return nodes;
+    var cached = slideViewCache[note.id];
+    if (!cached) {
+      cached = [{ x: note.x, y: note.y, timeSec: note.timeSec, scrollDist: note.scrollDist }];
+      if (note.resolvedNodes) {
+        for (var s = 0; s < note.resolvedNodes.length; s++) {
+          var rn = note.resolvedNodes[s];
+          cached.push({ x: rn.x, y: rn.y, timeSec: rn.timeSec, scrollDist: rn.scrollDist });
+        }
+      }
+      slideViewCache[note.id] = cached;
+    }
+    /* 每帧重同步：base + 当前帧图层偏移（与完整版 getAllNodesEff 同构——
+     * 渲染（节点/管线采样/截面/端帽）与判定共用同一份「合成后坐标」）。
+     * 注意不能直接改写 resolvedNodes 原对象（那是谱面数据），这里全是副本。 */
+    var off = offOfLite(note);
+    cached[0].x = note.x + off.x;
+    cached[0].y = note.y + off.y;
+    if (note.resolvedNodes) {
+      for (var i = 0; i < note.resolvedNodes.length; i++) {
+        cached[i + 1].x = note.resolvedNodes[i].x + off.x;
+        cached[i + 1].y = note.resolvedNodes[i].y + off.y;
+      }
+    }
+    return cached;
   }
   function getSlideRt(noteId, nodeCount) {
     var rt = game.slideStates[noteId];
@@ -998,8 +1178,16 @@
    * Key rule: nodes are judged ONLY when dt>=0 (node reached the plane),
    * never early on proximity alone. This fixes the "early judgment" bug. */
   function processSlide(note, curTime) {
+    if (note.fake) return; /* 假音符：整条 slide 链不判定、不产生 Miss */
     var allNodes = getAllSlideNodes(note);
     var rt = getSlideRt(note.id, allNodes.length);
+    /* 特效/反馈钉落位：allNodes 已嵌入 curTime 偏移，反解 base 再加该节点
+     * 自己 timeSec 的落点偏移（与完整版一致）。 */
+    var _hoff = offOfLite(note);
+    function _landing(nd) {
+      var lo = layerOffAtIdxLite(layerIdxOfLite(note), nd.timeSec);
+      return { x: nd.x - _hoff.x + lo.x, y: nd.y - _hoff.y + lo.y };
+    }
 
     /* 1) Late-miss every unjudged node past +160ms (incl. missLocked ones) */
     for (var i = 0; i < allNodes.length; i++) {
@@ -1008,7 +1196,8 @@
       var dtI = (curTime - allNodes[i].timeSec) * 1000;
       if (dtI > HIT_WINDOW_MS) {
         ns.judged = true;
-        commitJudge(note.id + '#' + i, 'Miss', dtI, allNodes[i].x, allNodes[i].y, 'slide', allNodes[i].angle);
+        var _lm = _landing(allNodes[i]);
+        commitJudge(note.id + '#' + i, 'Miss', dtI, _lm.x, _lm.y, 'slide', allNodes[i].angle);
       }
     }
 
@@ -1054,7 +1243,8 @@
         cns.judged = true;
         commitJudge(note.id + '#' + nextIdx, 'S-Perfect', dt);
         audio.playHitSound('slide');
-        spawnBurst(cnd.x, cnd.y, 'S-Perfect', 'slide', cnd.angle);
+        var _al = _landing(cnd);
+        spawnBurst(_al.x, _al.y, 'S-Perfect', 'slide', cnd.angle);
       }
       return;
     }
@@ -1132,7 +1322,9 @@
       cns.judged = true;
       for (var bi = 0; bi < bindPids.length; bi++) rt.boundPointerIds[bindPids[bi]] = true;
       commitJudge(note.id + '#' + nextIdx, j, dt);
-      audio.playHitSound('slide'); spawnBurst(cnd.x, cnd.y, j, 'slide', cnd.angle);
+      audio.playHitSound('slide');
+      var _jl = _landing(cnd);
+      spawnBurst(_jl.x, _jl.y, j, 'slide', cnd.angle);
     }
 
     if (dt >= 0 && !cns.judged) {
@@ -1176,14 +1368,17 @@
    * Touch notes are hover-triggered: any held pointer inside the zone during
    * the timing window counts. No tap/click required. */
   function processTouchNote(note, curTime) {
+    if (note.fake) return; /* 假音符：完全不参与判定 */
+    var off = offOfLite(note);
+    var lo = landingOffOfLite(note);
     var dt = (curTime - note.timeSec) * 1000;
-    var inside = isAnyPointerInside(note.x, note.y, TOUCH_HIT_HALF);
+    var inside = isAnyPointerInside(note.x + off.x, note.y + off.y, TOUCH_HIT_HALF);
     var track = game.touchStates[note.id];
     if (!track) { track = { lastInsideTime: null, arrivalChecked: false }; game.touchStates[note.id] = track; }
     if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && inside) track.lastInsideTime = curTime;
     if (game.autoPlay && dt >= 0) {
       commitJudge(note.id, 'S-Perfect', dt);
-      audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch', note.angle);
+      audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, 'S-Perfect', 'touch', note.angle);
       return;
     }
     if (dt >= 0) {
@@ -1191,19 +1386,19 @@
         track.arrivalChecked = true;
         if (inside) {
           commitJudge(note.id, 'S-Perfect', dt);
-          audio.playHitSound('touch'); spawnBurst(note.x, note.y, 'S-Perfect', 'touch', note.angle); return;
+          audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, 'S-Perfect', 'touch', note.angle); return;
         }
         if (track.lastInsideTime !== null) {
           var earlyDt = (track.lastInsideTime - note.timeSec) * 1000;
           var j = evaluateJudgement(earlyDt);
-          if (j) { commitJudge(note.id, j, earlyDt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j, 'touch', note.angle); return; }
+          if (j) { commitJudge(note.id, j, earlyDt); audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, j, 'touch', note.angle); return; }
         }
       }
       if (inside && dt <= HIT_WINDOW_MS) {
         var j2 = evaluateJudgement(dt);
-        if (j2) { commitJudge(note.id, j2, dt); audio.playHitSound('touch'); spawnBurst(note.x, note.y, j2, 'touch', note.angle); return; }
+        if (j2) { commitJudge(note.id, j2, dt); audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, j2, 'touch', note.angle); return; }
       }
-      if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x, note.y, 'touch', note.angle);
+      if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x + lo.x, note.y + lo.y, 'touch', note.angle);
     }
   }
 
@@ -1221,16 +1416,16 @@
         /* Note: visual spacing is precomputed via scroll distance, so speedMul here
          * only affects future movement speed, not current note positions. */
         game.currentSpeedMul = evt.speed;
+      } else if (evt.eventType === 'bg_change') {
+        /* 只改渐变色；媒体层由歌曲文件决定（旧谱面的 bgImage 字段忽略）。 */
+        if (typeof evt.gradientStart === 'string') game.bgStart = evt.gradientStart;
+        if (typeof evt.gradientEnd === 'string') game.bgEnd = evt.gradientEnd;
       } else if (evt.eventType === 'text_display') {
         game.currentText = evt.text || '';
         var dur = typeof evt.textDuration === 'number' ? evt.textDuration : 2;
         game.currentTextTimeout = curTime + dur;
       } else if (evt.eventType === 'note_color_change' && evt.noteColor) {
         game.currentNoteColor = evt.noteColor;
-      } else if (evt.eventType === 'bg_change') {
-        /* 背景渐变缓存（drawBackground）每帧重建，这里只需更新当前 bgStart/bgEnd。 */
-        if (typeof evt.gradientStart === 'string') game.bgStart = evt.gradientStart;
-        if (typeof evt.gradientEnd === 'string') game.bgEnd = evt.gradientEnd;
       }
       game.nextEventIdx++;
     }
@@ -1244,6 +1439,7 @@
     var win = findWindow(curTime, -game.renderDist);
     for (var i = win.first; i < win.last; i++) {
       var n = game.notes[i];
+      if (n.fake) continue; /* 假音符：不判定（仍渲染） */
       if (n.type === 'slide') {
         processSlide(n, curTime);
       } else if (n.type === 'touch') {
@@ -1251,11 +1447,13 @@
       } else {
         /* tap: only miss detection here; hits via findHitTapNote on pointerdown */
         if (!game.autoPlay && !game.judged[n.id] && curTime > n.timeSec + HIT_WINDOW_MS / 1000) {
-          commitJudge(n.id, 'Miss', 0, n.x, n.y, 'tap', n.angle);
+          var lo = landingOffOfLite(n);
+          commitJudge(n.id, 'Miss', 0, n.x + lo.x, n.y + lo.y, 'tap', n.angle);
         } else if (game.autoPlay && !game.judged[n.id] && curTime >= n.timeSec) {
           var dt = (curTime - n.timeSec) * 1000;
+          var lo = landingOffOfLite(n);
           commitJudge(n.id, 'S-Perfect', dt);
-          audio.playHitSound('tap'); spawnBurst(n.x, n.y, 'S-Perfect', 'tap', n.angle);
+          audio.playHitSound('tap'); spawnBurst(n.x + lo.x, n.y + lo.y, 'S-Perfect', 'tap', n.angle);
         }
       }
     }

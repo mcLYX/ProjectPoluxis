@@ -15,6 +15,10 @@ export class AudioManager {
   private masterGain: GainNode | null = null;
   private bgmGain: GainNode | null = null;
   private sfxGain: GainNode | null = null;
+  /** 表现层频谱分析节点（§3.7 v2：故事板 api.audio）。挂在主输出上做旁路，
+   *  不接入 destination —— 纯观测，不改变任何音频路由与音量。 */
+  private analyser: AnalyserNode | null = null;
+  private spectrumBuf: Uint8Array | null = null;
   private musicVolume: number = 0.8;
   private effectVolume: number = 0.9;
 
@@ -114,6 +118,18 @@ export class AudioManager {
       this.sfxGain.gain.value = this.effectVolume;
       this.sfxGain.connect(this.masterGain);
 
+      // 表现层频谱（故事板 / 可视化）：旁路挂在主输出上，不接 destination。
+      // 失败（旧浏览器 / 受限上下文）时静默降级 —— getSpectrum() 返回全 0。
+      try {
+        const an = this.ctx.createAnalyser();
+        an.fftSize = 1024;
+        an.smoothingTimeConstant = 0.8;
+        this.masterGain.connect(an);
+        this.analyser = an;
+      } catch {
+        this.analyser = null;
+      }
+
       // Try to load the packaged hit sounds (tap/touch/slide/ui.ogg). If
       // fetch/decode fails (file:// mode, old browser, CORS, etc.), fall back
       // to procedural pre-rendered equivalents so that gameplay never goes
@@ -155,6 +171,44 @@ export class AudioManager {
 
   public getMusicVolume(): number {
     return this.musicVolume;
+  }
+
+  /**
+   * 实时频谱能量（0~1），供**表现层**使用（§3.7 v2 故事板 `api.audio.levels()`）。
+   *
+   * ⚠️ 语义边界：
+   *  - 依赖真实播放状态 —— **非 seek 安全**（seek / 暂停后数值不代表该时刻），
+   *    只能用于非关键调制（呼吸感、闪烁强度），不得驱动结构性画面；
+   *  - 合成器模式 / 未初始化 / 受限 AudioContext 时返回全 0，调用方需能降级；
+   *  - 每帧最多调用一次（内部有 buffer 复用，无分配）。
+   */
+  public getSpectrum(): { bass: number; mid: number; treble: number; level: number } {
+    const an = this.analyser;
+    const ctx = this.ctx;
+    const zero = { bass: 0, mid: 0, treble: 0, level: 0 };
+    if (!an || !ctx) return zero;
+    const bins = an.frequencyBinCount;
+    if (!this.spectrumBuf || this.spectrumBuf.length !== bins) {
+      this.spectrumBuf = new Uint8Array(bins);
+    }
+    const buf = this.spectrumBuf;
+    // 新版 TS 的 TypedArray 泛型差异：这里只做一次结构化断言，避免 lib 版本抖动。
+    an.getByteFrequencyData(buf as unknown as Parameters<AnalyserNode['getByteFrequencyData']>[0]);
+    const nyquist = ctx.sampleRate / 2;
+    /** 频段 [lo,hi) Hz 的平均能量（0~1）。 */
+    const band = (lo: number, hi: number): number => {
+      const from = Math.max(0, Math.floor((lo / nyquist) * bins));
+      const to = Math.min(bins, Math.max(from + 1, Math.ceil((hi / nyquist) * bins)));
+      let sum = 0;
+      for (let i = from; i < to; i++) sum += buf[i];
+      return sum / (to - from) / 255;
+    };
+    return {
+      bass: band(20, 250),
+      mid: band(250, 2000),
+      treble: band(2000, 8000),
+      level: band(20, 12000),
+    };
   }
 
   /** Try to load the 4 packaged hit/ui sounds from /sounds/. Safari/WebKit
@@ -705,6 +759,14 @@ export class AudioManager {
   public getCurrentTime(): number {
     if (!this.isPlaying || !this.ctx) return this.pauseTime;
     return this.toChartTime(this.getAudioTime());
+  }
+
+  /** 谱面时钟是否正在运行（true = `getCurrentTime()` 是实时的；false = 返回陈旧的
+   *  `pauseTime`）。调用方据此决定能否把音频时钟当作时间源 —— 编辑器未预览、
+   *  游戏暂停/曲终等未运行状态下，必须退回宿主的 playhead 时间，否则外设（故事板）
+   *  会停在旧位置不随 seek 变化。 */
+  public isRunning(): boolean {
+    return this.isPlaying && !!this.ctx;
   }
 
   /** 真实音频位置（chart-time 坐标）：始终由 AudioContext 时钟驱动，不随兼容模式

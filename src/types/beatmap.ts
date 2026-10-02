@@ -25,6 +25,8 @@ export interface EditorLaunchInfo {
   diffName?: string;
   /** 歌曲音频引用（内置/在线为 URL，本地为 idb://），用于编辑器加载对应音乐。 */
   audio?: string;
+  /** 歌曲目录的故事板脚本引用（约定 story.js；编辑器内也挂载 MV 预览）。 */
+  storyboard?: string;
   /** 当前选中的难度索引，-1 表示无难度。 */
   selectedDiffIndex: number;
   difficultiesCount: number;
@@ -39,13 +41,22 @@ export interface SongItem {
   cover: string;
   accentColor?: string;
   audio: string;
+  /**
+   * 背景媒体（约定命名：歌曲目录下 `bg.jpg` / `bga.mp4`；info.json 可覆盖，
+   * 路径相对歌曲目录）。内置/在线为相对索引根的路径，本地/zip 导入为 idb:// 引用。
+   * 渲染优先级：bgVideo > bgImage > 内置渐变。不再写入谱面文件。
+   */
+  bgImage?: string;
+  bgVideo?: string;
+  /** 故事板脚本（约定 `story.js`，尚未实现；索引先记录占位）。 */
+  storyboard?: string;
   basePath: string;
   difficulties: DifficultyEntry[];
   source?: BeatmapSource;
   /** 若来自在线服务器，记录其原始 id，用于去重与“重新下载”。 */
   onlineId?: string;
   /** 原始在线资源的远程地址，用于对已下载曲目执行“重新下载”。 */
-  onlineUrls?: { audio?: string; cover?: string; charts?: string[] };
+  onlineUrls?: { audio?: string; cover?: string; charts?: string[]; bgImage?: string; bgVideo?: string; storyboard?: string };
 }
 
 export interface AlbumItem {

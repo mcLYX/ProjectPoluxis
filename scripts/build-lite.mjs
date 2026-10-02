@@ -43,8 +43,18 @@ const enableServer = !argv.includes('--no-server') && process.env.LITE_SERVER !=
  *    - demoCharts.ts    : built-in demo charts (one dataset for both)
  *    - beatTime.ts      : chart *resolution* (beat→sec, slide/node expansion, …)
  *    - easing.ts        : EASING_FNS (slide pipe easing)
+ *    - layers.ts        : 图层树 + offset / speed / noteColor 三通道合成
+ *    - triggers.ts      : 音符触发器（§3.4）的纯解析（动作 → 事件）
  *    Order only affects readability; all are in scope before the components run. */
-const SHARED_FILES = ['gameplaySpec.ts', 'chartSchema.ts', 'demoCharts.ts', 'beatTime.ts', 'easing.ts'];
+const SHARED_FILES = [
+  'gameplaySpec.ts',
+  'chartSchema.ts',
+  'demoCharts.ts',
+  'beatTime.ts',
+  'easing.ts',
+  'layers.ts',
+  'triggers.ts',
+];
 let sharedFragment = '';
 for (const f of SHARED_FILES) {
   const res = await transform(fs.readFileSync(path.join(root, 'src', 'shared', f), 'utf8'), {

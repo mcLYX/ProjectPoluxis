@@ -40,15 +40,19 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
       const curBeat = ctx.chartTimeToBeat(curTime);
 
       for (const n of notes) {
+        // 图层偏移：编辑器选择同样针对「合成后」位置（slide 子节点沿用头节点图层）。
+        const ep = ctx.getEffectivePos?.(n);
+        const dx = ep ? ep.x - n.x : 0;
+        const dy = ep ? ep.y - n.y : 0;
         const candidates: Array<{ id: string; x: number; y: number; beat: number; r: number }> =
           n.type === 'slide'
             ? [
-                { id: n.id, x: n.x, y: n.y, beat: n.beat, r: 0.7 },
+                { id: n.id, x: n.x + dx, y: n.y + dy, beat: n.beat, r: 0.7 },
                 ...(n.resolvedNodes ?? []).map((sn, i) => ({
-                  id: `${n.id}#${i + 1}`, x: sn.x, y: sn.y, beat: sn.beat, r: 0.7,
+                  id: `${n.id}#${i + 1}`, x: sn.x + dx, y: sn.y + dy, beat: sn.beat, r: 0.7,
                 })),
               ]
-            : [{ id: n.id, x: n.x, y: n.y, beat: n.beat, r: n.type === 'tap' ? 0.85 : 0.65 }];
+            : [{ id: n.id, x: n.x + dx, y: n.y + dy, beat: n.beat, r: n.type === 'tap' ? 0.85 : 0.65 }];
         for (const c of candidates) {
           // Changed: only allow selecting notes in the range of [curBeat - 0.1, curBeat + 0.5]
           // so the user cannot accidentally select overdue past notes that are already gone.
@@ -84,10 +88,11 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     // so subsequent presses on the overlap can still reach them.
     const overlapSet: ResolvedNote[] = [];
     for (const n of notes) {
-      if (ctx.judgedNotesRef.current.has(n.id) || n.type !== 'tap') continue;
+      if (ctx.judgedNotesRef.current.has(n.id) || n.type !== 'tap' || n.fake) continue;
       const dt = Math.abs((curTime - n.timeSec) * 1000);
       if (dt >= HIT_WINDOW_MS) continue;
-      const inOwn = isWithinBox(px, py, n.x, n.y, TAP_HIT_HALF);
+      const ep = ctx.getEffectivePos?.(n) ?? n;
+      const inOwn = isWithinBox(px, py, ep.x, ep.y, TAP_HIT_HALF);
       const inExtra = (n.extraHitRegions ?? []).some(
         (r) => Math.abs(px - r.x) < r.half && Math.abs(py - r.y) < r.half
       );
@@ -112,7 +117,8 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     }
     for (const n of overlapSet) {
       if (n.timeSec !== bestTimeSec) continue; // only the most-late time group
-      const d = Math.hypot(px - n.x, py - n.y);
+      const ep = ctx.getEffectivePos?.(n) ?? n;
+      const d = Math.hypot(px - ep.x, py - ep.y);
       if (d < bestDist || (d === bestDist && best !== null && n.timeSec < best.timeSec)) {
         best = n;
         bestDist = d;
@@ -127,7 +133,8 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
         // timeSec (方案二). Never cross time windows: a tap at a different beat
         // must keep its own hitbox, otherwise its hit area would be polluted and
         // trigger false/early hits later (e.g. note-9 / note-10 same position).
-        const merged: HitRegion = { x: best.x, y: best.y, half: TAP_HIT_HALF };
+        const bestEp = ctx.getEffectivePos?.(best) ?? best;
+        const merged: HitRegion = { x: bestEp.x, y: bestEp.y, half: TAP_HIT_HALF };
         for (const other of overlapSet) {
           if (other === best || other.timeSec !== best.timeSec) continue;
           const regions = other.extraHitRegions ?? (other.extraHitRegions = []);

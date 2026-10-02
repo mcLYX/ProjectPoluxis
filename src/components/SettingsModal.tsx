@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette,
-  User, Upload, Trash2, LogIn, LogOut, Gauge, Gamepad2,
+  User, Upload, Trash2, LogIn, LogOut, Gauge, Gamepad2, Ban,
 } from 'lucide-react';
 import type { QualityMode } from '../types/game';
 import { useI18n, LANGS } from '../i18n';
@@ -62,6 +62,8 @@ interface SettingsModalProps {
   setEffectVolume: (value: number) => void;
   compatMode: boolean;
   setCompatMode: (value: boolean) => void;
+  disableExtraContent: boolean;
+  setDisableExtraContent: (value: boolean) => void;
   selectedSkinId: string | null;
   setSelectedSkinId: (value: string | null) => void;
   defaultSkinInnerEnabled: boolean;
@@ -99,6 +101,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setEffectVolume,
   compatMode,
   setCompatMode,
+  disableExtraContent,
+  setDisableExtraContent,
   selectedSkinId,
   setSelectedSkinId,
   defaultSkinInnerEnabled, setDefaultSkinInnerEnabled,
@@ -377,6 +381,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         />
         <p className="text-[11px] text-white/50 leading-relaxed">
           {t('settings.projLeadHint')}
+        </p>
+      </section>
+
+      <section className="space-y-1.5">
+        <label className="flex items-center gap-2 text-sm font-bold text-cyan-300 cursor-pointer select-none" onClick={() => setDisableExtraContent(!disableExtraContent)}>
+          <Ban size={16} />
+          <input type="checkbox" checked={disableExtraContent} onChange={() => setDisableExtraContent(!disableExtraContent)} className="w-4 h-4 rounded border-white/30 bg-white/10 focus:outline-none cursor-pointer" />
+          {t('settings.disableExtraContent')}
+        </label>
+        <p className="text-[11px] text-white/50 leading-relaxed">
+          {t('settings.disableExtraContentHint')}
         </p>
       </section>
     </div>

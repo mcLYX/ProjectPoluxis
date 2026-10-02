@@ -8,15 +8,20 @@
  * directly in degrees, so its rendering needs no change. Keep all angle
  * conversions in this wrapper — do not push them into the shared core.
  */
-import type { ChartData, ResolvedNote } from '../types/game';
-import { resolveChart as coreResolveChart } from '../shared/beatTime';
+import type { ChartData, ResolvedNote, ResolvedEvent } from '../types/game';
+import {
+  resolveChart as coreResolveChart,
+  extractSpeedPoints as coreExtractSpeedPoints,
+  type SpeedPoint,
+} from '../shared/beatTime';
+import { EASING_FNS } from './easing';
 
 export {
   beatToSeconds,
   beatToSecondsMultiBpm,
   secondsToBeatMultiBpm,
   getBpmAtBeat,
-  extractSpeedPoints,
+  SPEED_RAMP_STEPS,
   getScrollDistance,
   resolveEvents,
   getMaxBeat,
@@ -25,6 +30,17 @@ export {
   countPlayableNotes,
   type SpeedPoint,
 } from '../shared/beatTime';
+
+/**
+ * 变速点提取（注入 full app 的真实 easing，供 `duration > 0` 的时间过渡离散化用）。
+ * shared 核心禁止运行时 import，所以 easing 必须由这里注入。
+ */
+export function extractSpeedPoints(input: ChartData | ResolvedEvent[]): SpeedPoint[] {
+  return coreExtractSpeedPoints(input, function (name: string, t: number): number {
+    const fn = (EASING_FNS as Record<string, (v: number) => number>)[name] || EASING_FNS['linear'];
+    return fn(t);
+  });
+}
 
 /**
  * Resolve notes to absolute seconds, with `angle` in RADIANS (the unit the

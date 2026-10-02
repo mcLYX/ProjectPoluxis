@@ -6,10 +6,12 @@ import { getWaveformPeaks, peakInRange } from '../utils/waveform';
 import type { ChartData, NoteData, EasingType, EventType, EventData } from '../types/game';
 import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
+import { buildLayerTree, layerOffsetAt } from '../utils/layers';
+import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 
-/** World X range used by the game's judgement plane. */
-const X_MIN = -2.4;
-const X_MAX = 2.4;
+/** 判定平面世界 X 范围（权威源 types/game.NOTE_X_RANGE）。屏幕坐标钳制同用它。 */
+const X_MIN = -NOTE_X_RANGE;
+const X_MAX = NOTE_X_RANGE;
 const X_SPAN = X_MAX - X_MIN;
 /** Round to at most 9 decimal places to avoid floating-point jitter in coords/beats. */
 const round9 = (v: number) => Math.round(v * 1000000000) / 1000000000;
@@ -45,6 +47,11 @@ const EVENT_STYLE: Record<EventType, { fill: string; stroke: string; line: strin
     fill: 'rgba(52,211,153,0.18)', stroke: 'rgba(52,211,153,0.85)',
     line: 'rgba(52,211,153,0.10)', label: '#a7f3d0', band: 'rgba(52,211,153,0.10)',
     solid: '#34d399',
+  },
+  offset_change: {
+    fill: 'rgba(244,114,182,0.18)', stroke: 'rgba(244,114,182,0.85)',
+    line: 'rgba(244,114,182,0.10)', label: '#fbcfe8', band: 'rgba(244,114,182,0.10)',
+    solid: '#f472b6',
   },
 };
 /** Full-scale waveform amplitude (1.0) reaches this fraction of the playfield's
@@ -158,6 +165,29 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
 
   const snapRef = useRef(snapSubdivision);
   snapRef.current = snapSubdivision;
+
+  // —— 屏幕坐标（所见即所得）——
+  // 2D 俯视画布的渲染 / 命中 / 拖拽 / 放置全部在**屏幕坐标**（base + 该单位自己
+  // 时刻的图层合成偏移）上进行；liveDragStore 与各 on* 回调仍提交 **base**
+  // （= 屏幕 − 偏移），与侧栏面板的 coordFrame 换算（toFrameX）约定一致。
+  // 偏移按每个单位自己的 beat 采样（与 3D 编辑器/侧栏面板同规）。
+  const layerTreeRef = useRef<{ chart: ChartData; tree: ReturnType<typeof buildLayerTree> } | null>(null);
+  const getLayerTree = () => {
+    const c = chartRef.current;
+    if (!layerTreeRef.current || layerTreeRef.current.chart !== c) {
+      layerTreeRef.current = { chart: c, tree: buildLayerTree(c) };
+    }
+    return layerTreeRef.current.tree;
+  };
+  /** 图层在「beat 拍处」的合成偏移（base → 屏幕 加上它）。 */
+  const offAt = (layerId: string | undefined, beat: number): { x: number; y: number } => {
+    const tree = getLayerTree();
+    const idx = (layerId ? tree.byId[layerId] : 0) ?? 0;
+    const meta = chartRef.current.metadata;
+    return layerOffsetAt(tree, idx, beatToSecondsMultiBpm(beat, meta.bpm, meta.offset || 0, meta.bpmlist));
+  };
+  const clampScreenX = (x: number) => Math.max(X_MIN, Math.min(X_MAX, x));
+
   const toolRef = useRef(activeTool);
   toolRef.current = activeTool;
   const selectedRef = useRef(selectedNoteId);
@@ -226,8 +256,11 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     /** Marquee start pixel (for drawing the selection rectangle). */
     mx0: number;
     my0: number;
-    /** Multi-drag: snapshot of all selected notes' (id, beat, x, y) at drag start. */
-    multiSnapshot?: Array<{ id: string; beat: number; x: number; y: number }>;
+    /** 被拖单位所属图层 id（单点拖拽提交时按新 beat 反解偏移用）。 */
+    layerId?: string;
+    /** Multi-drag: snapshot of all selected units at drag start.
+     *  x/y 为 base；ox 为该单位自己 beat 的图层偏移（屏幕 = x + ox）。 */
+    multiSnapshot?: Array<{ id: string; beat: number; x: number; y: number; ox: number }>;
     /** Multi-drag: the grabbed note's id (child id may be grabbed; used for delta). */
     multiGrabId?: string;
     /** Multi-drag: base (head) id of the grabbed note — used to toggle selection off. */
@@ -243,6 +276,8 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     placeX?: number;
     /** Y-adjust: original beat of the placed note — kept constant. */
     placeBeat?: number;
+    /** Y-adjust: placed note's layer offset.y（屏幕 y 钳制用）。 */
+    placeOy?: number;
   } | null>(null);
 
   /** Current marquee rectangle in CSS pixels (for drawing during drag). */
@@ -555,8 +590,11 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const headAngle = n.angle ?? 0;
         const mp = multiPos(n.id);
         const isLive = (live != null && n.id === live.id) || mp != null;
-        const headX = mp ? mp.x : (live != null && n.id === live.id ? live.x : n.x);
+        // live / multiLive / n.x 均为 base；绘制前换算成屏幕坐标（+ 该单位自己
+        // 时刻的图层合成偏移），与 3D 编辑器「所见即所得」同规。
+        const headXBase = mp ? mp.x : (live != null && n.id === live.id ? live.x : n.x);
         const headBeat = mp ? mp.beat : (live != null && n.id === live.id ? live.beat : n.beat);
+        const headX = headXBase + offAt(n.layerId, headBeat).x;
         // Cull notes outside the visible window (always keep the live-dragged one).
         let inView = isLive || (headBeat >= winMin && headBeat <= winMax);
         if (!inView && n.nodes && n.nodes.length > 0) {
@@ -573,9 +611,10 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
               const childId = `${n.id}#${i + 1}`;
               const mc = multiPos(childId);
               const liveChild = live != null && childId === live.id ? live : null;
+              const cb = mc ? mc.beat : (liveChild ? liveChild.beat : nd.beat);
               return {
-                x: mc ? mc.x : (liveChild ? liveChild.x : nd.x),
-                beat: mc ? mc.beat : (liveChild ? liveChild.beat : nd.beat),
+                x: (mc ? mc.x : (liveChild ? liveChild.x : nd.x)) + offAt(n.layerId, cb).x,
+                beat: cb,
                 easing: nd.easing ?? n.easing ?? 'linear',
               };
             }),
@@ -585,11 +624,12 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
             const childId = `${n.id}#${k + 1}`;
             const mc = multiPos(childId);
             const liveChild = live != null && childId === live.id ? live : null;
+            const cb = mc ? mc.beat : (liveChild ? liveChild.beat : nd.beat);
             items.push({
               id: childId,
               type: n.type,
-              beat: mc ? mc.beat : (liveChild ? liveChild.beat : nd.beat),
-              x: mc ? mc.x : (liveChild ? liveChild.x : nd.x),
+              beat: cb,
+              x: (mc ? mc.x : (liveChild ? liveChild.x : nd.x)) + offAt(n.layerId, cb).x,
               color,
               angle: nd.angle ?? headAngle,
             });
@@ -781,7 +821,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   }, [worldToPixel]);
 
   // ===== Pointer interaction =====
-  const hitTest = (px: number, py: number): { id: string; beat: number; x: number; y: number } | null => {
+  const hitTest = (px: number, py: number): { id: string; beat: number; x: number; y: number; bx: number; by: number; layerId?: string } | null => {
     const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
     const chart = chartRef.current;
     const { bpm, offset, bpmlist } = chart.metadata;
@@ -789,26 +829,29 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const r = wrap.getBoundingClientRect();
     const cssW = r.width;
     const cssH = r.height;
-    type Hit = { id: string; beat: number; x: number; y: number; d: number };
+    /* 命中在屏幕坐标（显示位置）上比较；同时带回 base 坐标（bx/by）与图层 id，
+     * 供拖拽的 offX / live / 提交换算使用。 */
+    type Hit = { id: string; beat: number; x: number; y: number; bx: number; by: number; layerId?: string; d: number };
     let best: Hit | null = null;
     const candidates: Hit[] = [];
-    const consider = (id: string, beat: number, x: number, y: number) => {
+    const consider = (id: string, beat: number, bx: number, by: number, layerId?: string) => {
+      const off = offAt(layerId, beat);
       const tb = beatToSecondsMultiBpm(beat, bpm, offset, bpmlist);
-      const { px: ix, py: iy } = worldToPixel(tb, x, cssW, cssH, curTime);
+      const { px: ix, py: iy } = worldToPixel(tb, bx + off.x, cssW, cssH, curTime);
       const d = Math.hypot(ix - px, iy - py);
-      if (d <= NOTE_R + 6) candidates.push({ id, beat, x, y, d });
+      if (d <= NOTE_R + 6) candidates.push({ id, beat, x: bx + off.x, y: by + off.y, bx, by, layerId, d });
     };
     for (const n of chart.notes) {
-      consider(n.id, n.beat, n.x, n.y);
+      consider(n.id, n.beat, n.x, n.y, n.layerId);
       if (n.nodes) {
-        n.nodes.forEach((nd, i) => consider(`${n.id}#${i + 1}`, nd.beat, nd.x, nd.y));
+        n.nodes.forEach((nd, i) => consider(`${n.id}#${i + 1}`, nd.beat, nd.x, nd.y, n.layerId));
       }
     }
     for (const c of candidates) {
       if (!best || c.d < best.d) best = c;
     }
-    const result: { id: string; beat: number; x: number; y: number } | null = best
-      ? { id: best.id, beat: best.beat, x: best.x, y: best.y }
+    const result = best
+      ? { id: best.id, beat: best.beat, x: best.x, y: best.y, bx: best.bx, by: best.by, layerId: best.layerId }
       : null;
     return result;
   };
@@ -838,13 +881,17 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
             // 已选中 → 开始多选拖拽（只移动被选中的单位：头节点或子节点）。
             // 点击时暂不 toggle；若 pointerup 时未移动，则在 up 中 toggle 取消选中。
             const selSet = new Set(selectedIdsRef.current);
-            const snapshot: Array<{ id: string; beat: number; x: number; y: number }> = [];
+            const snapshot: Array<{ id: string; beat: number; x: number; y: number; ox: number }> = [];
+            const snapUnit = (id: string, beat: number, bx: number, by: number, layerId?: string) => {
+              const o = offAt(layerId, beat);
+              snapshot.push({ id, beat, x: bx, y: by, ox: o.x });
+            };
             for (const n of chartRef.current.notes) {
-              if (selSet.has(n.id)) snapshot.push({ id: n.id, beat: n.beat, x: n.x, y: n.y });
+              if (selSet.has(n.id)) snapUnit(n.id, n.beat, n.x, n.y, n.layerId);
               if (n.nodes) {
                 n.nodes.forEach((nd, i) => {
                   const cid = `${n.id}#${i + 1}`;
-                  if (selSet.has(cid)) snapshot.push({ id: cid, beat: nd.beat, x: nd.x, y: nd.y });
+                  if (selSet.has(cid)) snapUnit(cid, nd.beat, nd.x, nd.y, n.layerId);
                 });
               }
             }
@@ -865,12 +912,12 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
             onSelectRef.current(hit.id);
           }
         } else {
-          // 单选模式：选中并开始拖拽。
+          // 单选模式：选中并开始拖拽。offX 基于屏幕坐标；live/提交均为 base。
           onSelectRef.current(hit.id);
           const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
           const hitSec = beatToSecondsMultiBpm(hit.beat, bpm, offset, bpmlist);
-          dragRef.current = { id: hit.id, isNew: false, isScrub: false, isMarquee: false, isMultiDrag: false, offBeat: t - hitSec, offX: worldX - hit.x, y0: hit.y, lastPy: py, moved: false, mx0: 0, my0: 0 };
-          dragLiveRef.current = { id: hit.id, x: hit.x, y: hit.y, beat: hit.beat };
+          dragRef.current = { id: hit.id, isNew: false, isScrub: false, isMarquee: false, isMultiDrag: false, offBeat: t - hitSec, offX: worldX - hit.x, y0: hit.by, lastPy: py, moved: false, mx0: 0, my0: 0, layerId: hit.layerId };
+          dragLiveRef.current = { id: hit.id, x: hit.bx, y: hit.by, beat: hit.beat };
         }
       } else {
         // 空白处：
@@ -895,17 +942,22 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const { t, worldX } = pixelToWorld(px, py, w, h, curTime);
     const beat = round9(snap(timeToBeat(t, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
-    const x = round9(snap(worldX, xStep));
+    // x 为**屏幕坐标**（所见即所得）；上层 onPlaceNote 按放置目标图层在该 beat
+    // 的合成偏移反解 base（y=0 屏幕同样会被反解）。
+    const x = round9(clampScreenX(snap(worldX, xStep)));
     // 放置音符；返回新 note/子节点 id，以便按住不放上下拖动调整 Y 值。
     const placed = onPlaceRef.current(x, 0, beat);
     if (placed) {
       // 进入 Y 调整模式：垂直拖动超过死区后按 0.1 步进调整 y。
-      // 基准为 DSL 处理后的实际 x/y/beat（placed.*）——规则可能改写 x/beat，
-      // 拖动调 Y 时保持规则结果不变，仅调整 y。
+      // 基准为 DSL 处理后的实际 x/y/beat（placed.*，base）——规则可能改写 x/beat，
+      // 拖动调 Y 时保持规则结果不变，仅调整 y（屏幕 y 钳 ±1.5）。
+      const pn = chartRef.current.notes.find((n) => n.id === placed.id);
+      const placeOy = offAt(pn?.layerId, placed.beat).y;
       dragRef.current = {
         id: placed.id, isNew: true, isScrub: false, isMarquee: false, isMultiDrag: false,
         offBeat: 0, offX: 0, y0: placed.y, lastPy: py, moved: false, mx0: 0, my0: 0,
         isPlacing: true, placeStartPy: py, placeY: placed.y, placeX: placed.x, placeBeat: placed.beat,
+        placeOy,
       };
     }
   };
@@ -943,9 +995,12 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // 方向：向下拖（dy>0）减小 y，向上拖（dy<0）增大 y（下减上增）。
       const effDy = dy > 0 ? Math.max(0, dy - DEAD_ZONE) : Math.min(0, dy + DEAD_ZONE);
       const steps = -Math.trunc(effDy / PX_PER_STEP);
-      // 基准固定为放置时 DSL 处理后的实际 y（drag.y0），每次 move 计算绝对目标值，
-      // 而非基于已更新的 placeY 累加（否则会犯与批量拖动相同的增量累积错误）。
-      const y = round9(Math.max(-1.5, Math.min(1.5, (drag.y0 ?? 0) + steps * 0.1)));
+      // 基准固定为放置时 DSL 处理后的实际 y（drag.y0，base），每次 move 计算
+      // 绝对目标值，而非基于已更新的 placeY 累加（否则会犯与批量拖动相同的
+      // 增量累积错误）。钳制在**屏幕 y** 上（±NOTE_Y_RANGE）：屏幕 = base + 图层偏移。
+      const oy = drag.placeOy ?? 0;
+      const yScr = Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, (drag.y0 ?? 0) + oy + steps * 0.1));
+      const y = round9(yScr - oy);
       if (y !== drag.placeY) {
         drag.placeY = y;
         drag.moved = true;
@@ -978,17 +1033,18 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       /* 拖动过程中即吸附节拍：以被抓取音符吸附后的位移作为统一增量，
        * 与松手时的处理一致（始终吸附）。 */
       const grabBeat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
-      const grabX = round9(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1)));
-      // Delta from the grabbed note's original position.
+      const grabX = round9(clampScreenX(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1))));
+      // Delta from the grabbed note's original position (屏幕坐标增量).
       const grabSnap = drag.multiSnapshot.find((s) => s.id === drag.multiGrabId);
       if (!grabSnap) return;
       const dBeat = grabBeat - grabSnap.beat;
-      const dx = grabX - grabSnap.x;
+      const dx = grabX - (grabSnap.x + grabSnap.ox);
       drag.moved = true;
       // Update live positions for all selected notes (head + children).
+      // 每个单位：屏幕目标 = base + 自身偏移 + dx，钳 ±2.4 后反解 base 提交。
       const liveMap = new Map<string, { x: number; y: number; beat: number }>();
       for (const s of drag.multiSnapshot) {
-        const nx = Math.max(-2.4, Math.min(2.4, s.x + dx));
+        const nx = round9(clampScreenX(s.x + s.ox + dx) - s.ox);
         liveMap.set(s.id, { x: nx, y: s.y, beat: s.beat + dBeat });
       }
       multiLiveRef.current = liveMap;
@@ -1004,7 +1060,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     /* 拖动过程中即吸附节拍（与松手规则一致，始终吸附）。 */
     const beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
-    const x = round9(snap(worldX - drag.offX, xStep));
+    /* 屏幕坐标钳 ±2.4 后，按被拖音符图层在**新 beat** 的偏移反解 base 提交。 */
+    const xScr = clampScreenX(snap(worldX - drag.offX, xStep));
+    const x = round9(xScr - offAt(drag.layerId, beat).x);
     drag.moved = true;
     // Preserve the note's original y (2D ignores y, but keep it intact on drag).
     // Update the live-drag ref so the canvas draws the note in real time,
@@ -1053,14 +1111,14 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const cssH = rect.height;
         const hitIds: string[] = [];
         for (const n of chart.notes) {
-          // 头节点 + 每个子节点分别参与框选命中（独立单位）。
+          // 头节点 + 每个子节点分别参与框选命中（独立单位，屏幕坐标）。
           const tb = beatToSecondsMultiBpm(n.beat, bpm, offset, bpmlist);
-          const { px: ix, py: iy } = worldToPixel(tb, n.x, cssW, cssH, curTime);
+          const { px: ix, py: iy } = worldToPixel(tb, n.x + offAt(n.layerId, n.beat).x, cssW, cssH, curTime);
           if (ix >= x0 && ix <= x1 && iy >= y0 && iy <= y1) hitIds.push(n.id);
           if (n.nodes) {
             n.nodes.forEach((nd, k) => {
               const ctb = beatToSecondsMultiBpm(nd.beat, bpm, offset, bpmlist);
-              const { px: cx, py: cy } = worldToPixel(ctb, nd.x, cssW, cssH, curTime);
+              const { px: cx, py: cy } = worldToPixel(ctb, nd.x + offAt(n.layerId, nd.beat).x, cssW, cssH, curTime);
               if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) hitIds.push(`${n.id}#${k + 1}`);
             });
           }

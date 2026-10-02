@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { BeatmapItem } from '../types/beatmap';
 import { useI18n } from '../i18n';
+import { GlassDropdown } from './GlassDropdown';
 
 export interface ClipboardItem {
   id: string;
@@ -61,7 +62,6 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
   } = props;
 
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
   const [pickKind, setPickKind] = useState<'import' | 'chart' | 'audio' | 'cover' | null>(null);
   const [promptKind, setPromptKind] = useState<'album' | 'song' | null>(null);
   const [promptValue, setPromptValue] = useState('');
@@ -72,8 +72,7 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
 
   const pick = (kind: 'import' | 'chart' | 'audio' | 'cover') => {
     setPickKind(kind);
-    setOpen(false);
-    // 等待菜单关闭后再触发文件选择，避免点击被吞掉。
+    // GlassDropdown 选中后自动关闭面板；等一帧再触发文件选择，避免点击被吞掉。
     requestAnimationFrame(() => fileRef.current?.click());
   };
 
@@ -88,7 +87,6 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
   const openPrompt = (kind: 'album' | 'song') => {
     setPromptKind(kind);
     setPromptValue('');
-    setOpen(false);
   };
 
   const submitPrompt = () => {
@@ -159,14 +157,6 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
   const triggerIcon =
     mode === 'add' ? <Plus size={16} /> : mode === 'edit' ? <Pencil size={16} /> : <Download size={16} />;
 
-  const handleTrigger = () => {
-    if (mode === 'download') {
-      onDownload();
-      return;
-    }
-    setOpen((o) => !o);
-  };
-
   return (
     <>
       <input ref={fileRef} type="file" multiple className="hidden" onChange={onFileChange} />
@@ -233,36 +223,37 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
       )}
 
       <div className="relative flex items-center">
-        <button
-          data-ui-click="1"
-          onClick={handleTrigger}
-          className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-        >
-          {triggerIcon}
-          <span>{triggerLabel}</span>
-        </button>
-        {open && (
-          <>
-            <div className="fixed inset-0 z-50" data-ui-click="1" onClick={() => setOpen(false)} />
-            <div className="absolute bottom-full right-0 mb-2 z-[60] glass-panel-strong rounded-2xl p-2 min-w-[210px] flex flex-col gap-1 shadow-2xl border border-white/15 animate-fade-in">
-              {items.map((it) => (
-                <button
-                  key={it.key}
-                  data-ui-click="1"
-                  onClick={it.onClick}
-                  className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-semibold transition ${
-                    it.danger ? 'text-red-300 hover:bg-red-500/15' : 'text-white/85 hover:bg-white/10'
-                  }`}
-                >
-                  <span className="opacity-80">{it.icon}</span>
-                  <span>{it.label}</span>
-                </button>
-              ))}
-              {items.length === 0 && (
-                <div className="px-3 py-2 text-xs text-white/40">{t('fab.noActions')}</div>
-              )}
-            </div>
-          </>
+        {mode === 'add' || mode === 'edit' ? (
+          <GlassDropdown<string>
+            options={items.map((it) => ({
+              value: it.key,
+              label: it.label,
+              icon: it.icon,
+              danger: it.danger,
+            }))}
+            onChange={(key) => items.find((it) => it.key === key)?.onClick()}
+            trigger={
+              <>
+                {triggerIcon}
+                <span>{triggerLabel}</span>
+              </>
+            }
+            triggerClassName="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold cursor-pointer"
+            direction="up"
+            align="right"
+            panelClassName="rounded-2xl p-2 min-w-[210px] max-h-80 space-y-1 shadow-2xl"
+            itemClassName="gap-2.5 px-3 py-2.5 rounded-xl text-sm font-semibold"
+            dataUiClick
+          />
+        ) : (
+          <button
+            data-ui-click="1"
+            onClick={mode === 'download' ? onDownload : undefined}
+            className="glass-btn flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold cursor-pointer"
+          >
+            {triggerIcon}
+            <span>{triggerLabel}</span>
+          </button>
         )}
       </div>
     </>

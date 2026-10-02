@@ -16,6 +16,8 @@ import {
   getFallbackChart,
   isFallbackSong,
   resolveBeatmapUrl,
+  resolveSongBgMedia,
+  resolveStoryboardUrl,
   findAlbumById
 } from '../data/beatmapLoader';
 import { getCurrentServer } from '../data/onlineServers';
@@ -141,7 +143,7 @@ interface SongSelectProps {
   /** 由卡片发起“编辑谱面/新建谱面”，携带上下文信息。 */
   onLaunchChartEditor: (info: EditorLaunchInfo) => void;
   onSwitchLite: () => void;
-  onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, scoreKey: string, diffName: string) => void;
+  onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, scoreKey: string, diffName: string, bgMedia?: { image?: string; video?: string }, storyboardUrl?: string) => void;
   onStateChange?: (state: SongSelectNavState) => void;
 }
 
@@ -634,11 +636,17 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       loadStateRef.current = { songId: song.id, audio: idleStage(), chart: idleStage() };
     }
 
+    /* 背景媒体（约定命名 bg.jpg / bga.mp4，随歌曲走而非谱面）：开局一并交给渲染器。
+     * idb 引用需读库生成 blob URL，在线相对路径在此重写 —— 两处开局路径共用一次解析。 */
+    const bgMedia = await resolveSongBgMedia(song);
+    /* 故事板脚本（约定命名 story.js，§3.7）：解析为可 import() 的地址后交给宿主。 */
+    const storyboardUrl = await resolveStoryboardUrl(song);
+
     /* 一切就绪且无在途预载 → 直接开局，不闪加载展示。 */
     if (audioReady && chartReady && !previewPending) {
       globalAudio.stop();
       startingSongIdRef.current = null;
-      onStartGame(previewChart!.chart, !!song.audio, song.id, getScoreKey(song.id, song.source), diff.name);
+      onStartGame(previewChart!.chart, !!song.audio, song.id, getScoreKey(song.id, song.source), diff.name, bgMedia, storyboardUrl);
       return;
     }
 
@@ -686,7 +694,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       setStartPhase(null);
       // 关卡已交出去：关闭阶段闸门，避免之后的预览预载继续写状态。
       startingSongIdRef.current = null;
-      onStartGame(chart, hasAudio, song.id, getScoreKey(song.id, song.source), diff.name);
+      onStartGame(chart, hasAudio, song.id, getScoreKey(song.id, song.source), diff.name, bgMedia, storyboardUrl);
     } catch (e) {
       if (stale()) return; // 过期会话不得复位新会话的闸门/状态
       console.error('Failed to start game:', e);
@@ -858,6 +866,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       accentColor: it.accentColor,
       source: it.source ?? 'local',
       audio: it.audio,
+      storyboard: it.storyboard,
       chartFile: idx >= 0 ? it.difficulties[idx].chartFile : undefined,
       diffName: idx >= 0 ? it.difficulties[idx].name : undefined,
       selectedDiffIndex: idx,
@@ -879,6 +888,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       accentColor: it.accentColor,
       source: it.source ?? 'local',
       audio: it.audio,
+      storyboard: it.storyboard,
       selectedDiffIndex: -1,
       difficultiesCount: it.difficulties.length,
     });

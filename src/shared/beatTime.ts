@@ -24,20 +24,94 @@ export interface SpeedPoint {
 }
 
 /**
+ * 一条变速斜坡被离散成多少段（中点采样）。
+ *
+ * 斜坡（duration > 0）在**模型层**仍是分段常数：原因有二 ——
+ *  1. 下游的「图层流速 Π 相乘」要把多条时间轴的断点取并集后逐段相乘，
+ *     而**两条斜坡相乘是二次曲线**，无法用「分段缓动」表示，精确闭合解在合并后必然失真；
+ *  2. 分段常数可以完整复用既有 Machinery（前缀和 O(log N)、Lite 的 getScrollDistance）。
+ * 中点采样使积分误差为 O(1/K²)，K=24 时对 2 秒斜坡的误差远小于 1 毫秒的距离。
+ */
+export var SPEED_RAMP_STEPS = 24;
+
+/** 判断是否为有限数字（本文件内的小工具，避免依赖外部）。 */
+function spIsNum(v: any): boolean {
+  return typeof v === 'number' && isFinite(v);
+}
+
+/**
+ * 把一条变速斜坡离散成若干分段常数点（中点采样）。
+ * 不传 `ease` 时退化为一次瞬时跳变（旧行为）。
+ */
+function pushSpeedRamp(
+  points: SpeedPoint[],
+  t0: number,
+  from: number,
+  to: number,
+  duration: number,
+  easing: string,
+  ease: (name: string, t: number) => number
+): void {
+  if (!(duration > 0)) {
+    points.push({ timeSec: t0, speed: to });
+    return;
+  }
+  // 标准中点法则：第 s 段（[t0+s·dt, t0+(s+1)·dt)）取该段中点的速度。
+  // ⚠️ 采样时刻必须是 t0 + dt*s（段起点），不能是 t0 + dt*(s+0.5)——后者会让
+  // 首尾各多出半步用「旧速度/末段速度」积分，产生 dt/2·(from−to) 的系统性误差。
+  var dt = duration / SPEED_RAMP_STEPS;
+  for (var s = 0; s < SPEED_RAMP_STEPS; s++) {
+    var p = (s + 0.5) / SPEED_RAMP_STEPS;
+    points.push({ timeSec: t0 + dt * s, speed: from + (to - from) * ease(easing, p) });
+  }
+  // 收尾点：斜坡结束后精确落在目标速度（否则会永远差半个采样步）。
+  points.push({ timeSec: t0 + duration, speed: to });
+}
+
+/**
  * Pre-compute scroll speed change points from chart events.
  * Returns speed points sorted by time, with an implicit initial speed of 1 at t=0.
+ *
+ * 时间过渡（`duration > 0`）：速度在 `duration` 秒内从 `speedFrom`（缺省＝过渡开始时
+ * 的当前速度）缓动到 `speed`。斜坡在这里就被离散成分段常数，下游无需感知。
+ *
+ * `ease` 由调用方注入（本文件禁止运行时 import，见文件头）：
+ *  - full app：`src/utils/beatTime.ts` 的包装器注入 EASING_FNS；
+ *  - Lite：`09-engine.js` 注入同作用域的 EASING_FNS。
+ * 不传时所有变速均为瞬时（旧行为，逐位兼容）。
  */
-export function extractSpeedPoints(input: ChartData | ResolvedEvent[]): SpeedPoint[] {
+export function extractSpeedPoints(
+  input: ChartData | ResolvedEvent[],
+  ease?: (name: string, t: number) => number
+): SpeedPoint[] {
   // Accept either a raw ChartData (re-resolve its events) or an already-resolved
   // event array — the Lite engine passes `game.events` (resolved), the full app
   // passes the chart. Keeping both call sites working avoids a signature split.
-  var events: ResolvedEvent[] = Array.isArray(input) ? input : resolveEvents(input);
+  var src: ResolvedEvent[] = Array.isArray(input) ? input : resolveEvents(input);
+  // 时间顺序处理：斜坡的起点依赖「过渡开始时的当前速度」。
+  var events: ResolvedEvent[] = [];
+  for (var k = 0; k < src.length; k++) events.push(src[k]);
+  events.sort(function (a, b) { return a.timeSec - b.timeSec; });
+
   var points: SpeedPoint[] = [];
+  var cur = 1;
   for (var i = 0; i < events.length; i++) {
-    var e = events[i];
-    if (e.eventType === 'speed_change' && e.speed != null) {
-      points.push({ timeSec: e.timeSec, speed: e.speed });
+    var e: any = events[i];
+    if (e.eventType !== 'speed_change' || e.speed == null) continue;
+    var t0 = spIsNum(e.timeSec) ? e.timeSec : 0;
+    var to = e.speed;
+    var dur = spIsNum(e.duration) && e.duration > 0 ? e.duration : 0;
+    var from = spIsNum(e.speedFrom) ? e.speedFrom : cur;
+    if (dur > 0 && ease) {
+      pushSpeedRamp(
+        points, t0, from, to, dur,
+        typeof e.easing === 'string' ? e.easing : 'linear',
+        ease
+      );
+    } else {
+      points.push({ timeSec: t0, speed: to });
     }
+    cur = to;
   }
   points.sort(function (a, b) { return a.timeSec - b.timeSec; });
   return points;
@@ -286,10 +360,13 @@ export function getChartDuration(chart: ChartData): number {
   return beatToSecondsMultiBpm(getMaxBeat(chart), meta.bpm, meta.offset, meta.bpmlist) + 1.5;
 }
 
-/** Count all scoreable notes: tap/touch = 1 each; slide = head + each child (1 each). */
+/** Count all scoreable notes: tap/touch = 1 each; slide = head + each child (1 each).
+ *  假音符（fake）与不计分音符（noScore）不计入 —— 两种音符都不参与计分与数量统计，
+ *  slide 子节点继承头节点的语义（解析层已随头节点复制）。 */
 export function countPlayableNotes(chart: ChartData): number {
   var total = 0;
   chart.notes.forEach(function (n) {
+    if (n.fake || n.noScore) return;
     total += 1 + ((n.nodes ? n.nodes.length : 0));
   });
   return total;

@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { cssVars } from '../utils/style';
-import { createPortal } from 'react-dom';
-import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { GlassDropdown } from './GlassDropdown';
+import { ChartData, NoteData, EventData, EventType, BpmPoint, EasingType, NoteType, SlideNodeData, NOTE_X_RANGE, NOTE_Y_RANGE, LayerData, NoteTrigger, TriggerAction } from '../types/game';
 import { exportChartJson, parseAndValidateChart } from '../utils/chartParser';
 import { countPlayableNotes, getMaxBeat, beatToSecondsMultiBpm } from '../utils/beatTime';
 import { EASING_TYPES, EASING_FNS } from '../utils/easing';
+import { buildLayerTree, layerOffsetAt, noteLayerIdx } from '../utils/layers';
+import { isTriggerEventUnsupported } from '../shared/triggers';
 import {
   ChevronLeft,
   ChevronRight,
@@ -92,6 +94,9 @@ interface VisualChartEditorProps {
   playbackRate: number;
   onSetPlaybackRate: (rate: number) => void;
   onUpdateChart: (updated: ChartData) => void;
+  /** 图层编辑态：null = 总览（合成视图）；'' = 默认根图层；其它 = 显式图层 id。 */
+  editorLayerId: string | null;
+  onEditorLayerChange: (id: string | null) => void;
   onSeekBeat: (beat: number) => void;
   onTogglePlay: () => void;
   onSetActiveTool: (tool: EditorTool) => void;
@@ -117,6 +122,13 @@ interface VisualChartEditorProps {
   onExitEditor: () => void;
   /** 保存到本地：将当前谱面写入本地库（覆盖原谱面或存入 Editor 专辑）。 */
   onSaveToLocal?: () => void;
+  /**
+   * 「导入与导出」：把 bg.jpg / bga.mp4 / story.js 挂到当前编辑目标歌曲（§3.7）。
+   * App 侧负责存储、实时预览与写回库；此处只透传文件。抛错时显示在 fileError。
+   */
+  onAttachMedia?: (kind: 'bgImage' | 'bgVideo' | 'storyboard', file: File) => Promise<void> | void;
+  /** 卸载已挂载的背景/故事板（实时预览同步清除 + 写回库）。错误由实现方兜底。 */
+  onDetachMedia?: (kind: 'bgImage' | 'bgVideo' | 'storyboard') => void;
   onStartPlayTest: (fromCurrentBeat: boolean) => void;
   /** '3d' = default perspective view; '2d' = top-down falling-editor view. */
   viewMode: '3d' | '2d';
@@ -190,170 +202,34 @@ function NumField({
   );
 }
 
-/** Self-styled frosted-glass dropdown for the easing value (no native <select>,
- *  so it follows the editor's dark glass theme). Includes a "default" option
- *  that removes the key (inherits the head node's value). The popup is rendered
- *  through a portal to <body> with fixed positioning so it FLOATS above the
- *  editor panel (which has overflow/transform and would otherwise clip/resize it). */
+/** 吸附细分选项（0.01 = "自由"哨兵值，显示时换文案）。 */
+const SNAP_CHOICES: Array<{ label: string; val: number }> = [
+  { label: '1/1', val: 1 }, { label: '1/2', val: 0.5 }, { label: '1/3', val: 0.333333333333 },
+  { label: '1/4', val: 0.25 }, { label: '1/6', val: 0.166666666667 }, { label: '1/8', val: 0.125 },
+  { label: '1/12', val: 0.083333333333 }, { label: '1/16', val: 0.0625 }, { label: 'Free', val: 0.01 },
+];
+
+/** 缓动值下拉：公共 GlassDropdown 的薄包装（含"默认"项 = 移除键，继承头结点值）。 */
 const EasingSelect: React.FC<{
   value: EasingType | 'default';
   onChange: (v: EasingType | 'default') => void;
 }> = ({ value, onChange }) => {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const [rect, setRect] = useState<DOMRect | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    setRect(btnRef.current?.getBoundingClientRect() ?? null);
-    // Close on page scroll/resize: the panel can move, and since we position
-    // against the viewport the menu would otherwise detach from the trigger.
-    // Ignore the popup's own internal scroll (otherwise the list disappears
-    // when the user tries to scroll it).
-    const close = (e?: Event) => {
-      const t = (e?.target as Node | null) ?? null;
-      if (t && popRef.current && popRef.current.contains(t)) return;
-      setOpen(false);
-    };
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => {
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-    };
-  }, [open]);
   const options: Array<{ value: EasingType | 'default'; label: string }> = [
     { value: 'default', label: t('editor.default') },
     ...EASING_TYPES.map((et) => ({ value: et, label: et })),
   ];
-  const current = options.find((o) => o.value === value) ?? options[0];
   return (
-    <div className="col-span-4 relative">
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={`w-full glass-input border rounded px-1.5 py-0.5 text-amber-300 text-left cursor-pointer flex items-center justify-between ${
-          open ? 'border-cyan-400/60' : 'border-white/12'
-        }`}
-      >
-        <span>{current.label}</span>
-        <span className="text-white/40 text-[9px]">▾</span>
-      </button>
-      {open && rect &&
-        createPortal(
-          <>
-            <div className="fixed inset-0 z-[60]" onMouseDown={() => setOpen(false)} />
-            <div
-              ref={popRef}
-              className="fixed z-[61] glass-panel-strong rounded-xl border-white/15 p-1 space-y-0.5 max-h-44 overflow-y-auto"
-              style={{ left: rect.left, top: rect.bottom + 4, minWidth: rect.width }}
-            >
-              {options.map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => { onChange(o.value); setOpen(false); }}
-                  className={`w-full text-left px-2 py-1.5 rounded-lg text-[11px] font-mono transition cursor-pointer ${
-                    o.value === value
-                      ? 'bg-cyan-500/25 text-cyan-200'
-                      : 'text-white/70 hover:bg-white/10 hover:text-white'
-                  }`}
-                >
-                  {o.label}
-                </button>
-              ))}
-            </div>
-          </>,
-          document.body,
-        )}
-    </div>
+    <GlassDropdown<EasingType | 'default'>
+      value={value}
+      options={options}
+      onChange={onChange}
+      className="col-span-4"
+      accent="cyan"
+    />
   );
 };
 
-/** Generic frosted-glass dropdown (portal-based, same pattern as EasingSelect).
- *  Used by the batch-edit panel for the function selector and marquee mode. */
-function GlassDropdown<T extends string>({
-  value,
-  options,
-  onChange,
-  className,
-  accent = 'cyan',
-}: {
-  value: T;
-  options: Array<{ value: T; label: string }>;
-  onChange: (v: T) => void;
-  className?: string;
-  accent?: 'cyan' | 'amber';
-}) {
-  const [open, setOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const [rect, setRect] = useState<DOMRect | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    setRect(btnRef.current?.getBoundingClientRect() ?? null);
-    // 关闭下拉：页面滚动 / 窗口缩放时关闭；但忽略下拉自身列表滚动
-    // （避免“滚动到底部时下拉直接消失”）。
-    const close = (e?: Event) => {
-      const t = (e?.target as Node | null) ?? null;
-      if (t && popRef.current && popRef.current.contains(t)) return;
-      setOpen(false);
-    };
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => {
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-    };
-  }, [open]);
-  const current = options.find((o) => o.value === value) ?? options[0];
-  const textCls = accent === 'amber' ? 'text-amber-300' : 'text-cyan-300';
-  const selCls = accent === 'amber' ? 'bg-amber-500/25 text-amber-200' : 'bg-cyan-500/25 text-cyan-200';
-  return (
-    <div className={`relative ${className ?? ''}`}>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={`w-full glass-input border rounded px-1.5 py-0.5 ${textCls} text-left cursor-pointer flex items-center justify-between text-[11px] font-mono ${
-          open ? (accent === 'amber' ? 'border-amber-400/60' : 'border-cyan-400/60') : 'border-white/12'
-        }`}
-      >
-        <span className="truncate">{current?.label}</span>
-        <span className="text-white/40 text-[9px] shrink-0">▾</span>
-      </button>
-      {open && rect &&
-        createPortal(
-          <>
-            <div className="fixed inset-0 z-[60]" onMouseDown={() => setOpen(false)} />
-            <div
-              ref={popRef}
-              className="fixed z-[61] glass-panel-strong rounded-xl border-white/15 p-1 space-y-0.5 max-h-52 overflow-y-auto"
-              style={{ left: rect.left, top: rect.bottom + 4, width: rect.width, minWidth: 120, maxWidth: 260 }}
-            >
-              {options.map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => { onChange(o.value); setOpen(false); }}
-                  className={`w-full text-left px-2 py-1.5 rounded-lg text-[11px] font-mono transition cursor-pointer ${
-                    o.value === value
-                      ? selCls
-                      : 'text-white/70 hover:bg-white/10 hover:text-white'
-                  }`}
-                >
-                  <span className="block truncate">{o.label}</span>
-                </button>
-              ))}
-            </div>
-          </>,
-          document.body,
-        )}
-    </div>
-  );
-}
 
 /** Batch-edit function selector + execute button. The selected op lives in
  *  the parent's persistent state (not local), so it survives re-mounts of the
@@ -463,6 +339,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   playbackRate,
   onSetPlaybackRate,
   onUpdateChart,
+  editorLayerId,
+  onEditorLayerChange,
   onSeekBeat,
   onTogglePlay,
   onSetActiveTool,
@@ -481,6 +359,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onUploadAudioFile,
   onExitEditor,
   onSaveToLocal,
+  onAttachMedia,
+  onDetachMedia,
   onStartPlayTest,
   viewMode,
   onSetViewMode,
@@ -502,8 +382,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
-  const [snapMenuOpen, setSnapMenuOpen] = useState(false);
-  const [rateMenuOpen, setRateMenuOpen] = useState(false);
+  // 链面板「链属性」栏（默认收起）与坐标参考系（默认屏幕坐标 = 所见即所得）。
+  const [chainPropsOpen, setChainPropsOpen] = useState(false);
+  const [coordFrame, setCoordFrame] = useState<'screen' | 'base'>('screen');
 
   /** Playback rate options for the editor (chart-making aid only). */
   const RATE_OPTIONS: Array<{ value: number; label: string }> = [
@@ -517,6 +398,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     view: true,
     tools: true,
     playtest: false,
+    layers: false,
     events: false,
     rules: false,
     metadata: false,
@@ -525,8 +407,33 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     importExport: false,
   });
 
+  // ----- 音符触发器（§3.4）编辑：MVP 每条一个内联动作 -----
+  /** 触发器动作的**可编辑视图**：内联事件的部分字段（{ ref } 引用型在 UI 中不展开）。 */
+  type TriggerEvt = Partial<EventData> & { eventType?: EventType };
+  const triggerEventOf = (n: NoteData | undefined, kind: 'hit' | 'miss'): TriggerEvt | undefined => {
+    if (!n || !n.trigger) return undefined;
+    const list = kind === 'miss' ? n.trigger.onMiss : n.trigger.onHit?.default;
+    const a = (list && list.length > 0 ? list[0] : undefined) as TriggerAction | undefined;
+    if (!a || typeof (a as { ref?: string }).ref === 'string') return undefined;
+    return a as TriggerEvt;
+  };
+  const setTriggerEvent = (kind: 'hit' | 'miss', evt: TriggerEvt | undefined) => {
+    if (!selectedNote) return;
+    const acts: TriggerAction[] = evt ? [evt as TriggerAction] : [];
+    const next: NoteTrigger = { ...(selectedNote.trigger ?? {}) };
+    if (kind === 'miss') next.onMiss = acts;
+    else next.onHit = { ...(next.onHit ?? {}), default: acts };
+    const has = (next.onHit?.default?.length ?? 0) > 0 || (next.onMiss?.length ?? 0) > 0;
+    handleModifySelected({ trigger: has ? next : undefined });
+  };
+
   // ----- Chart integrity check -----
-  type CheckKind = 'negativeBeat' | 'chainOrder' | 'coordRange';
+  type CheckKind =
+    | 'negativeBeat'
+    | 'chainOrder'
+    | 'coordRange'
+    | 'bgOnNonRootLayer'
+    | 'triggerUnsupported';
   interface CheckIssue {
     kind: CheckKind;
     /** Translated category label (drives the coloured tag). */
@@ -540,12 +447,41 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     isEvent?: boolean;
   }
   const X_MIN = -NOTE_X_RANGE, X_MAX = NOTE_X_RANGE, Y_MIN = -NOTE_Y_RANGE, Y_MAX = NOTE_Y_RANGE;
+  /** 链面板：头节点图层在给定拍的**合成偏移**（屏幕参考系 = base + 此值）。
+   *  子节点无 layerId，沿用头节点图层；时间取子节点自己的 beat（偏移随拍变化）。 */
+  const chainOffsetAt = (layerId: string | undefined, beat: number) => {
+    const tree = buildLayerTree(chart);
+    const t = beatToSecondsMultiBpm(beat, chart.metadata.bpm, chart.metadata.offset, chart.metadata.bpmlist);
+    return layerOffsetAt(tree, noteLayerIdx(tree, { layerId }), t);
+  };
+  const round10 = (v: number) => Math.round(v * 10) / 10;
+  /** base → 面板显示值（屏幕参考系下加该单位自己时刻的合成偏移）。 */
+  const toFrameX = (b: number, layerId: string | undefined, beat: number) =>
+    coordFrame === 'base' ? b : b + chainOffsetAt(layerId, beat).x;
+  const toFrameY = (b: number, layerId: string | undefined, beat: number) =>
+    coordFrame === 'base' ? b : b + chainOffsetAt(layerId, beat).y;
+  /** 面板输入 → base（屏幕参考系下减去偏移；按 0.1 取整与放置一致）。 */
+  const toBaseX = (v: number, layerId: string | undefined, beat: number) =>
+    round10(v - (coordFrame === 'screen' ? chainOffsetAt(layerId, beat).x : 0));
+  const toBaseY = (v: number, layerId: string | undefined, beat: number) =>
+    round10(v - (coordFrame === 'screen' ? chainOffsetAt(layerId, beat).y : 0));
+  // 最新谱面引用：偏移复检在防抖回调里执行，不能闭包捕获旧的 chart。
+  const chartRef = useRef(chart);
+  chartRef.current = chart;
   const [checkIssues, setCheckIssues] = useState<CheckIssue[]>([]);
   const [showCheck, setShowCheck] = useState(false);
   const [checkRan, setCheckRan] = useState(false);
 
   const runChartCheck = () => {
     const issues: CheckIssue[] = [];
+    // 图层偏移下 base 坐标可合法越界（如偏移 -1 时显示 x=2.4 的 base 是 3.4）；
+    // 越界校验只针对「合成后落点」＝ base + 图层偏移(音符自己的时间)（设计 §4.4）。
+    const checkTree = buildLayerTree(chart);
+    const landingOf = (x: number, y: number, beat: number, layerId?: string) => {
+      const t = beatToSecondsMultiBpm(beat, chart.metadata.bpm, chart.metadata.offset, chart.metadata.bpmlist);
+      const off = layerOffsetAt(checkTree, noteLayerIdx(checkTree, { layerId }), t);
+      return { x: x + off.x, y: y + off.y };
+    };
     for (const note of chart.notes) {
       if (note.beat < -1e-6) {
         issues.push({
@@ -556,11 +492,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           targetId: note.id,
         });
       }
-      if (note.x < X_MIN - 1e-6 || note.x > X_MAX + 1e-6 || note.y < Y_MIN - 1e-6 || note.y > Y_MAX + 1e-6) {
+      const landing = landingOf(note.x, note.y, note.beat, note.layerId);
+      if (landing.x < X_MIN - 1e-6 || landing.x > X_MAX + 1e-6 || landing.y < Y_MIN - 1e-6 || landing.y > Y_MAX + 1e-6) {
         issues.push({
           kind: 'coordRange',
           cat: t('editor.checkCatCoord'),
-          detail: `${t('editor.checkTypeNote')} ${note.id} · x=${note.x.toFixed(2)}, y=${note.y.toFixed(2)}`,
+          detail: `${t('editor.checkTypeNote')} ${note.id} · x=${landing.x.toFixed(2)}, y=${landing.y.toFixed(2)}`,
           targetBeat: note.beat,
           targetId: note.id,
         });
@@ -583,11 +520,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           }
           const snx = typeof sn.x === 'number' ? sn.x : note.x;
           const sny = typeof sn.y === 'number' ? sn.y : note.y;
-          if (snx < X_MIN - 1e-6 || snx > X_MAX + 1e-6 || sny < Y_MIN - 1e-6 || sny > Y_MAX + 1e-6) {
+          const snLanding = landingOf(snx, sny, sn.beat, note.layerId);
+          if (snLanding.x < X_MIN - 1e-6 || snLanding.x > X_MAX + 1e-6 || snLanding.y < Y_MIN - 1e-6 || snLanding.y > Y_MAX + 1e-6) {
             issues.push({
               kind: 'coordRange',
               cat: t('editor.checkCatCoord'),
-              detail: `${t('editor.checkTypeNote')} ${note.id} · ${nodeLabel} · x=${snx.toFixed(2)}, y=${sny.toFixed(2)}`,
+              detail: `${t('editor.checkTypeNote')} ${note.id} · ${nodeLabel} · x=${snLanding.x.toFixed(2)}, y=${snLanding.y.toFixed(2)}`,
               targetBeat: sn.beat,
               targetId: note.id,
             });
@@ -618,6 +556,46 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         });
       }
     }
+    // 音符触发器（§3.4）：变速/偏移已预先积分进滚动距离与落点，判定时刻无法再改变，
+    // 这类动作运行时会被忽略 —— 提前告知作者，避免「写了却没反应」。
+    const evtById: { [id: string]: EventData } = {};
+    for (const e of chart.events ?? []) if (e.id) evtById[e.id] = e;
+    for (const l of chart.layers ?? []) for (const e of l.events ?? []) if (e.id) evtById[e.id] = e;
+    for (const note of chart.notes) {
+      if (!note.trigger) continue;
+      const acts: TriggerAction[] = [];
+      for (const a of note.trigger.onMiss ?? []) acts.push(a);
+      for (const k in note.trigger.onHit ?? {}) {
+        for (const a of (note.trigger.onHit as any)[k] ?? []) acts.push(a);
+      }
+      for (const a of acts) {
+        const target: any = typeof (a as any).ref === 'string' ? evtById[(a as any).ref] : a;
+        if (!target || !isTriggerEventUnsupported(target)) continue;
+        issues.push({
+          kind: 'triggerUnsupported',
+          cat: t('editor.checkCatTrigger'),
+          detail: `${t('editor.checkTypeNote')} ${note.id} · ${t('editor.evt.speed')}/${t('editor.evt.offset')}`,
+          targetBeat: note.beat,
+          targetId: note.id,
+        });
+      }
+    }
+
+    // 背景色是**全局**的：写在非根图层的事件轴上虽然仍生效，但属于不良写法
+    // （读者会误以为它只影响该图层）→ warning，建议移到根图层（设计 §2.2 / §4.4）。
+    for (const lay of chart.layers ?? []) {
+      if (!lay.parentId) continue;
+      for (const evt of lay.events ?? []) {
+        if (evt.eventType !== 'bg_change') continue;
+        issues.push({
+          kind: 'bgOnNonRootLayer',
+          cat: t('editor.checkCatLayer'),
+          detail: t('editor.checkBgNonRoot', { layer: lay.name || lay.id }),
+          targetBeat: evt.beat,
+          isEvent: true,
+        });
+      }
+    }
     issues.sort((a, b) => a.targetBeat - b.targetBeat);
     setCheckIssues(issues);
     setCheckRan(true);
@@ -629,6 +607,134 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     if (issue.targetId) onSelectNote(issue.targetId);
     // 跳转后保留问题列表，便于逐条核对（关闭由「关闭」按钮负责）。
   };
+
+  // ----- 偏移变更的全量复检（设计 §4.4）-----
+  //
+  // 新增/修改/删除任一 `offset_change`，都会**追溯性**改变既有音符的落点
+  // （base 不动，偏移变了 → 落点变了）。所以必须在事件变更后防抖重算一遍，
+  // 把越界的音符列出来并提供两种修复：
+  //   - 保持原显示位置：反算 base，让落点回到**变更前**的位置；
+  //   - 夹取到边界内：改 base，让落点正好落在边界上。
+  type LayerTreeT = ReturnType<typeof buildLayerTree>;
+  interface OffsetIssue {
+    /** 头节点 note.id（用于选中/跳转）。 */
+    noteId: string;
+    /** 0 = 头节点；≥1 = 第 n 个子节点。 */
+    nodeIdx: number;
+    beat: number;
+    landing: { x: number; y: number };
+    /** 「保持原显示位置」要写入的 base；无快照时为 null（按钮禁用）。 */
+    keepBase: { x: number; y: number } | null;
+    /** 「夹取到边界内」要写入的 base。 */
+    clampBase: { x: number; y: number };
+  }
+  const [offsetIssues, setOffsetIssues] = useState<OffsetIssue[]>([]);
+  const [showOffsetIssues, setShowOffsetIssues] = useState(false);
+  // 变更前每个判定单位的落点快照：key = note.id 或 note.id#i。
+  const offsetSnapshotRef = useRef<{ [key: string]: { x: number; y: number } }>({});
+  const offsetRecheckTimerRef = useRef<number | null>(null);
+
+  /** 音符（或 slide 子节点）在**自己时刻**的合成落点。 */
+  const landingXY = (
+    tree: LayerTreeT,
+    c: ChartData,
+    x: number,
+    y: number,
+    beat: number,
+    layerId?: string
+  ): { x: number; y: number } => {
+    const t = beatToSecondsMultiBpm(beat, c.metadata.bpm, c.metadata.offset, c.metadata.bpmlist);
+    const off = layerOffsetAt(tree, noteLayerIdx(tree, { layerId }), t);
+    return { x: x + off.x, y: y + off.y };
+  };
+
+  /** 变更前快照：记录每个判定单位当前的落点。 */
+  const snapshotLandings = () => {
+    const c = chartRef.current;
+    const tree = buildLayerTree(c);
+    const snap: { [key: string]: { x: number; y: number } } = {};
+    for (const n of c.notes) {
+      snap[n.id] = landingXY(tree, c, n.x, n.y, n.beat, n.layerId);
+      (n.nodes ?? []).forEach((sn, i) => {
+        snap[`${n.id}#${i + 1}`] = landingXY(tree, c, sn.x, sn.y, sn.beat, n.layerId);
+      });
+    }
+    offsetSnapshotRef.current = snap;
+  };
+
+  const runOffsetRecheck = () => {
+    const c = chartRef.current;
+    const tree = buildLayerTree(c);
+    const snap = offsetSnapshotRef.current;
+    const issues: OffsetIssue[] = [];
+    const clamp01 = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+    const consider = (
+      baseX: number, baseY: number, beat: number, layerId: string | undefined,
+      noteId: string, nodeIdx: number, key: string
+    ) => {
+      const landing = landingXY(tree, c, baseX, baseY, beat, layerId);
+      const cx = clamp01(landing.x, X_MIN, X_MAX);
+      const cy = clamp01(landing.y, Y_MIN, Y_MAX);
+      if (cx === landing.x && cy === landing.y) return;
+      const t = beatToSecondsMultiBpm(beat, c.metadata.bpm, c.metadata.offset, c.metadata.bpmlist);
+      const off = layerOffsetAt(tree, noteLayerIdx(tree, { layerId }), t);
+      const prev = snap[key];
+      issues.push({
+        noteId,
+        nodeIdx,
+        beat,
+        landing,
+        keepBase: prev ? { x: prev.x - off.x, y: prev.y - off.y } : null,
+        clampBase: { x: baseX + (cx - landing.x), y: baseY + (cy - landing.y) },
+      });
+    };
+    for (const n of c.notes) {
+      consider(n.x, n.y, n.beat, n.layerId, n.id, 0, n.id);
+      (n.nodes ?? []).forEach((sn, i) => {
+        consider(sn.x, sn.y, sn.beat, n.layerId, n.id, i + 1, `${n.id}#${i + 1}`);
+      });
+    }
+    setOffsetIssues(issues);
+    setShowOffsetIssues(issues.length > 0);
+  };
+
+  /** 偏移事件变更后调用：先快照（变更前的落点），再防抖复检。 */
+  const scheduleOffsetRecheck = () => {
+    snapshotLandings();
+    if (offsetRecheckTimerRef.current !== null) window.clearTimeout(offsetRecheckTimerRef.current);
+    offsetRecheckTimerRef.current = window.setTimeout(() => {
+      offsetRecheckTimerRef.current = null;
+      runOffsetRecheck();
+    }, 350);
+  };
+
+  const applyOffsetFix = (issue: OffsetIssue, mode: 'keep' | 'clamp') => {
+    const base = mode === 'keep' ? issue.keepBase : issue.clampBase;
+    if (!base) return;
+    const c = chartRef.current;
+    const notes = c.notes.map((n) => {
+      if (n.id !== issue.noteId) return n;
+      if (issue.nodeIdx === 0) return { ...n, x: base.x, y: base.y };
+      const nodes = (n.nodes ?? []).map((sn, i) =>
+        i === issue.nodeIdx - 1 ? { ...sn, x: base.x, y: base.y } : sn
+      );
+      return { ...n, nodes };
+    });
+    onUpdateChart({ ...c, notes });
+    // 修复后再次复检（快照保持为「变更前」，剩余项仍可继续修）。
+    if (offsetRecheckTimerRef.current !== null) window.clearTimeout(offsetRecheckTimerRef.current);
+    offsetRecheckTimerRef.current = window.setTimeout(() => {
+      offsetRecheckTimerRef.current = null;
+      runOffsetRecheck();
+    }, 50);
+  };
+
+  useEffect(
+    () => () => {
+      if (offsetRecheckTimerRef.current !== null) window.clearTimeout(offsetRecheckTimerRef.current);
+    },
+    []
+  );
 
   // Dragging State for Floating Quick Edit and Snapping Panels
   const [panelPos, setPanelPos] = useState({ x: 0, y: 0 });
@@ -731,10 +837,91 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     return bpm;
   };
 
+  // ---- 图层（Layer）Editing Helpers ----
+  const layerList: LayerData[] = chart.layers ?? [];
+  const layerNoteCount = (id: string) => chart.notes.filter((n) => (n.layerId ?? '') === id).length;
+
+  const setLayers = (layers: LayerData[]) =>
+    onUpdateChart({ ...chart, layers: layers.length > 0 ? layers : undefined });
+
+  const handleAddLayer = (asChild: boolean) => {
+    const id = `lyr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const name = `${t('editor.layer.newName')} ${layerList.length + 1}`;
+    // 仅当当前隔离的是显式图层时才作为其子图层；总览/默认根 → 新建根图层。
+    const parent = asChild && editorLayerId ? editorLayerId : undefined;
+    setLayers([...layerList, parent ? { id, parentId: parent, name } : { id, name }]);
+    onEditorLayerChange(id);
+  };
+
+  const handleDeleteLayer = (id: string) => {
+    if (!window.confirm(t('editor.layer.confirmDelete'))) return;
+    // 级联删除：收集该图层及其全部后代；其中的音符一并删除。
+    const doomed = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const l of layerList) {
+        if (l.parentId && doomed.has(l.parentId) && !doomed.has(l.id)) {
+          doomed.add(l.id);
+          grew = true;
+        }
+      }
+    }
+    const next = layerList.filter((l) => !doomed.has(l.id));
+    onUpdateChart({
+      ...chart,
+      layers: next.length > 0 ? next : undefined,
+      notes: chart.notes.filter((n) => !n.layerId || !doomed.has(n.layerId)),
+    });
+    if (editorLayerId && doomed.has(editorLayerId)) onEditorLayerChange(null);
+  };
+
+  const handleRenameLayer = (id: string) => {
+    const cur = layerList.find((l) => l.id === id)?.name ?? '';
+    const name = window.prompt(t('editor.layer.renamePrompt'), cur);
+    if (name === null) return;
+    const trimmed = name.trim();
+    setLayers(layerList.map((l) => (l.id === id ? { ...l, name: trimmed || l.name } : l)));
+  };
+
+  // 图层树行（根 → 子，带缩进）。根 = 无 parentId；悬挂/循环引用已由解析层修复。
+  const layerTreeRows: Array<{ l: LayerData; depth: number }> = [];
+  {
+    const byParent = new Map<string | undefined, LayerData[]>();
+    for (const l of layerList) {
+      const key = l.parentId || undefined;
+      if (!byParent.has(key)) byParent.set(key, []);
+      byParent.get(key)!.push(l);
+    }
+    const walk = (parent: string | undefined, depth: number) => {
+      for (const l of byParent.get(parent) ?? []) {
+        layerTreeRows.push({ l, depth });
+        walk(l.id, depth + 1);
+      }
+    };
+    walk(undefined, 0);
+  }
+
   // ---- Event Editing Helpers ----
-  const getEvents = (): EventData[] => chart.events ?? [];
+  // 事件容器：默认根图层的时间轴 = 顶层 events（旧格式）；显式图层 = layers[i].events。
+  // 事件面板显示全部容器合并后的列表；增删改按 id 在所有容器中定位。
+  // 事件容器：总览与默认根图层都视为「默认根」= 顶层 events（旧格式）；
+  // 选中显式图层 = 该图层的 events。事件面板只显示当前容器（不合并、不加标签）。
+  const eventTargetLayerId = editorLayerId ?? '';
+  const eventTargetName =
+    eventTargetLayerId === ''
+      ? t('editor.layer.defaultRoot')
+      : layerList.find((l) => l.id === eventTargetLayerId)?.name || eventTargetLayerId;
+
+  /** 当前图层时间轴的事件。 */
+  const getEvents = (): EventData[] => {
+    if (eventTargetLayerId === '') return chart.events ?? [];
+    return layerList.find((l) => l.id === eventTargetLayerId)?.events ?? [];
+  };
 
   const handleAddEvent = (type: EventType) => {
+    // 偏移事件：先快照「变更前落点」，再在变更生效后防抖全量复检（§4.4）。
+    if (type === 'offset_change') scheduleOffsetRecheck();
     const snappedBeat = Math.round(editorTimeStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
     const newEvent: EventData = {
       id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -745,21 +932,78 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
       ...(type === 'text_display' ? { text: 'New Text', textDuration: 2 } : {}),
       ...(type === 'note_color_change' ? { noteColor: '#00f0ff' } : {}),
       ...(type === 'bg_change' ? { gradientStart: '#050c1e', gradientEnd: '#1b072c' } : {}),
+      ...(type === 'offset_change' ? { offsetX: 0, offsetY: 0, duration: 0, easing: 'linear' } : {}),
     };
-    const events = [...getEvents(), newEvent].sort((a, b) => a.beat - b.beat);
-    onUpdateChart({ ...chart, events });
+    // 默认根图层（或目标图层已不存在）→ 顶层 events；显式图层 → 该图层的 events。
+    const targetIsLayer =
+      eventTargetLayerId !== '' && layerList.some((l) => l.id === eventTargetLayerId);
+    if (!targetIsLayer) {
+      const events = [...(chart.events ?? []), newEvent].sort((a, b) => a.beat - b.beat);
+      onUpdateChart({ ...chart, events });
+      return;
+    }
+    const layers = layerList.map((l) =>
+      l.id === eventTargetLayerId
+        ? { ...l, events: [...(l.events ?? []), newEvent].sort((a, b) => a.beat - b.beat) }
+        : l
+    );
+    onUpdateChart({ ...chart, layers });
   };
 
   const handleUpdateEvent = (id: string, updates: Partial<EventData>) => {
-    const events = getEvents()
-      .map((e) => (e.id === id ? { ...e, ...updates } : e))
-      .sort((a, b) => a.beat - b.beat);
-    onUpdateChart({ ...chart, events });
+    const prevEvt = getEvents().find((e) => e.id === id);
+    if (prevEvt?.eventType === 'offset_change' || updates.eventType === 'offset_change') {
+      scheduleOffsetRecheck();
+    }
+    let topHit = false;
+    let nextTop = chart.events;
+    if (nextTop?.some((e) => e.id === id)) {
+      topHit = true;
+      nextTop = nextTop
+        .map((e) => (e.id === id ? { ...e, ...updates } : e))
+        .sort((a, b) => a.beat - b.beat);
+    }
+    let layerHit = false;
+    const nextLayers = layerList.map((l) => {
+      if (!l.events?.some((e) => e.id === id)) return l;
+      layerHit = true;
+      return {
+        ...l,
+        events: l.events
+          .map((e) => (e.id === id ? { ...e, ...updates } : e))
+          .sort((a, b) => a.beat - b.beat),
+      };
+    });
+    if (!topHit && !layerHit) return;
+    const updated: ChartData = { ...chart };
+    if (topHit) updated.events = nextTop;
+    if (layerHit) updated.layers = nextLayers;
+    onUpdateChart(updated);
   };
 
   const handleDeleteEvent = (id: string) => {
-    const events = getEvents().filter((e) => e.id !== id);
-    onUpdateChart({ ...chart, events: events.length > 0 ? events : undefined });
+    if (getEvents().find((e) => e.id === id)?.eventType === 'offset_change') {
+      scheduleOffsetRecheck();
+    }
+    let topHit = false;
+    const topEvents = chart.events ?? [];
+    const nextTop = topEvents.filter((e) => e.id !== id);
+    if (nextTop.length !== topEvents.length) topHit = true;
+    let layerHit = false;
+    const nextLayers = layerList.map((l) => {
+      if (!l.events?.some((e) => e.id === id)) return l;
+      layerHit = true;
+      const ne = l.events.filter((e) => e.id !== id);
+      return { ...l, events: ne.length > 0 ? ne : undefined };
+    });
+    if (!topHit && !layerHit) return;
+    const updated: ChartData = { ...chart };
+    if (topHit) {
+      if (nextTop.length > 0) updated.events = nextTop;
+      else delete updated.events;
+    }
+    if (layerHit) updated.layers = nextLayers;
+    onUpdateChart(updated);
   };
 
   // 起点/终点按谱师点击的顺序原样保留，不做数值调转（否则谱师先点终点再点起点时，
@@ -829,20 +1073,30 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     if (!validBatchRange || notesInBatch.length === 0) return;
     const dsl = editorDsl;
     const ruleIds = new Set(notesInBatch.map((n) => n.id));
+    // DSL 出口的 ±2.4/±1.5 裁剪必须针对**显示坐标**：按每个单位自己的 beat 取偏移传入。
+    const dslTree = buildLayerTree(chart);
+    const dslMeta = chart.metadata;
+    const offAt = (n: NoteData, beat: number) =>
+      layerOffsetAt(
+        dslTree,
+        noteLayerIdx(dslTree, n),
+        beatToSecondsMultiBpm(beat, dslMeta.bpm, dslMeta.offset, dslMeta.bpmlist)
+      );
     const updatedNotes = chart.notes.map((n) => {
       if (!ruleIds.has(n.id)) return n;
-      const applied = applyDslToNote(n, dsl);
+      const applied = applyDslToNote(n, dsl, offAt(n, n.beat));
       if (!n.nodes || n.nodes.length === 0) return applied;
       // 子节点逐个应用 DSL（以自身位置 + 头节点缺省参数构造临时 note）。
       const nodes = n.nodes.map((sn) => {
         const tmp = applyDslToNote(
           { ...applied, beat: sn.beat, x: sn.x, y: sn.y, angle: sn.angle ?? applied.angle, easing: sn.easing ?? applied.easing, nodes: undefined },
           dsl,
+          offAt(n, sn.beat),
         );
         const out: SlideNodeData = {
           beat: tmp.beat,
-          x: Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, tmp.x)),
-          y: Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, tmp.y)),
+          x: tmp.x,
+          y: tmp.y,
         };
         if (tmp.angle != null) out.angle = tmp.angle;
         if (tmp.easing != null) out.easing = tmp.easing;
@@ -1339,11 +1593,20 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     // 子节点无 color 字段，DSL 对颜色的改动自动忽略（无害）。
     if (op === 'UseRule') {
       const dsl = editorDsl;
+      // 同区间规则：裁剪按显示坐标做，故逐个单位取偏移传入（见 §4.4）。
+      const dslTree2 = buildLayerTree(chart);
+      const dslMeta2 = chart.metadata;
+      const offAt2 = (n: NoteData, beat: number) =>
+        layerOffsetAt(
+          dslTree2,
+          noteLayerIdx(dslTree2, n),
+          beatToSecondsMultiBpm(beat, dslMeta2.bpm, dslMeta2.offset, dslMeta2.bpmlist)
+        );
       const updatedNotes = chart.notes.map((n) => {
         let next = n;
         let changed = false;
         if (selIds.has(n.id)) {
-          next = applyDslToNote(n, dsl);
+          next = applyDslToNote(n, dsl, offAt2(n, n.beat));
           changed = true;
         }
         if (n.nodes) {
@@ -1355,11 +1618,12 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             const tmp = applyDslToNote(
               { ...n, beat: sn.beat, x: sn.x, y: sn.y, angle: sn.angle ?? n.angle, easing: sn.easing ?? n.easing, nodes: undefined },
               dsl,
+              offAt2(n, sn.beat),
             );
             const out: SlideNodeData = {
               beat: tmp.beat,
-              x: Math.max(-2.4, Math.min(2.4, tmp.x)),
-              y: Math.max(-1.5, Math.min(1.5, tmp.y)),
+              x: tmp.x,
+              y: tmp.y,
             };
             if (tmp.angle != null) out.angle = tmp.angle;
             if (tmp.easing != null) out.easing = tmp.easing;
@@ -1534,6 +1798,22 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         }
       };
       reader.readAsText(file);
+    }
+  };
+
+  /** 歌曲媒体挂载（bg.jpg / bga.mp4 / story.js）：透传给 App 侧存储与预览。 */
+  const handleMediaUpload = async (
+    kind: 'bgImage' | 'bgVideo' | 'storyboard',
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !onAttachMedia) return;
+    try {
+      await onAttachMedia(kind, file);
+      setFileError(null);
+    } catch (err) {
+      setFileError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -1875,6 +2155,65 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               )}
             </div>
 
+            {/* === Layers Section（图层） === */}
+            <div className={sectionClass}>
+              <button onClick={() => toggleSection('layers')} className={sectionHeaderClass}>
+                <span className="flex items-center gap-1.5"><Music size={12} /> {t('editor.layers')}</span>
+                <span className="text-cyan-300/80">{sectionOpen.layers ? '−' : '+'}</span>
+              </button>
+              {sectionOpen.layers && (
+                <div className="p-3 space-y-2 border-t border-white/10">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button onClick={() => handleAddLayer(false)} className="py-1.5 px-2 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-cyan-200 text-[11px] transition cursor-pointer">
+                      {t('editor.layer.addRoot')}
+                    </button>
+                    <button
+                      onClick={() => handleAddLayer(true)}
+                      disabled={!editorLayerId}
+                      className="py-1.5 px-2 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-cyan-200 text-[11px] transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {t('editor.layer.addChild')}
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => onEditorLayerChange(null)}
+                    className={`w-full text-left rounded px-2 py-1 text-[11px] transition cursor-pointer border ${editorLayerId === null ? 'bg-cyan-500/20 border-cyan-400/40 text-cyan-200' : 'border-transparent text-white/70 hover:bg-white/5'}`}
+                  >
+                    {t('editor.layer.overview')} <span className="text-white/40">({chart.notes.length})</span>
+                  </button>
+                  <div className="space-y-1">
+                    {/* 默认根图层：所有不带 layerId 的音符（旧格式形态，不可删除） */}
+                    <button
+                      onClick={() => onEditorLayerChange(editorLayerId === '' ? null : '')}
+                      className={`w-full text-left rounded px-2 py-1 text-[11px] transition cursor-pointer border ${editorLayerId === '' ? 'bg-cyan-500/20 border-cyan-400/40 text-cyan-200' : 'border-transparent text-white/70 hover:bg-white/5'}`}
+                    >
+                      {t('editor.layer.defaultRoot')} <span className="text-white/40">({layerNoteCount('')})</span>
+                    </button>
+                    {layerTreeRows.map(({ l, depth }) => (
+                      <div
+                        key={l.id}
+                        className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] transition border ${editorLayerId === l.id ? 'bg-cyan-500/20 border-cyan-400/40 text-cyan-200' : 'border-transparent text-white/70 hover:bg-white/5'}`}
+                        style={{ marginLeft: depth * 12 }}
+                      >
+                        <button
+                          onClick={() => onEditorLayerChange(editorLayerId === l.id ? null : l.id)}
+                          className="flex-1 text-left truncate cursor-pointer"
+                          title={l.id}
+                        >
+                          {l.name || l.id} <span className="text-white/40">({layerNoteCount(l.id)})</span>
+                        </button>
+                        {/* 音符色/速率已去掉 UI：均由事件（note_color_change / speed_change）驱动，
+                            图层字段仅作旧谱兼容。 */}
+                        <button onClick={() => handleRenameLayer(l.id)} className="px-1 text-white/40 hover:text-cyan-300 cursor-pointer" title={t('editor.layer.renamePrompt')}>✎</button>
+                        <button onClick={() => handleDeleteLayer(l.id)} className="px-1 text-white/40 hover:text-red-300 cursor-pointer" title="✕">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[9px] text-white/40 leading-snug">{t('editor.layer.hint')}</p>
+                </div>
+              )}
+            </div>
+
             {/* === Events Section === */}
             <div className={sectionClass}>
               <button onClick={() => toggleSection('events')} className={sectionHeaderClass}>
@@ -1884,7 +2223,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               {sectionOpen.events && (
                 <div className="p-3 space-y-2 border-t border-white/10">
                   <div className="text-[10px] text-white/50">
-                    {t('editor.addEventAtBeat')} (<LiveBeat />):
+                    {t('editor.addEventAtBeat')} (<LiveBeat />) · {t('editor.evt.target')}
+                    <span className="text-cyan-300"> {eventTargetName}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button onClick={() => handleAddEvent('speed_change')} className="py-1.5 px-2 rounded glass-btn border-purple-400/40 text-purple-300 hover:text-purple-200 text-[11px] transition cursor-pointer">
@@ -1898,6 +2238,9 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                     </button>
                     <button onClick={() => handleAddEvent('bg_change')} className="py-1.5 px-2 rounded glass-btn border-cyan-400/40 text-cyan-300 hover:text-emerald-200 text-[11px] transition cursor-pointer">
                       {t('editor.evt.bg')}
+                    </button>
+                    <button onClick={() => handleAddEvent('offset_change')} className="py-1.5 px-2 rounded glass-btn border-pink-400/40 text-pink-300 hover:text-pink-200 text-[11px] transition cursor-pointer">
+                      {t('editor.evt.offset')}
                     </button>
                   </div>
 
@@ -1973,6 +2316,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                     <label className="text-[10px] text-white/50">{t('editor.fBgStart')}<input type="color" value={chart.metadata.bgScheme.gradientStart || '#050c1e'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, gradientStart: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
                     <label className="text-[10px] text-white/50">{t('editor.fBgEnd')}<input type="color" value={chart.metadata.bgScheme.gradientEnd || '#1b072c'} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, bgScheme: { ...chart.metadata.bgScheme, gradientEnd: e.target.value } } })} className="mt-1 w-full h-8 bg-transparent cursor-pointer" /></label>
                   </div>
+                  {/* 背景媒体（图片/视频）不再属于谱面：由歌曲目录约定文件
+                     （bg.jpg / bga.mp4）提供，随歌曲走，便于打包分享与离线游玩。 */}
                   <div className="grid grid-cols-2 gap-2 pt-1 text-[11px] text-white/70">
                     {(['bloom', 'particles', 'projection', 'gridLines'] as const).map((k) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" checked={!!chart.metadata.effectToggles[k]} onChange={(e) => onUpdateChart({ ...chart, metadata: { ...chart.metadata, effectToggles: { ...chart.metadata.effectToggles, [k]: e.target.checked } } })} className="accent-cyan-400" />{k}</label>)}
                   </div>
@@ -2060,7 +2405,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 <span className="flex items-center gap-1.5"><FileDown size={12} /> {t('editor.importExport')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.importExport ? '−' : '+'}</span>
               </button>
-              {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button></div>}
+              {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button><div className="pt-1 mt-1 border-t border-white/10 space-y-1.5"><p className="text-[10px] text-white/40 leading-snug">{t('editor.attachMediaHint')}</p>{([['bgImage', t('editor.attachBgImage'), 'image/*'], ['bgVideo', t('editor.attachBgVideo'), 'video/mp4,video/*'], ['storyboard', t('editor.attachStoryboard'), '.js,text/javascript']] as const).map(([kind, label, accept]) => (<div key={kind} className="flex items-center gap-1"><label className="flex-1 min-w-0 text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {label}<input type="file" accept={accept} onChange={(e) => handleMediaUpload(kind, e)} className="hidden" /></label>{onDetachMedia && <button onClick={() => onDetachMedia(kind)} className="shrink-0 px-2 py-1.5 rounded glass-btn border-white/15 text-white/50 hover:text-red-300 transition cursor-pointer" title={t('editor.detachMedia')}><X size={11} /></button>}</div>))}</div></div>}
             </div>
 
             <button
@@ -2100,6 +2445,56 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 )}
                 <button
                   onClick={() => setShowCheck(false)}
+                  className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 text-xs transition"
+                >
+                  {t('editor.chartCheckClose')}
+                </button>
+              </div>
+            )}
+            {/* 偏移变更的全量复检结果（§4.4）：防抖自动重算，列出越界音符与两种修复 */}
+            {showOffsetIssues && offsetIssues.length > 0 && (
+              <div className="mt-2 rounded-xl glass-sub border-pink-400/25 p-3 space-y-2">
+                <div className="text-[11px] text-pink-200 font-bold">
+                  {t('editor.offsetRecheckTitle', { n: offsetIssues.length })}
+                </div>
+                <div className="text-[9px] text-white/40 leading-snug">
+                  {t('editor.offsetRecheckHint')}
+                </div>
+                <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+                  {offsetIssues.map((it, idx) => (
+                    <div key={idx} className="rounded-lg bg-white/5 border border-white/10 p-2 space-y-1">
+                      <button
+                        onClick={() => { onSeekBeat(it.beat); onSelectNote(it.noteId); }}
+                        className="w-full text-left cursor-pointer"
+                      >
+                        <div className="text-[10px] font-bold text-pink-300">
+                          {it.nodeIdx === 0 ? t('editor.checkTypeNote') : t('editor.nodeN', { n: it.nodeIdx })}
+                          {' '}{it.noteId}
+                        </div>
+                        <div className="text-[11px] text-white/80 font-mono">
+                          x={it.landing.x.toFixed(2)}, y={it.landing.y.toFixed(2)}
+                        </div>
+                      </button>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => applyOffsetFix(it, 'keep')}
+                          disabled={!it.keepBase}
+                          className="flex-1 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-cyan-200 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {t('editor.offsetFixKeep')}
+                        </button>
+                        <button
+                          onClick={() => applyOffsetFix(it, 'clamp')}
+                          className="flex-1 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-cyan-200 transition cursor-pointer"
+                        >
+                          {t('editor.offsetFixClamp')}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setShowOffsetIssues(false)}
                   className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 text-xs transition"
                 >
                   {t('editor.chartCheckClose')}
@@ -2182,6 +2577,131 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             </div>
           </div>
 
+          {/* 链属性（默认收起）：真实性三态（假音符一定不计分）/ 图层 / 坐标参考系 / 触发器 */}
+          <div className="mb-1.5 rounded-lg glass-sub border-white/10">
+            <button
+              onClick={() => setChainPropsOpen(!chainPropsOpen)}
+              className="w-full flex items-center justify-between px-2 py-1.5 text-[10px] text-white/60 hover:text-white/90 transition cursor-pointer"
+            >
+              <span>{t('editor.chainProps')}</span>
+              <span className="text-cyan-300/80">{chainPropsOpen ? '−' : '+'}</span>
+            </button>
+            {chainPropsOpen && (
+              <div className="p-2 pt-0 space-y-2">
+                {/* 真实性三态：真（正常判定计分）/ 假（不判定不计分，纯视觉）/ 不计分（判定但不计分）。 */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-white/50 w-16 shrink-0">{t('editor.authenticity')}</span>
+                  {(['real', 'fake', 'noScore'] as const).map((v) => {
+                    const cur = selectedNote.fake ? 'fake' : selectedNote.noScore ? 'noScore' : 'real';
+                    const on = cur === v;
+                    const label = v === 'real' ? t('editor.note.real') : v === 'fake' ? t('editor.note.fake') : t('editor.note.noScore');
+                    return (
+                      <button
+                        key={v}
+                        onClick={() => handleModifySelected(
+                          v === 'real' ? { fake: false, noScore: false } : v === 'fake' ? { fake: true, noScore: true } : { fake: false, noScore: true },
+                        )}
+                        className={`px-2 py-0.5 rounded text-[10px] border transition cursor-pointer ${on ? 'bg-white/20 border-white/50 text-white' : 'bg-transparent border-white/20 text-white/40 hover:text-white/70'}`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* 图层（原头部下拉，移入链属性） */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-white/50 w-16 shrink-0">{t('editor.layer.moveTo')}</span>
+                  <GlassDropdown<string>
+                    value={selectedNote.layerId ?? ''}
+                    options={[
+                      { value: '', label: t('editor.layer.defaultRoot') },
+                      ...layerList.map((l) => ({ value: l.id, label: l.name || l.id })),
+                    ]}
+                    onChange={(v) => handleModifySelected({ layerId: v || undefined })}
+                    className="flex-1 min-w-0"
+                  />
+                </div>
+                {/* 坐标参考系：屏幕坐标（默认，所见即所得）/ 基坐标（存储值，可越界） */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-white/50 w-16 shrink-0">{t('editor.coordFrame')}</span>
+                  <GlassDropdown<'screen' | 'base'>
+                    value={coordFrame}
+                    options={[
+                      { value: 'screen', label: t('editor.coordScreen') },
+                      { value: 'base', label: t('editor.coordBase') },
+                    ]}
+                    onChange={setCoordFrame}
+                    className="flex-1 min-w-0"
+                  />
+                </div>
+                {/* 音符触发器（§3.4）：命中 / 漏掉时触发的事件。
+                    MVP：每条只配一个内联动作；按判定等级细分与 { ref } 引用走 JSON。 */}
+                <div className="space-y-1">
+                  <div className="text-[10px] text-white/50">{t('editor.note.trigger')}</div>
+            {(['hit', 'miss'] as const).map((kind) => {
+              const evt = triggerEventOf(selectedNote, kind);
+              const type = evt?.eventType ?? '';
+              const setType = (v: string) => {
+                if (!v) return setTriggerEvent(kind, undefined);
+                if (v === 'text_display') return setTriggerEvent(kind, { eventType: 'text_display', text: evt?.text ?? 'Text' });
+                if (v === 'note_color_change') return setTriggerEvent(kind, { eventType: 'note_color_change', noteColor: evt?.noteColor ?? '#ff2df7' });
+                return setTriggerEvent(kind, { eventType: 'bg_change', gradientStart: evt?.gradientStart ?? '#050c1e', gradientEnd: evt?.gradientEnd ?? '#2d0a3e' });
+              };
+              return (
+                <div key={kind} className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-white/50 w-8 shrink-0">
+                    {kind === 'hit' ? t('editor.triggerOnHit') : t('editor.triggerOnMiss')}
+                  </span>
+                  <GlassDropdown<string>
+                    value={type}
+                    options={[
+                      { value: '', label: t('editor.triggerNone') },
+                      { value: 'text_display', label: t('editor.evt.text') },
+                      { value: 'note_color_change', label: t('editor.evt.noteColor') },
+                      { value: 'bg_change', label: t('editor.evt.bg') },
+                    ]}
+                    onChange={setType}
+                  />
+                  {type === 'text_display' && (
+                    <input
+                      type="text"
+                      value={evt?.text ?? ''}
+                      onChange={(e) => setTriggerEvent(kind, { eventType: 'text_display', text: e.target.value })}
+                      className="flex-1 min-w-0 glass-input border border-white/12 rounded px-1 py-0.5 text-[10px]"
+                    />
+                  )}
+                  {type === 'note_color_change' && (
+                    <input
+                      type="color"
+                      value={evt?.noteColor ?? '#ff2df7'}
+                      onChange={(e) => setTriggerEvent(kind, { eventType: 'note_color_change', noteColor: e.target.value })}
+                      className="w-6 h-5 bg-transparent cursor-pointer rounded border border-white/20"
+                    />
+                  )}
+                  {type === 'bg_change' && (
+                    <>
+                      <input
+                        type="color"
+                        value={evt?.gradientStart ?? '#050c1e'}
+                        onChange={(e) => setTriggerEvent(kind, { eventType: 'bg_change', gradientStart: e.target.value, gradientEnd: evt?.gradientEnd ?? '#2d0a3e' })}
+                        className="w-6 h-5 bg-transparent cursor-pointer rounded border border-white/20"
+                      />
+                      <input
+                        type="color"
+                        value={evt?.gradientEnd ?? '#2d0a3e'}
+                        onChange={(e) => setTriggerEvent(kind, { eventType: 'bg_change', gradientStart: evt?.gradientStart ?? '#050c1e', gradientEnd: e.target.value })}
+                        className="w-6 h-5 bg-transparent cursor-pointer rounded border border-white/20"
+                      />
+                    </>
+                  )}
+                </div>
+              );
+            })}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Head node box — click anywhere in the row (text, padding) to select
               (first click) or seek (second click on the already-selected head).
               Clicks on inputs/buttons are ignored so editing never jumps.
@@ -2201,16 +2721,18 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
             <NumField
-              value={liveDrag && liveDrag.id === selectedNote.id ? liveDrag.x : selectedNote.x}
-              onCommit={(v) => handleModifySelected({ x: v ?? 0 })}
-              step={0.1} min={-2.4} max={2.4}
+              value={toFrameX(liveDrag && liveDrag.id === selectedNote.id ? liveDrag.x : selectedNote.x, selectedNote.layerId, selectedNote.beat)}
+              onCommit={(v) => handleModifySelected({ x: toBaseX(v ?? 0, selectedNote.layerId, selectedNote.beat) })}
+              step={0.1}
+              {...(coordFrame === 'screen' ? { min: -2.4, max: 2.4 } : {})}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
             <NumField
-              value={liveDrag && liveDrag.id === selectedNote.id ? liveDrag.y : selectedNote.y}
-              onCommit={(v) => handleModifySelected({ y: v ?? 0 })}
-              step={0.1} min={-1.5} max={1.5}
+              value={toFrameY(liveDrag && liveDrag.id === selectedNote.id ? liveDrag.y : selectedNote.y, selectedNote.layerId, selectedNote.beat)}
+              onCommit={(v) => handleModifySelected({ y: toBaseY(v ?? 0, selectedNote.layerId, selectedNote.beat) })}
+              step={0.1}
+              {...(coordFrame === 'screen' ? { min: -1.5, max: 1.5 } : {})}
               placeholder="0"
               className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
             />
@@ -2257,16 +2779,18 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
               <NumField
-                value={cl ? cl.x : sn.x}
-                onCommit={(v) => handlePatchSlideNode(i, { x: v ?? 0 })}
-                step={0.1} min={-2.4} max={2.4}
+                value={toFrameX(cl ? cl.x : sn.x, selectedNote.layerId, sn.beat)}
+                onCommit={(v) => handlePatchSlideNode(i, { x: toBaseX(v ?? 0, selectedNote.layerId, sn.beat) })}
+                step={0.1}
+                {...(coordFrame === 'screen' ? { min: -2.4, max: 2.4 } : {})}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
               <NumField
-                value={cl ? cl.y : sn.y}
-                onCommit={(v) => handlePatchSlideNode(i, { y: v ?? 0 })}
-                step={0.1} min={-1.5} max={1.5}
+                value={toFrameY(cl ? cl.y : sn.y, selectedNote.layerId, sn.beat)}
+                onCommit={(v) => handlePatchSlideNode(i, { y: toBaseY(v ?? 0, selectedNote.layerId, sn.beat) })}
+                step={0.1}
+                {...(coordFrame === 'screen' ? { min: -1.5, max: 1.5 } : {})}
                 placeholder="0"
                 className="col-span-3 glass-input border border-white/12 rounded px-1.5 py-0.5 text-cyan-300 w-full placeholder:text-white/25"
               />
@@ -2295,8 +2819,8 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
           <div className="grid grid-cols-12 gap-1.5 text-[10px] text-white/40 font-mono px-2 mb-2">
             <span className="col-span-2" />
             <span className="col-span-3">Beat</span>
-            <span className="col-span-3">X</span>
-            <span className="col-span-3">Y</span>
+            <span className="col-span-3">X·{coordFrame === 'screen' ? t('editor.coordScreen') : t('editor.coordBase')}</span>
+            <span className="col-span-3">Y·{coordFrame === 'screen' ? t('editor.coordScreen') : t('editor.coordBase')}</span>
             <span className="col-span-1" />
           </div>
 
@@ -2434,63 +2958,32 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
         </div>
 
         <div className="relative w-full flex flex-col items-center">
-          <button
-            onClick={() => { setRateMenuOpen((v) => !v); setSnapMenuOpen(false); }}
-            className={`min-w-16 px-3 py-2 rounded-xl glass-btn border-cyan-400/40 text-cyan-200 font-mono font-black text-sm hover:text-cyan-100 transition cursor-pointer shadow-lg shadow-cyan-500/10 ${playbackRate !== 1 ? 'ring-1 ring-cyan-400/60' : ''}`}
-            title={t('editor.rateBtn')}
-          >
-            {RATE_OPTIONS.find((o) => Math.abs(o.value - playbackRate) < 0.00001)?.label ?? '1x'}
-          </button>
-          {rateMenuOpen && (
-            <div className="glass-panel-strong absolute top-11 right-0 w-28 p-1.5 rounded-xl border-white/15 z-50 space-y-1">
-              {RATE_OPTIONS.map(({ label, value }) => {
-                const active = Math.abs(playbackRate - value) < 0.00001;
-                return (
-                  <button
-                    key={value}
-                    onClick={() => { onSetPlaybackRate(value); setRateMenuOpen(false); }}
-                    className={`w-full px-2 py-1.5 rounded-lg text-left text-[11px] font-mono transition cursor-pointer ${active ? 'bg-cyan-500/25 text-cyan-200' : 'text-white/70 hover:bg-white/10 hover:text-white'}`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          <GlassDropdown<string>
+            value={String(RATE_OPTIONS.find((o) => Math.abs(o.value - playbackRate) < 0.00001)?.value ?? '1')}
+            options={RATE_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))}
+            onChange={(v) => onSetPlaybackRate(parseFloat(v))}
+            trigger={RATE_OPTIONS.find((o) => Math.abs(o.value - playbackRate) < 0.00001)?.label ?? '1x'}
+            triggerClassName={`min-w-16 px-3 py-2 rounded-xl glass-btn border-cyan-400/40 text-cyan-200 font-mono font-black text-sm hover:text-cyan-100 transition cursor-pointer shadow-lg shadow-cyan-500/10 ${playbackRate !== 1 ? 'ring-1 ring-cyan-400/60' : ''}`}
+            triggerTitle={t('editor.rateBtn')}
+            align="right"
+            panelClassName="w-28 p-1.5 space-y-1"
+          />
         </div>
 
         <div className="relative w-full flex flex-col items-center mt-2">
-          <button
-            onClick={() => { setSnapMenuOpen((v) => !v); setRateMenuOpen(false); }}
-            className="min-w-16 px-3 py-2 rounded-xl glass-btn border-cyan-400/40 text-cyan-200 font-mono font-black text-sm hover:text-cyan-100 transition cursor-pointer shadow-lg shadow-cyan-500/10"
-            title={t('editor.snapBtn')}
-          >
-            {[
-              { label: '1/1', val: 1 }, { label: '1/2', val: 0.5 }, { label: '1/3', val: 0.333333333333 },
-              { label: '1/4', val: 0.25 }, { label: '1/6', val: 0.166666666667 }, { label: '1/8', val: 0.125 },
-              { label: '1/12', val: 0.083333333333 }, { label: '1/16', val: 0.0625 }, { label: 'Free', val: 0.01 },
-            ].find((o) => Math.abs(o.val - snapSubdivision) < 0.00001)?.label ?? t('editor.snap')}
-          </button>
-          {snapMenuOpen && (
-            <div className="glass-panel-strong absolute top-11 right-0 w-28 p-1.5 rounded-xl border-white/15 z-50 space-y-1">
-              {[
-                { label: `1/1 ${beatUnit}`, val: 1 }, { label: `1/2 ${beatUnit}`, val: 0.5 }, { label: `1/3 ${beatUnit}`, val: 0.333333333333 },
-                { label: `1/4 ${beatUnit}`, val: 0.25 }, { label: `1/6 ${beatUnit}`, val: 0.166666666667 }, { label: `1/8 ${beatUnit}`, val: 0.125 },
-                { label: `1/12 ${beatUnit}`, val: 0.083333333333 }, { label: `1/16 ${beatUnit}`, val: 0.0625 }, { label: t('editor.free'), val: 0.01 },
-              ].map(({ label, val }) => {
-                const active = Math.abs(snapSubdivision - val) < 0.00001;
-                return (
-                  <button
-                    key={val}
-                    onClick={() => { onSetSnapSubdivision(val); setSnapMenuOpen(false); }}
-                    className={`w-full px-2 py-1.5 rounded-lg text-left text-[11px] font-mono transition cursor-pointer ${active ? 'bg-cyan-500/25 text-cyan-200' : 'text-white/70 hover:bg-white/10 hover:text-white'}`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          <GlassDropdown<string>
+            value={String(SNAP_CHOICES.find((o) => Math.abs(o.val - snapSubdivision) < 0.00001)?.val ?? '')}
+            options={SNAP_CHOICES.map((o) => ({
+              value: String(o.val),
+              label: o.val === 0.01 ? t('editor.free') : `${o.label} ${beatUnit}`,
+            }))}
+            onChange={(v) => onSetSnapSubdivision(parseFloat(v))}
+            trigger={SNAP_CHOICES.find((o) => Math.abs(o.val - snapSubdivision) < 0.00001)?.label ?? t('editor.snap')}
+            triggerClassName="min-w-16 px-3 py-2 rounded-xl glass-btn border-cyan-400/40 text-cyan-200 font-mono font-black text-sm hover:text-cyan-100 transition cursor-pointer shadow-lg shadow-cyan-500/10"
+            triggerTitle={t('editor.snapBtn')}
+            align="right"
+            panelClassName="w-28 p-1.5 space-y-1"
+          />
         </div>
 
         <div className="text-[9px] text-white/40 font-mono leading-none mt-0.5">{t('editor.tune')}</div>
@@ -2563,6 +3056,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
     text_display: t('editor.evt.text'),
     note_color_change: t('editor.evt.noteColor'),
     bg_change: t('editor.evt.bg'),
+    offset_change: t('editor.evt.offset'),
   };
 
   const typeColor: Record<EventType, { border: string; text: string }> = {
@@ -2570,6 +3064,7 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
     text_display: { border: 'border-amber-400/40', text: 'text-amber-300 hover:text-amber-200' },
     note_color_change: { border: 'border-cyan-400/40', text: 'text-cyan-300 hover:text-cyan-200' },
     bg_change: { border: 'border-cyan-400/40', text: 'text-cyan-300 hover:text-emerald-200' },
+    offset_change: { border: 'border-pink-400/40', text: 'text-pink-300 hover:text-pink-200' },
   };
 
   const color = typeColor[event.eventType];
@@ -2623,6 +3118,32 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                 className="w-full glass-input border border-white/12 rounded px-2 py-1 text-cyan-200 text-xs font-mono"
               />
             </div>
+          )}
+          {event.eventType === 'speed_change' && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldSpeedTrans')}</label>
+                  <NumField
+                    value={event.duration ?? 0}
+                    placeholder="0"
+                    step="any"
+                    min={0}
+                    onCommit={(v) => onUpdate({ duration: Math.max(0, v ?? 0) })}
+                    className="w-full glass-input border border-white/12 rounded px-2 py-1 text-purple-200 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldEasing')}</label>
+                  <GlassDropdown<EasingType>
+                    value={event.easing ?? 'linear'}
+                    options={EASING_TYPES.map((es) => ({ value: es, label: es }))}
+                    onChange={(v) => onUpdate({ easing: v })}
+                  />
+                </div>
+              </div>
+              <p className="text-[9px] text-white/40 leading-snug">{t('editor.speedTransHint')}</p>
+            </>
           )}
           {event.eventType === 'text_display' && (
             <>
@@ -2725,8 +3246,56 @@ const EventRow: React.FC<EventRowProps> = ({ event, onSeek, onUpdate, onDelete }
                     className="w-full h-7 bg-transparent cursor-pointer"
                   />
                 </div>
-                <p>*{t('editor.notImpl')}</p>
               </div>
+              {/* bg_change 只改渐变色；媒体背景由歌曲目录约定文件提供，事件不再切换。 */}
+            </>
+          )}
+          {event.eventType === 'offset_change' && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldOffsetX')}</label>
+                  <NumField
+                    value={event.offsetX ?? 0}
+                    placeholder="0"
+                    step="any"
+                    onCommit={(v) => onUpdate({ offsetX: v ?? 0 })}
+                    className="w-full glass-input border border-white/12 rounded px-2 py-1 text-pink-200 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldOffsetY')}</label>
+                  <NumField
+                    value={event.offsetY ?? 0}
+                    placeholder="0"
+                    step="any"
+                    onCommit={(v) => onUpdate({ offsetY: v ?? 0 })}
+                    className="w-full glass-input border border-white/12 rounded px-2 py-1 text-pink-200 text-xs font-mono"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldTransDuration')}</label>
+                  <NumField
+                    value={event.duration ?? 0}
+                    placeholder="0"
+                    step="any"
+                    min={0}
+                    onCommit={(v) => onUpdate({ duration: Math.max(0, v ?? 0) })}
+                    className="w-full glass-input border border-white/12 rounded px-2 py-1 text-pink-200 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-0.5">{t('editor.fieldEasing')}</label>
+                  <GlassDropdown<EasingType>
+                    value={event.easing ?? 'linear'}
+                    options={EASING_TYPES.map((es) => ({ value: es, label: es }))}
+                    onChange={(v) => onUpdate({ easing: v })}
+                  />
+                </div>
+              </div>
+              <p className="text-[9px] text-white/40 leading-snug">{t('editor.offsetHint')}</p>
             </>
           )}
         </div>

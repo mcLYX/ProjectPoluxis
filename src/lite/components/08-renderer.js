@@ -319,11 +319,36 @@
     ctx.restore();
   }
   /* 背景渐变：使用 game.bgStart / game.bgEnd 这一「当前背景」可变状态，
-   * 使 bg_change 事件能在游戏过程中实时切换渐变（与完整版行为一致）。 */
+   * 使 bg_change 事件能在游戏过程中实时切换渐变（与完整版行为一致）。
+   * 背景媒体层（§3.6）：Lite 按「只做图片」的决策实现，经 drawImage 叠在渐变上。 */
+  var bgImgCacheLite = {};
+  function setBgImageLite(src) {
+    if (!src) { game.bgImage = null; game.bgImgEl = null; return; }
+    game.bgImage = src;
+    var img = bgImgCacheLite[src];
+    if (!img) { img = new Image(); img.src = src; bgImgCacheLite[src] = img; }
+    game.bgImgEl = img;
+  }
   function drawBackground(chart) {
     var g = ctx.createLinearGradient(0, 0, 0, view.h);
     g.addColorStop(0, game.bgStart);
     g.addColorStop(1, game.bgEnd);
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, view.w, view.h);
+    var img = game.bgImgEl;
+    if (img && img.complete && img.naturalWidth > 0) {
+      var vw = img.naturalWidth, vh = img.naturalHeight;
+      var dx = 0, dy = 0, dw = view.w, dh = view.h;
+      if (game.bgFit !== 'stretch') {
+        var s = game.bgFit === 'contain'
+          ? Math.min(view.w / vw, view.h / vh)
+          : Math.max(view.w / vw, view.h / vh);
+        dw = vw * s; dh = vh * s;
+        dx = (view.w - dw) / 2; dy = (view.h - dh) / 2;
+      }
+      ctx.save();
+      ctx.globalAlpha = game.bgOpacity;
+      ctx.drawImage(img, dx, dy, dw, dh);
+      ctx.restore();
+    }
   }

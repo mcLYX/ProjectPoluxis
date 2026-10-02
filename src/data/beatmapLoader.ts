@@ -197,6 +197,38 @@ export async function loadAudioForSong(item: SongItem, audioManager: any): Promi
   }
 }
 
+/**
+ * 解析歌曲的背景媒体为可直接加载的地址（开局传给渲染器）。
+ * - idb:// → 读库生成 blob URL；相对路径 → 按索引根重写；http(s)/blob 原样。
+ * - 渲染侧优先级：video > image > 内置渐变，这里两者都解析、由渲染器取舍。
+ * - 没有任何背景媒体时返回 undefined。
+ */
+export async function resolveSongBgMedia(
+  song: Pick<SongItem, 'bgImage' | 'bgVideo'>,
+): Promise<{ image?: string; video?: string } | undefined> {
+  if (!song.bgImage && !song.bgVideo) return undefined;
+  const [image, video] = await Promise.all([
+    song.bgImage ? resolveCoverUrl(song.bgImage) : Promise.resolve(''),
+    song.bgVideo ? resolveCoverUrl(song.bgVideo) : Promise.resolve(''),
+  ]);
+  const out: { image?: string; video?: string } = {};
+  if (video) out.video = video;
+  else if (image) out.image = image;
+  if (!out.video && !out.image) return undefined;
+  return out;
+}
+
+/**
+ * 解析故事板脚本（约定 `story.js`，§3.7）为可 `import()` 的地址。
+ * idb:// → blob URL（zip 导入场景）；相对路径 → 按索引根重写。无故事板返回 undefined。
+ */
+export async function resolveStoryboardUrl(
+  song: Pick<SongItem, 'storyboard'>,
+): Promise<string | undefined> {
+  if (!song.storyboard) return undefined;
+  return (await resolveCoverUrl(song.storyboard)) || undefined;
+}
+
 // ---------- 在线服务器 / 清单规范化 ----------
 
 /**
@@ -237,6 +269,9 @@ function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
       cover: abs(o.cover),
       accentColor: asStr(o.accentColor) || undefined,
       audio: abs(o.audio),
+      bgImage: abs(o.bgImage) || undefined,
+      bgVideo: abs(o.bgVideo) || undefined,
+      storyboard: abs(o.storyboard) || undefined,
       basePath: asStr(o.basePath),
       difficulties: Array.isArray(o.difficulties) ? o.difficulties.map(normDifficulty) : [],
     };
@@ -332,6 +367,9 @@ function resolveNode(n: BeatmapItem): BeatmapItem {
     ...n,
     cover: resolveRef(n.cover),
     audio: resolveRef(n.audio),
+    bgImage: n.bgImage ? resolveRef(n.bgImage) : undefined,
+    bgVideo: n.bgVideo ? resolveRef(n.bgVideo) : undefined,
+    storyboard: n.storyboard ? resolveRef(n.storyboard) : undefined,
     difficulties: n.difficulties.map((d) => ({ ...d, chartFile: resolveRef(d.chartFile) })),
   };
 }
@@ -356,6 +394,9 @@ function collectLocalRefs(albums: AlbumItem[]): string[] {
       n.songs.forEach(walk);
     } else {
       if (n.audio?.startsWith('idb://')) refs.push(n.audio);
+      if (n.bgImage?.startsWith('idb://')) refs.push(n.bgImage);
+      if (n.bgVideo?.startsWith('idb://')) refs.push(n.bgVideo);
+      if (n.storyboard?.startsWith('idb://')) refs.push(n.storyboard);
       n.difficulties.forEach((d) => {
         if (d.chartFile?.startsWith('idb://')) refs.push(d.chartFile);
       });

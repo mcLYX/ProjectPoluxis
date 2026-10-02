@@ -5,7 +5,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 import { excludePublicContent } from "./scripts/exclude-public-content.mjs";
-import packageJson from "./package.json";
+import packageJson from "./package.json" with { type: "json" };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -246,35 +246,38 @@ export default defineConfig({
   // 产物语法目标：es2019（≈ Chrome 73）。
   // 之前未设置 → 用默认的 'modules'（chrome87 基线），产物里保留 ES2020 语法
   // （可选链 ?. / 空值合并 ?? 等），老 Chrome 直接解析失败、整个 module 一行都
-  // 跑不了，于是"支持 ES6+WebGL 却打不开完整版"。降级到 es2019 后这些语法会被
-  // esbuild 转译，失败模式从"无法检测的解析错误"变成"可以检测的 API 缺失"。
-  // 配套：public/capability.js 用与 es2019 对齐的语法 canary + 真实 API 检测。
-  esbuild: {
-    target: "es2019",
-  },
+  // 跑不了，于是"支持 ES6+WebGL 却打不开完整版"。Vite 8 改用 Rolldown/Oxc 转译，
+  // 由 build.target 与 optimizeDeps 的 target 共同控制降级到 es2019，失败模式从
+  // "无法检测的解析错误"变成"可以检测的 API 缺失"。
+  // optimizeDeps 改用 Rolldown 预打包依赖，目标同样降到 es2019（dev 旧浏览器兼容）。
+  // 注：Vite 8 废弃 optimizeDeps.esbuildOptions，改用 optimizeDeps.rolldownOptions。
+  // rolldown 1.2.11 起 `output.target` 从类型中移除，代码降级改走顶层
+  // `transform.target`（oxc transformer，最低 es2015）。
   optimizeDeps: {
-    esbuildOptions: { target: "es2019" },
+    rolldownOptions: {
+      transform: { target: "es2019" },
+    },
   },
   build: {
     target: "es2019",
     cssTarget: "chrome73",
     assetsDir: "assets",
     chunkSizeWarningLimit: 1500,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         // 将体积最大的第三方库拆分到独立 chunk：
         // - three 单独成块（仅在进入游戏/编辑器时按需下载，不再被拽入首屏主链）。
         // - 常用依赖聚合到 vendor，利于浏览器缓存复用。
-        manualChunks: {
-          three: ["three"],
-          vendor: [
-            "react",
-            "react-dom",
-            "lucide-react",
-            "canvas-confetti",
-            "fflate",
-            "liquid-glass-react",
-          ],
+        // 注：Vite 8 移除 manualChunks 对象写法，改用函数形式（长期可迁 Rolldown advancedChunks）。
+        manualChunks(id) {
+          if (id.includes("node_modules/three/")) return "three";
+          if (
+            /[\\/]node_modules[\\/](react|react-dom|lucide-react|canvas-confetti|fflate|liquid-glass-react)[\\/]/.test(
+              id,
+            )
+          ) {
+            return "vendor";
+          }
         },
       },
     },

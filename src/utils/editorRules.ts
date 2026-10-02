@@ -27,7 +27,7 @@ import { safeStorage } from './storage';
  * 解释器为纯函数、不触碰 React / Three，也不使用 eval（安全）。
  */
 
-const NUMERIC_PROPS = ['beat', 'x', 'y', 'angle'] as const;
+const NUMERIC_PROPS = ['beat', 'x', 'y', 'basex', 'basey', 'angle'] as const;
 const STRING_PROPS = ['type', 'color', 'easing'] as const;
 const ALL_PROPS = [...NUMERIC_PROPS, ...STRING_PROPS] as const;
 
@@ -513,9 +513,17 @@ function compileLine(line: string): CompiledRule | null {
   return { cond, actions };
 }
 
-function assignProp(ctx: Ctx, name: string, raw: unknown): void {
+function assignProp(
+  ctx: Ctx,
+  name: string,
+  raw: unknown,
+  /** 赋值顺序表：x 与 basex 同时被赋值时，后写者胜（见 sanitizeDslResult）。 */
+  assignOrder: Map<string, number>,
+  order: number,
+): void {
   if ((NUMERIC_PROPS as readonly string[]).includes(name)) {
     ctx[name] = toNum(raw);
+    assignOrder.set(name, order);
     return;
   }
   // 字符串属性
@@ -545,33 +553,50 @@ function assignProp(ctx: Ctx, name: string, raw: unknown): void {
  *
  *  通用：inf / NaN / null / undefined、类型不对、值不合法 → 缺省值。
  *  - beat：允许所有非 inf 数字；值不合法时回退为未经脚本处理的原数据。
- *  - x：范围 ±2.4。小于 -2.4（含 -inf）→ -2.4；大于 2.4（含 inf）→ 2.4；非数 → 0。
- *  - y：范围 ±1.5，规则同 x。
+ *  - x / y：**屏幕坐标**（= base + 该音符时刻的图层偏移），范围 ±2.4 / ±1.5。
+ *  - basex / basey：**存储坐标 base**；被赋值且晚于 x / y 时优先生效（后写者胜）。
  *  - type：非法时回退原类型。
- *  - color / easing / angle：非必需参数，出问题（类型不对/值不合法）时结果中不放该键。 */
-function sanitizeDslResult(note: NoteData, ctx: Ctx): NoteData {
+ *  - color / easing / angle：非必需参数，出问题（类型不对/值不合法）时结果中不放该键。
+ *
+ *  ⚠️ ±2.4/±1.5 限制的是**合成后落点（显示坐标）**，不是存储坐标 base。
+ *  图层有偏移时 base 可以合法地越界（偏移 -1 时显示 2.4 的音符 base 是 3.4），
+ *  故裁剪必须在「显示坐标」上做：`clamp(base + offset) − offset`。
+ *  未给 offset 时等价于直接裁剪 base（旧行为）。 */
+function sanitizeDslResult(
+  note: NoteData,
+  ctx: Ctx,
+  off?: { x: number; y: number },
+  assignOrder?: Map<string, number>,
+): NoteData {
   // beat：范围 21 亿，否则回退原数据。之前只写inf会崩。
   const beat =
     typeof ctx.beat === 'number' && Number.isFinite(ctx.beat) && Math.abs(ctx.beat) < 2147483648
       ? (ctx.beat as number)
       : note.beat;
 
-  // x：±2.4。
-  let x = 0;
-  if (typeof ctx.x === 'number') {
-    if (Number.isFinite(ctx.x)) x = Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, ctx.x as number));
-    else if (ctx.x > 0) x = NOTE_X_RANGE; // +Inf
-    else if (ctx.x < 0) x = -NOTE_X_RANGE; // -Inf
-    // NaN → 0（>0 与 <0 均 false）
-  }
+  const ox = off ? off.x : 0;
+  const oy = off ? off.y : 0;
+  /** 裁剪**屏幕坐标**到 ±range，换算回 base。 */
+  const clampScreen = (v: number, range: number, o: number): number => {
+    if (!Number.isFinite(v)) return (v > 0 ? range : v < 0 ? -range : 0) - o;
+    return Math.max(-range, Math.min(range, v)) - o;
+  };
+  /** 裁剪 **base**（先转屏幕坐标再夹，最后换算回 base；等价旧的 clamp(base+o)−o）。 */
+  const clampBase = (v: number, range: number, o: number): number => clampScreen(v + o, range, o);
 
-  // y：±1.5。
+  // x：屏幕坐标 ±2.4；basex（base）被赋值且晚于 x 时优先（后写者胜）。
+  let x = 0;
+  const ordX = assignOrder?.get('x') ?? -1;
+  const ordBaseX = assignOrder?.get('basex') ?? -1;
+  if (ordBaseX > ordX && typeof ctx.basex === 'number') x = clampBase(ctx.basex, NOTE_X_RANGE, ox);
+  else if (typeof ctx.x === 'number') x = clampScreen(ctx.x, NOTE_X_RANGE, ox);
+
+  // y：屏幕坐标 ±1.5；basey 同上。
   let y = 0;
-  if (typeof ctx.y === 'number') {
-    if (Number.isFinite(ctx.y)) y = Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, ctx.y as number));
-    else if (ctx.y > 0) y = NOTE_Y_RANGE;
-    else if (ctx.y < 0) y = -NOTE_Y_RANGE;
-  }
+  const ordY = assignOrder?.get('y') ?? -1;
+  const ordBaseY = assignOrder?.get('basey') ?? -1;
+  if (ordBaseY > ordY && typeof ctx.basey === 'number') y = clampBase(ctx.basey, NOTE_Y_RANGE, oy);
+  else if (typeof ctx.y === 'number') y = clampScreen(ctx.y, NOTE_Y_RANGE, oy);
 
   // type：非法时回退原类型。
   const type: NoteType =
@@ -596,17 +621,34 @@ function sanitizeDslResult(note: NoteData, ctx: Ctx): NoteData {
   return out;
 }
 
-/** 对单个“新放置”的音符依次套用 DSL 全部规则（出错行静默跳过）。 */
-export function applyDslToNote(note: NoteData, dsl: string): NoteData {
+/**
+ * 对单个“新放置”的音符依次套用 DSL 全部规则（出错行静默跳过）。
+ *
+ * 坐标语义（§坐标参考系）：
+ *  - `x` / `y`：**屏幕坐标**（= base + 该音符所在图层在它自己时刻的合成偏移），
+ *    即「所见即所得」—— 图层有偏移时规则里的 x=2.4 就是屏幕上的 2.4；
+ *  - `basex` / `basey`：**存储坐标 base**（偏移下可合法越界）。
+ *    x 与 basex（y 与 basey）同时被赋值时，**脚本中后写者生效**。
+ *
+ * `offset`：该音符所在图层在它自己时刻的**合成偏移**。给了它，出口裁剪才能在
+ * 显示坐标上做（base 可合法越界，见 sanitizeDslResult 注释）。
+ */
+export function applyDslToNote(note: NoteData, dsl: string, offset?: { x: number; y: number }): NoteData {
+  const ox = offset ? offset.x : 0;
+  const oy = offset ? offset.y : 0;
   const ctx: Ctx = {
     beat: note.beat,
-    x: note.x,
-    y: note.y,
+    x: note.x + ox,
+    y: note.y + oy,
+    basex: note.x,
+    basey: note.y,
     type: note.type,
     color: note.color,
     angle: note.angle,
     easing: note.easing,
   };
+  const assignOrder = new Map<string, number>();
+  let order = 0;
   const lines = dsl.split('\n');
   for (const line of lines) {
     if (isCommentOrBlank(line)) continue;
@@ -615,14 +657,14 @@ export function applyDslToNote(note: NoteData, dsl: string): NoteData {
       if (!rule) continue;
       if (toBool(evalNode(rule.cond, ctx))) {
         for (const a of rule.actions) {
-          assignProp(ctx, a.name, evalNode(a.node, ctx));
+          assignProp(ctx, a.name, evalNode(a.node, ctx), assignOrder, order++);
         }
       }
     } catch {
       // 放置时不打断流程：非法行直接跳过（错误会在 lintDsl 中提示）
     }
   }
-  return sanitizeDslResult(note, ctx);
+  return sanitizeDslResult(note, ctx, offset, assignOrder);
 }
 
 /** 校验整段 DSL，返回带行号的语法/语义错误（用于 UI 提示）。 */

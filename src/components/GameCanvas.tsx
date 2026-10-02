@@ -2,10 +2,13 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import type { JudgeProjector } from '../types/storyboard';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
-import { getChartRuntime, scrollDistanceAt, scrollDistWindow } from '../utils/chartRuntime';
+import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt } from '../utils/chartRuntime';
+import { buildLayerTree, layerOffsetAt, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
+import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/triggers';
 import { createFrameGate } from '../utils/frameLimiter';
 import { qualityStore } from '../qualityStore';
 import { EASING_FNS } from '../utils/easing';
@@ -88,6 +91,13 @@ interface GameCanvasProps {
   defaultSkinJudgeWidth?: number;
   /** 画布后方的环境背景 DOM 层（App 内 `ambientBgRef`）。bg_change 事件据此实时更新渐变。 */
   ambientBgRef?: React.RefObject<HTMLDivElement | null>;
+  /** 判定面→屏幕投影函数的回写目标（故事板宿主经 `api.toScreen` 消费）。 */
+  projectorRef?: React.RefObject<JudgeProjector | null>;
+  /**
+   * 背景媒体（歌曲目录约定 bg.jpg / bga.mp4，开局由 App 解析传入）。
+   * 渲染优先级：video > image > 内置渐变；bg_change 事件只改渐变色，不再切换媒体。
+   */
+  bgMedia?: { image?: string; video?: string };
 }
 
 // 共享游戏常数（TAP_SIZE/SLIDE_HALF/BLOOM_LAYER/JUDGE_Z/判定窗口/ring 外观等）
@@ -96,6 +106,8 @@ interface GameCanvasProps {
 const SLIDE_PIPE_HALF = SLIDE_HALF * 0.82;
 const TOUCH_HIT_HALF = 1.0;
 const SLIDE_RED = '#ff0000';
+/** 图层偏移的零值（旧谱面恒为此），避免热路径分配。 */
+const ZERO_OFF = { x: 0, y: 0 };
 
 const CAMERA_VFOV = 52;
 // --- 渲染 / HUD 调参常量（P2-2：消除魔法数字）---
@@ -606,6 +618,7 @@ function liveMoveResolvedNote(noteIndex: Map<string, ResolvedNote>, id: string, 
 
 const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   chart,
+  bgMedia,
   viewportActive = true,
   isPlaying,
   isPaused,
@@ -637,6 +650,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   onApplyQuickCreateDelta,
   skinTextures,
   ambientBgRef,
+  projectorRef,
   defaultSkinInnerEnabled = true,
   defaultSkinOuterEnabled = false,
   defaultSkinOuterWidth = 0.05,
@@ -726,18 +740,137 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const currentTextRef = useRef<{ text: string; endTime: number | null; x?: number; y?: number; fontSize?: number; color?: string } | null>(null);
   const currentNoteColorRef = useRef<string | null>(null);
   const currentBgRef = useRef<{ gradientStart: string; gradientEnd: string } | null>(null);
-  /** 把一组背景配色应用到画布后方的环境背景 DOM 层（ambientBgRef）。
-   *  渐变公式与 App.tsx 中逐谱面基础背景保持一致，确保 bg_change 与基础背景视觉统一。 */
-  const applyAmbientBg = (scheme: { gradientStart: string; gradientEnd: string }) => {
+  /** 环境背景媒体层（§3.6）：image/video 双槽叠放，换背景时旧槽淡出新槽淡入。
+   *  命令式管理（不进 React state）——与该 DOM 层的既有用法一致。 */
+  const bgMediaRef = useRef<{
+    a: HTMLElement | null;
+    b: HTMLElement | null;
+    active: 'a' | 'b';
+    key: string;
+  }>({ a: null, b: null, active: 'a', key: '' });
+  /** 背景媒体 prop 镜像（开局取值用，避免闭包过期）。 */
+  const bgMediaPropRef = useRef(bgMedia);
+  bgMediaPropRef.current = bgMedia;
+  /** 媒体铺满方式 → CSS object-fit。 */
+  const bgFitCss = (fit?: string): string =>
+    fit === 'contain' ? 'contain' : fit === 'stretch' ? 'fill' : 'cover';
+  /**
+   * 把一组背景配色（可选叠加媒体层）应用到画布后方的环境背景 DOM 层（ambientBgRef）。
+   * 渐变公式与 App.tsx 中逐谱面基础背景保持一致，确保 bg_change 与基础背景视觉统一。
+   *
+   * `media`：
+   *  - `undefined` → 不动媒体层（纯配色事件：图片/视频背景之上改渐变底色）；
+   *  - `null` → 清除媒体层（回到纯渐变）；
+   *  - `{ type, src }` → 切换/设置媒体。`fadeSec > 0` 时交叉淡入淡出。
+   */
+  const applyAmbientBg = (
+    scheme: { gradientStart: string; gradientEnd: string },
+    media?: { type: 'image' | 'video'; src: string; fit?: string; opacity?: number } | null,
+    fadeSec = 0
+  ) => {
     const el = ambientBgRef?.current;
     if (!el) return;
     el.style.background =
       `radial-gradient(circle at 50% 50%, ${scheme.gradientEnd} 21.6%, ${scheme.gradientStart} 90%)`;
+    if (media === undefined) return;
+
+    const st = bgMediaRef.current;
+    const fade = Math.max(0, fadeSec);
+    const hide = (m: HTMLElement | null) => {
+      if (!m) return;
+      m.style.opacity = '0';
+      if (m instanceof HTMLVideoElement) m.pause();
+    };
+    if (!media) {
+      // 清除：两个槽都淡出（无过渡时立即移除，避免残留 DOM）。
+      if (fade <= 0) {
+        st.a?.remove();
+        st.b?.remove();
+        st.a = st.b = null;
+      } else {
+        hide(st.a);
+        hide(st.b);
+      }
+      st.key = '';
+      st.active = 'a';
+      return;
+    }
+
+    const key = `${media.type}|${media.src}`;
+    if (st.key === key) {
+      // 仅铺满方式/不透明度变化：就地更新活动槽样式。
+      const cur = st.active === 'a' ? st.a : st.b;
+      if (cur) {
+        cur.style.objectFit = bgFitCss(media.fit);
+        cur.style.opacity = String(media.opacity ?? 1);
+      }
+      return;
+    }
+
+    // 写入非活动槽 → 交叉淡入淡出（fade=0 时瞬时切换）。
+    const inactiveName = st.active === 'a' ? 'b' : 'a';
+    let slot = inactiveName === 'a' ? st.a : st.b;
+    if (!slot) {
+      slot =
+        media.type === 'video'
+          ? document.createElement('video')
+          : document.createElement('img');
+      slot.style.position = 'absolute';
+      slot.style.inset = '0';
+      slot.style.width = '100%';
+      slot.style.height = '100%';
+      el.appendChild(slot);
+      st[inactiveName] = slot;
+    }
+    slot.style.transition = fade > 0 ? `opacity ${fade}s ease` : 'none';
+    slot.style.objectFit = bgFitCss(media.fit);
+    slot.style.opacity = '0';
+    if (media.type === 'video') {
+      const v = slot as HTMLVideoElement;
+      if (v.getAttribute('src') !== media.src) {
+        v.src = media.src;
+        v.muted = true;
+        v.loop = true;
+        v.playsInline = true;
+        v.autoplay = true;
+      }
+      v.play().catch(() => { /* 自动播放被拒：静默（静音视频通常允许） */ });
+    } else {
+      (slot as HTMLImageElement).src = media.src;
+    }
+    // 触发一次布局后再设透明度，保证 CSS transition 生效。
+    void slot.offsetWidth;
+    slot.style.opacity = String(media.opacity ?? 1);
+    hide(st.active === 'a' ? st.a : st.b);
+    st.active = inactiveName;
+    st.key = key;
   };
-  /** 将环境背景恢复为当前谱面 metadata.bgScheme 的基础配色（开局 / 重置 / 反向 seek 后调用）。 */
+  /** 将环境背景恢复为基础配色 + 歌曲目录背景媒体（开局/重置/反向 seek 后调用）。
+   *  媒体来自 bgMedia prop（bg.jpg / bga.mp4），优先级 video > image；铺满 cover、不透明 1。 */
   const resetAmbientBg = () => {
     const bg = chartRef.current?.metadata.bgScheme;
-    if (bg) applyAmbientBg({ gradientStart: bg.gradientStart, gradientEnd: bg.gradientEnd });
+    if (!bg) return;
+    const m = bgMediaPropRef.current;
+    const media = m?.video
+      ? { type: 'video' as const, src: m.video, fit: 'cover', opacity: 1 }
+      : m?.image
+        ? { type: 'image' as const, src: m.image, fit: 'cover', opacity: 1 }
+        : null;
+    applyAmbientBg({ gradientStart: bg.gradientStart, gradientEnd: bg.gradientEnd }, media);
+  };
+  /**
+   * 统一应用一条 bg_change（供时间轴事件、反向 seek 重建与触发器共用）：
+   * 只改渐变配色；媒体层由歌曲文件决定，事件不再切换（旧字段读取时忽略）。
+   */
+  const applyBgEvent = (evt: {
+    gradientStart?: string; gradientEnd?: string; duration?: number;
+  }) => {
+    const base = currentBgRef.current ?? chartRef.current?.metadata.bgScheme
+      ?? { gradientStart: '#050c1e', gradientEnd: '#1a0d2e' };
+    const gs = evt.gradientStart || base.gradientStart;
+    const ge = evt.gradientEnd || base.gradientEnd;
+    currentBgRef.current = { gradientStart: gs, gradientEnd: ge };
+    applyAmbientBg({ gradientStart: gs, gradientEnd: ge }, undefined, evt.duration ?? 0);
   };
   const eventTextRef = useRef<HTMLDivElement>(null);
   // Cached last-applied text styles so we only touch the DOM when a value
@@ -849,6 +982,51 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     for (const n of resolvedNotes) idx.set(n.id, n);
     noteIndexRef.current = idx;
   }, [resolvedNotes]);
+
+  // —— 图层（Layer）运行时 ——
+  // 树随谱面重建；偏移数组按图层数预分配，tick 每帧原地更新（热路径零分配）。
+  // note→图层下标按对象缓存（谱面重解析产生新对象时随树一起失效）。
+  const layerTreeRef = useRef<LayerTree | null>(null);
+  const layerOffsRef = useRef<Array<{ x: number; y: number }>>([ZERO_OFF]);
+  const noteLayerCacheRef = useRef<WeakMap<object, number>>(new WeakMap());
+  useEffect(() => {
+    const tree = buildLayerTree(chart);
+    layerTreeRef.current = tree;
+    layerOffsRef.current = tree.nodes.map(() => ({ x: 0, y: 0 }));
+    noteLayerCacheRef.current = new WeakMap();
+  }, [chart]);
+  /** 音符所属图层下标（带缓存）。 */
+  const layerIdxOf = (n: object): number => {
+    const cache = noteLayerCacheRef.current;
+    let idx = cache.get(n);
+    if (idx === undefined) {
+      const tree = layerTreeRef.current;
+      idx = tree ? noteLayerIdx(tree, n) : 0;
+      cache.set(n, idx);
+    }
+    return idx;
+  };
+  /** 当前帧该音符所在图层的合成偏移 —— 统一按**当前播放时间**求值：
+   *  播放中整列平移（动画）；编辑器暂停/擦洗时即「冻结在当前时间轴位置的一帧」。
+   *  逐帧值由 tick 顶部统一写入 layerOffsRef（每图层一次，零分配）。
+   *  放置/拖动的写回反解不在此处（App 放置包装与拖动块按「音符自己的时间」计算）。 */
+  const offOf = (n: object): { x: number; y: number } => {
+    const offs = layerOffsRef.current;
+    const idx = layerIdxOf(n);
+    return idx >= 0 && idx < offs.length ? offs[idx] : ZERO_OFF;
+  };
+  /** 指定图层在时刻 t 的合成偏移（slide 子节点按各自 timeSec 取值时用）。 */
+  const layerOffAtIdx = (idx: number, t: number): { x: number; y: number } => {
+    const tree = layerTreeRef.current;
+    if (!tree) return ZERO_OFF;
+    return layerOffsetAt(tree, idx, t);
+  };
+  /** 判定落点处的图层偏移（按音符自己的 timeSec 求值）。
+   *  投影引导（落点提示）必须钉在**最终落位**，不随播放中的整列平移跑动。 */
+  const landingOffOf = (n: object): { x: number; y: number } => {
+    const t = (n as { timeSec?: number }).timeSec;
+    return layerOffAtIdx(layerIdxOf(n), typeof t === 'number' ? t : 0);
+  };
 
   const resolvedEvents = chartRuntime.events;
   const eventsRef = useRef(resolvedEvents);
@@ -966,10 +1144,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           if (evt.noteColor) currentNoteColorRef.current = evt.noteColor;
           break;
         case 'bg_change':
-          if (evt.gradientStart && evt.gradientEnd) {
-            currentBgRef.current = { gradientStart: evt.gradientStart, gradientEnd: evt.gradientEnd };
-            applyAmbientBg({ gradientStart: evt.gradientStart, gradientEnd: evt.gradientEnd });
-          }
+          applyBgEvent(evt);
           break;
         default:
           break;
@@ -1123,10 +1298,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     let lastT = 0;
     let maxSlideSpan = 0;
     for (const n of resolved) {
-      total++; // head counts as one
+      // 假音符 / 不计分音符不计入 totalNotes（与 chartRuntime.totalNotes 同口径）；
+      // lastNoteTime / maxSlideSpan 仍统计，歌曲结束的时间兜底不受影响。
+      const counted = !(n.fake || n.noScore);
+      if (counted) total++; // head counts as one
       if (n.type === 'slide') {
         const childCount = n.resolvedNodes?.length ?? 0;
-        total += childCount;
+        if (counted) total += childCount;
         let lastChildT = n.timeSec;
         if (n.resolvedNodes) {
           for (const nd of n.resolvedNodes) {
@@ -1200,16 +1378,39 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         }
         break;
       case 'bg_change':
-        if (evt.gradientStart && evt.gradientEnd) {
-          currentBgRef.current = {
-            gradientStart: evt.gradientStart,
-            gradientEnd: evt.gradientEnd,
-          };
-          applyAmbientBg({ gradientStart: evt.gradientStart, gradientEnd: evt.gradientEnd });
-        }
+        applyBgEvent(evt);
         break;
       default:
         break;
+    }
+  };
+
+  // 事件 id → 事件表：触发器 `{ ref }` 用它引用谱面里已定义的事件（顶层 + 各图层事件轴）。
+  const eventByIdRef = useRef<Map<string, ResolvedEvent>>(new Map());
+  useEffect(() => {
+    const m = new Map<string, ResolvedEvent>();
+    const push = (list?: ResolvedEvent[]) => {
+      if (!list) return;
+      for (const e of list) if (e.id) m.set(e.id, e);
+    };
+    push(chartRuntime.events);
+    const layers = chart.layers;
+    if (layers) for (const l of layers) push(l.events as ResolvedEvent[] | undefined);
+    eventByIdRef.current = m;
+  }, [chart, chartRuntime]);
+
+  /**
+   * 音符触发器（§3.4）分发：把该音符在本次判定下触发的事件交给 `handleEvent` 执行。
+   * 只支持运行时可即时生效的类型（文本 / 音符色 / 背景）；变速与偏移已预先积分，
+   * 无法在判定时刻改变，直接忽略（编辑器会对此给 warning）。
+   */
+  const dispatchNoteTrigger = (note: ResolvedNote, judgement: JudgementType): void => {
+    if (!note.trigger) return;
+    const evts = resolveTriggerEvents(note, judgement, (id) => eventByIdRef.current.get(id));
+    const now = gameTimeRef.current;
+    for (const e of evts) {
+      if (isTriggerEventUnsupported(e)) continue;
+      handleEvent({ ...e, timeSec: now } as ResolvedEvent, now);
     }
   };
 
@@ -1305,6 +1506,22 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const camera = new THREE.PerspectiveCamera(CAMERA_VFOV, w / h, 0.1, 1000);
     const dist0 = fitCameraDistance(w / h);
     camera.position.set(0, CAMERA_AXIS_Y, dist0); camera.lookAt(0, CAMERA_AXIS_Y, 0); cameraRef.current = camera;
+
+    // 判定面 → 屏幕投影器（故事板 `api.toScreen` 消费）：用主相机实时 project，
+    // bloom / 分辨率 / 相机参数变化都天然正确。坐标返回画布 CSS 像素。
+    if (projectorRef) {
+      const projV = new THREE.Vector3();
+      projectorRef.current = (x: number, y: number) => {
+        const cam = cameraRef.current;
+        if (!cam) return { sx: 0, sy: 0 };
+        projV.set(x, y, JUDGE_Z).project(cam);
+        const el = rendererRef.current?.domElement;
+        return {
+          sx: (projV.x * 0.5 + 0.5) * (el?.clientWidth ?? 0),
+          sy: (1 - (projV.y * 0.5 + 0.5)) * (el?.clientHeight ?? 0),
+        };
+      };
+    }
     // 抗锯齿 / 渲染倍率由传入的细项控制（自定义档位下由用户决定）。
     const useAA = antialiasRef.current;
     const renderer = new THREE.WebGLRenderer({
@@ -1314,6 +1531,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       preserveDrawingBuffer: true,
       powerPreference: 'high-performance'
     });
+    // 主场景直渲屏幕（bloom 只是附加叠加层）：清除 alpha 恒为 0，保证画布透明 ——
+    // DOM 的 ambient 渐变 / 故事板 bg 层才能透出来（bloom RT 的 clear 也用同值）。
+    renderer.setClearColor(0x000000, 0);
     // Per-material clipping planes drive the slide-pipe "clip at the judgement
     // plane" behaviour (and the editor far-plane trim) without rebuilding geometry.
     renderer.localClippingEnabled = true;
@@ -1420,24 +1640,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // objects into an offscreen RT. UnrealBloomPass processes it. The result
     // is additively composited over the main render via a fullscreen quad.
     //
-    // NOTE: EffectComposer renders to its own framebuffer (opaque black),
-    // so we paint a radial gradient onto a CanvasTexture as scene.background
-    // — otherwise the CSS ambient bg behind the canvas would be hidden.
+    // NOTE: 旧版 EffectComposer 时代主场景渲染进 opaque framebuffer，需要在这里画
+    // scene.background 渐变。现在 SelectiveBloom 的主场景**直渲屏幕**（alpha:true +
+    // clearAlpha 0），bloom 只经叠加 quad 合成 —— scene.background 必须保持 null，
+    // 否则会把 DOM 的 ambient 渐变 / 故事板 bg 层整个挡住（bloom 一开背景全黑）。
     const useBloom = allowBloomRef.current && toggles.bloom !== false;
     if (useBloom) {
-      // Build radial-gradient CanvasTexture mirroring App.tsx ambient bg.
-      const bg = chart.metadata.bgScheme;
-      const c = document.createElement('canvas');
-      c.width = 256; c.height = 256;
-      const cx = c.getContext('2d')!;
-      const grad = cx.createRadialGradient(128, 128, 0, 128, 128, 180);
-      grad.addColorStop(0, bg.gradientEnd);
-      grad.addColorStop(1, bg.gradientStart);
-      cx.fillStyle = grad;
-      cx.fillRect(0, 0, 256, 256);
-      const bgTex = new THREE.CanvasTexture(c);
-      bgTex.colorSpace = THREE.SRGBColorSpace;
-      scene.background = bgTex;
+      scene.background = null;
 
       // Main camera also enables BLOOM_LAYER so it still sees the note meshes.
       camera.layers.enable(BLOOM_LAYER);
@@ -1688,6 +1897,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       clearInterval(watchdog);
       runningRef.current = false;
       window.removeEventListener('resize', onResize);
+      if (projectorRef) projectorRef.current = null;
       resetPlayState();
       // Dispose legacy EffectComposer resources
       if (composerRef.current) { composerRef.current.dispose(); composerRef.current = null; }
@@ -1955,6 +2165,21 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // R4-2: 判定/特效/编辑器手势逻辑已迁出为独立 hook（useJudgeSystem / useNoteEffects /
   // useEditorGestures）。此处构造强类型 JudgeSystemContext 聚合全部依赖 ref 与 helper，
   // 再实例化 hook；返回的闭包签名与迁移前完全一致，行为零变化。
+  // getAllNodes 的偏移感知包装：缓存元素本就每帧从活对象**绝对重同步** x/y，
+  // 在此叠加当前帧的图层偏移后，slide 判定（processSlideCore）与 slide 渲染
+  // （节点网格 / 管线 / 投影）消费的是同一份「合成后坐标」，天然一致。
+  const getAllNodesEff = (note: ResolvedNote) => {
+    const arr = getAllNodes(note);
+    const off = offOf(note);
+    if (off.x !== 0 || off.y !== 0) {
+      for (let i = 0; i < arr.length; i++) {
+        arr[i].x += off.x;
+        arr[i].y += off.y;
+      }
+    }
+    return arr;
+  };
+
   const judgeCtx: JudgeSystemContext = {
     sceneRef, groupsRef, sizeScaleRef, defaultSkinJudgeWidthRef, activeBurstsRef,
     allowHitEffectsRef, speedRef, particleSpriteRef, shatterSystemsRef,
@@ -1962,7 +2187,38 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     onJudgementRef, slideStateRef, playStartTimeRef, pointersRef, autoPlayRef,
     resolvedRef, isPlayingRef, isPausedRef, gameTimeRef, activeToolRef,
     onPlaceEditorNoteRef, onSelectEditorNoteRef, isDraggingRef,
-    getAllNodes, makeRingMesh, pickProj, projSize, chartTimeToBeat,
+    getAllNodes: getAllNodesEff,
+    getEffectivePos: (n: ResolvedNote) => {
+      const off = offOf(n);
+      return off.x === 0 && off.y === 0 ? n : { x: n.x + off.x, y: n.y + off.y };
+    },
+    dispatchNoteTrigger,
+    getLandingPos: (n: ResolvedNote, childIdx?: number) => {
+      // ResolvedNote 本体不会被嵌入偏移（嵌入只发生在 getAllNodes 的缓存副本里），
+      // 这里拿到的是原始 base，直接加「音符/子节点自己 timeSec」的图层偏移即落位。
+      let bx = n.x;
+      let by = n.y;
+      let t = n.timeSec;
+      if (childIdx != null && childIdx >= 1) {
+        const c = n.resolvedNodes?.[childIdx - 1];
+        if (c) {
+          bx = c.x;
+          by = c.y;
+          t = c.timeSec;
+        }
+      }
+      const off = layerOffAtIdx(layerIdxOf(n), t);
+      return { x: bx + off.x, y: by + off.y };
+    },
+    getNoteColor: (n: ResolvedNote) => {
+      const global = chartRef.current.metadata.noteColor || '#00f0ff';
+      if (n.color) return n.color;
+      const tree = layerTreeRef.current;
+      if (!tree) return global;
+      /* 色值按「判定落位时刻」取 —— 与投影框/特效钉落位一致 */
+      return layerColorAt(tree, layerIdxOf(n), n.timeSec, global);
+    },
+    makeRingMesh, pickProj, projSize, chartTimeToBeat,
   };
   const spawnBurst = useNoteEffects(judgeCtx);
   const { commitJudgement, getSlideRt, processSlide } = useJudgeSystem(judgeCtx, spawnBurst);
@@ -2124,10 +2380,26 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // appear to flow toward the judge line. This keeps note spacing correct
     // even before a speed change is reached (no teleportation).
     const curScrollDist = scrollDistanceAt(runtimeRef.current, curTime);
+    // 各图层「当前时刻」的滚动距离（图层数很少，每帧 O(图层数·log n)，原地更新）。
+    // 音符的 z 一律用 `scrollDist − layerCurDist[layerIdx]`，于是图层流速（含各层
+    // 自身的 speed_change）自然生效，且判定时刻恒为 0（不受流速影响）。
+    const layerCurDist = updateLayerCurDist(runtimeRef.current, curTime);
     const globalSpeed = speedRef.current;
     const unitPerSecond = WORLD_UNITS_PER_SECOND * globalSpeed; // scale: 1 "1x-second" = 36 world units * globalSpeed
     const notes = resolvedRef.current;
     const colorHex = currentNoteColorRef.current || chartRef.current.metadata.noteColor || '#00f0ff';
+
+    // —— 图层偏移：每帧每图层只求一次（O(图层数·log n)），再被该图层全部音符共享。
+    // 渲染与判定都在本帧内读取同一份值，保证「看到的」与「判定的」一致。
+    const layerTree = layerTreeRef.current;
+    const layerOffs = layerOffsRef.current;
+    if (layerTree && layerOffs.length === layerTree.nodes.length) {
+      for (let li = 0; li < layerTree.nodes.length; li++) {
+        const o = layerOffsetAt(layerTree, li, curTime);
+        layerOffs[li].x = o.x;
+        layerOffs[li].y = o.y;
+      }
+    }
 
     // Update text display overlay
     const textEl = eventTextRef.current;
@@ -2178,6 +2450,29 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           isDraggingRef.current = true;
           const clampedX = Math.round(THREE.MathUtils.clamp(dragPointer.x, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
           const clampedY = Math.round(THREE.MathUtils.clamp(dragPointer.y, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
+          // 图层偏移：拖动写回的是**存储坐标 base**（编辑态所见 = 合成后落点，
+          // 故 base = 显示位置 − 该音符图层在「被拖动单位自己的时间」的偏移；
+          // slide 子节点各自有自己的 timeSec，不能沿用头节点的）。
+          const dragSelId = selectedNoteIdRef.current || '';
+          const dragHead = noteIndexRef.current.get(dragSelId.split('#')[0]);
+          let dragOff = ZERO_OFF;
+          if (dragHead) {
+            const dragTree = layerTreeRef.current;
+            if (dragTree && isEditorModeRef.current) {
+              const dragHash = dragSelId.indexOf('#');
+              const dragUnit =
+                dragHash >= 0
+                  ? dragHead.resolvedNodes?.[parseInt(dragSelId.slice(dragHash + 1)) - 1]
+                  : dragHead;
+              const dragT =
+                dragUnit && typeof dragUnit.timeSec === 'number' ? dragUnit.timeSec : dragHead.timeSec;
+              dragOff = layerOffsetAt(dragTree, layerIdxOf(dragHead), typeof dragT === 'number' ? dragT : 0);
+            } else {
+              dragOff = offOf(dragHead);
+            }
+          }
+          const dragStoredX = Math.round((clampedX - dragOff.x) * 10) / 10;
+          const dragStoredY = Math.round((clampedY - dragOff.y) * 10) / 10;
           // Live-follow: mutate the dragged note's resolved position directly so
           // the windowed render loop below places its mesh correctly THIS frame.
           // The authoritative React commit happens ONLY on pointer release (the
@@ -2186,15 +2481,15 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // the main thread (single-digit FPS during fast drags, even on flagship
           // Android). The mesh still follows the pointer perfectly every frame via
           // this live override, so the drag looks smooth.
-          liveMoveResolvedNote(noteIndexRef.current, selectedNoteIdRef.current, clampedX, clampedY);
-          dragLiveXRef.current = clampedX;
-          dragLiveYRef.current = clampedY;
+          liveMoveResolvedNote(noteIndexRef.current, selectedNoteIdRef.current, dragStoredX, dragStoredY);
+          dragLiveXRef.current = dragStoredX;
+          dragLiveYRef.current = dragStoredY;
           // Push the live position to the editor side panel so its x/y inputs
           // update in real time during the drag. This only re-renders the panel
           // (it subscribes to the store); it does NOT touch React chart state or
           // re-render this canvas. Dedup inside the store keeps notifications to
           // one per visible grid-step change.
-          liveDragStore.set({ id: selectedNoteIdRef.current, x: clampedX, y: clampedY });
+          liveDragStore.set({ id: selectedNoteIdRef.current, x: dragStoredX, y: dragStoredY });
         }
       }
     }
@@ -2231,9 +2526,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             const c = n.resolvedNodes[childIdx - 1];
             px = c.x; py = c.y; pt = c.timeSec;
           }
-          const noteScrollDist = getScrollDistance(pt, speedPointsRef.current);
-          const gz = JUDGE_Z - (noteScrollDist - curScrollDist) * unitPerSecond;
-          selGizmo.position.set(px, py, gz + 0.1);
+          // 按音符**所属图层**的时间轴取滚动距离（图层流速已积分在内）。
+          const rtG = runtimeRef.current;
+          const noteScrollDist = rtG ? layerDistAt(rtG, n.layerIdx ?? 0, pt) : getScrollDistance(pt, speedPointsRef.current);
+          const gz = JUDGE_Z - (noteScrollDist - layerCurDist[n.layerIdx ?? 0]) * unitPerSecond;
+          // gizmo 必须贴着「合成后」的音符位置（slide 子节点沿用头节点图层）。
+          const off = offOf(n);
+          selGizmo.position.set(px + off.x, py + off.y, gz + 0.1);
           selGizmo.visible = true;
           (selGizmo.material as THREE.LineBasicMaterial).opacity = 0.9;
           placed = true;
@@ -2265,10 +2564,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const c = resolved[childIdx - 1] ?? noteIndexRef.current.get(selId);
           if (c) { px = c.x; py = c.y; pt = c.timeSec; }
         }
-        const noteScrollDist = getScrollDistance(pt, speedPointsRef.current);
-        const gz = JUDGE_Z - (noteScrollDist - curScrollDist) * unitPerSecond;
+        const rtG2 = runtimeRef.current;
+        const noteScrollDist = rtG2 ? layerDistAt(rtG2, n.layerIdx ?? 0, pt) : getScrollDistance(pt, speedPointsRef.current);
+        const gz = JUDGE_Z - (noteScrollDist - layerCurDist[n.layerIdx ?? 0]) * unitPerSecond;
+        const off = offOf(n);
         const g = multiGizmos[mi++];
-        g.position.set(px, py, gz + 0.1);
+        g.position.set(px + off.x, py + off.y, gz + 0.1);
         g.visible = true;
         if (mi >= multiGizmos.length) break;
       }
@@ -2368,8 +2669,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       // ---- 距离窗（渲染语义）----
       // z = JUDGE_Z - (nd - curScrollDist) * unitPerSecond；可见带 z ∈ [spawnLimit, 6]。
       const span = rt.maxSlideScrollSpan;
-      let dLo = (JUDGE_Z - 6) / unitPerSecond;
-      let dHi = (JUDGE_Z - spawnLimit) / unitPerSecond;
+      /* 图层流速 < 1 的慢速图层，同样可见带对应的 ΔS 更大 → 距离窗按 1/min(m) 扩宽 */
+      const minMul = rt.minLayerSpeed || 1;
+      let dLo = (JUDGE_Z - 6) / unitPerSecond / minMul;
+      let dHi = (JUDGE_Z - spawnLimit) / unitPerSecond / minMul;
       if (dLo > dHi) {
         const t = dLo;
         dLo = dHi;
@@ -2452,12 +2755,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     for (let q = 0; q < iterTotal; q++) {
       const noteIdx = unionList === null ? firstIdx + q : unionList[q];
       const note = notes[noteIdx];
-      const noteEffectiveColor = note.color || colorHex;
+      /* 有效音符色：note.color → 图层色（就近继承 / 图层内 note_color_change）→ 全局 */
+      const noteEffectiveColor = note.color || (layerTree ? layerColorAt(layerTree, layerIdxOf(note), curTime, colorHex) : colorHex);
 
       // ---------- SLIDE ----------
       if (note.type === 'slide') {
         // Cached: avoids rebuilding [head, ...resolvedNodes] every frame.
-        const allNodes = getAllNodes(note);
+        // 偏移感知包装：返回的是「合成后坐标」，下游网格/管线/判定共用。
+        const allNodes = getAllNodesEff(note);
         if (playing && !isEditorModeRef.current) {
           processSlide(note, curTime);
         }
@@ -2475,8 +2780,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // 预处理层已按 timeSec 预计算滚动距离；缺失时回退现算（保持数值一致）。
           // allNodes 由 getAllNodes 构造，元素类型不含 scrollDist，故按需取可选字段。
           const nd = (allNodes[i] as { scrollDist?: number }).scrollDist;
-          const nodeScrollDist = nd !== undefined ? nd : getScrollDistance(allNodes[i].timeSec, speedPointsRef.current);
-          const z = JUDGE_Z - (nodeScrollDist - curScrollDist) * unitPerSecond;
+          // 图层时间轴：子节点沿用头节点的图层（resolvedNodes 不带 layerId）。
+          const nli = note.layerIdx ?? 0;
+          const nodeScrollDist = nd !== undefined ? nd : layerDistAt(runtimeRef.current, nli, allNodes[i].timeSec);
+          const z = JUDGE_Z - (nodeScrollDist - layerCurDist[nli]) * unitPerSecond;
           _slideZs.push(z);
           const key = `${note.id}#${i}`;
           const judged = judgedNotesRef.current.has(key);
@@ -2530,7 +2837,15 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             // 皮肤 proj 材质初始 opacity=0.5，这里再统一按 po 覆盖——否则无 vis
             // 守卫时，退出菜单后 tick 残帧会把皮肤投影以 0.5 透明度重新点亮残留。
             nm.proj.visible = vis && po > 0;
-            nm.proj.position.set(allNodes[i].x, allNodes[i].y, JUDGE_Z + 0.01);
+            // 投影引导 = 落点提示，钉在「最终落位」：base + 该节点自己 timeSec 的图层偏移。
+            // allNodes 已嵌入 curTime 偏移（offOf），先反解出 base 再加落点偏移。
+            const headOff = offOf(note);
+            const projLanding = layerOffAtIdx(layerIdxOf(note), allNodes[i].timeSec);
+            nm.proj.position.set(
+              allNodes[i].x - headOff.x + projLanding.x,
+              allNodes[i].y - headOff.y + projLanding.y,
+              JUDGE_Z + 0.01
+            );
             nm.proj.scale.set(vScale, vScale, 1);
             nm.projMat.color.copy(cachedColor(noteEffectiveColor));
             nm.projMat.opacity = po;
@@ -2658,14 +2973,18 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // non-linear in τ. In that case sample the true scroll-distance profile so the
           // pipe length / playhead honour the speed change; otherwise fall back to the
           // cheap linear ramp (prior behaviour, no per-frame getScrollDistance calls).
+          // 用该音符**所属图层**的时间轴采样（含图层自身的 speed_change）。
+          const nli2 = note.layerIdx ?? 0;
+          const lrt = runtimeRef.current;
+          const lpts = (lrt.layerDist[nli2] && lrt.layerDist[nli2].points) || sp;
           let midSpeed = false;
-          for (const p of sp) {
+          for (const p of lpts) {
             if (p.timeSec > tA && p.timeSec < tB) { midSpeed = true; break; }
           }
-          const scrollDistA = midSpeed ? getScrollDistance(tA, sp) : 0;
+          const scrollDistA = midSpeed ? layerDistAt(lrt, nli2, tA) : 0;
           const zAt = midSpeed
             ? (tauN: number) =>
-                (scrollDistA - getScrollDistance(tA + tauN * segDur, sp)) * unitPerSecond
+                (scrollDistA - layerDistAt(lrt, nli2, tA + tauN * segDur)) * unitPerSecond
             : undefined;
           const localZ = (tauN: number) => (zAt ? zAt(tauN) : (bz - az) * tauN);
           // Playhead = point on the eased curve at the current linear-time fraction τ.
@@ -2728,7 +3047,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
             const prof: string[] = [];
             for (let s = 1; s <= 4; s++) {
               prof.push(
-                ((scrollDistA - getScrollDistance(tA + (s / 5) * segDur, sp)) * unitPerSecond).toFixed(3),
+                ((scrollDistA - layerDistAt(lrt, nli2, tA + (s / 5) * segDur)) * unitPerSecond).toFixed(3),
               );
             }
             geoKey += `|P:${prof.join(',')}`;
@@ -2772,8 +3091,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       // ---------- TAP / TOUCH ----------
       // 预处理层已按 timeSec 预计算滚动距离；缺失时回退现算（保持数值一致）。
       const nsd = note.scrollDist;
-      const noteScrollDist = nsd !== undefined ? nsd : getScrollDistance(note.timeSec, speedPointsRef.current);
-      const nz = JUDGE_Z - (noteScrollDist - curScrollDist) * unitPerSecond;
+      const nli = note.layerIdx ?? 0;
+      const noteScrollDist = nsd !== undefined ? nsd : layerDistAt(runtimeRef.current, nli, note.timeSec);
+      const nz = JUDGE_Z - (noteScrollDist - layerCurDist[nli]) * unitPerSecond;
       const judged = judgedNotesRef.current.has(note.id);
       // Respsect "音符渲染距离" in both gameplay and editor mode.
       // In editor mode, also hide notes whose time has already passed —
@@ -2786,15 +3106,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         // 退出到菜单时（非 播放/暂停/编辑器）强制隐藏，避免 projection/边框残留。
         && (playing || isPausedRef.current || isEditorModeRef.current);
       let entry = noteMeshesRef.current.get(note.id);
+      const noteOff = offOf(note); // 图层合成偏移（网格与判定必须用同一份）
       if (vis) {
         if (!entry) {
           const ng = note.type === 'tap' ? mkTap(noteEffectiveColor) : mkTouch(noteEffectiveColor);
-          const pg = mkProj(note.type, noteEffectiveColor); pg.position.set(note.x, note.y, JUDGE_Z + 0.01);
+          const pg = mkProj(note.type, noteEffectiveColor); pg.position.set(note.x + landingOffOf(note).x, note.y + landingOffOf(note).y, JUDGE_Z + 0.01);
           groupsRef.current?.gameplay.add(ng); groupsRef.current?.gameplay.add(pg);
           entry = { group: ng, projectionGroup: pg }; noteMeshesRef.current.set(note.id, entry);
           // (Ultra note-light handled by ultraLightPoolRef — see render loop)
         }
-        entry.group.position.set(note.x, note.y, nz);
+        entry.group.position.set(note.x + noteOff.x, note.y + noteOff.y, nz);
         entry.group.scale.set(vScale, vScale, 1);
         entry.group.rotation.z = -(note.angle ?? 0);
         entry.group.visible = true;
@@ -2840,7 +3161,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           ? 0
           : THREE.MathUtils.clamp(1 - timeToHitMs / leadMs, 0, 0.95);
         entry.projectionGroup.visible = po > 0;
-        entry.projectionGroup.position.set(note.x, note.y, JUDGE_Z + 0.01);
+        entry.projectionGroup.position.set(note.x + landingOffOf(note).x, note.y + landingOffOf(note).y, JUDGE_Z + 0.01);
         entry.projectionGroup.scale.set(vScale, vScale, 1);
         entry.projectionGroup.rotation.z = -(note.angle ?? 0);
         entry.projectionGroup.children.forEach((c) => {
@@ -2852,7 +3173,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         });
       } else if (entry) { entry.group.visible = false; entry.projectionGroup.visible = false; }
 
-      if (playing && !judged && !isEditorModeRef.current) {
+      // 假音符仍渲染（视觉演出），但完全不参与判定：不命中、不产生 Miss、不打断连击。
+      if (playing && !judged && !isEditorModeRef.current && !note.fake) {
         if (autoPlayRef.current && note.type === 'tap') {
           const dt = (curTime - note.timeSec) * 1000;
           // AutoPlay: judge as soon as note has passed the plane (dt >= 0). The narrow
@@ -2861,7 +3183,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         }
         if (note.type === 'touch') {
           const dt = (curTime - note.timeSec) * 1000;
-          const inside = isAnyPointerInside(note.x, note.y, TOUCH_HIT_HALF);
+          const inside = isAnyPointerInside(note.x + noteOff.x, note.y + noteOff.y, TOUCH_HIT_HALF);
           let track = touchTrackRef.current.get(note.id);
           if (!track) { track = { lastInsideTime: null, arrivalChecked: false }; touchTrackRef.current.set(note.id, track); }
           if (withinHitWindow(dt, HIT_WINDOW_MS) && inside) track.lastInsideTime = curTime;

@@ -12,13 +12,15 @@ const Editor2DCanvas = lazy(() => import('./components/Editor2DCanvas').then(m =
 const VisualChartEditor = lazy(() => import('./components/VisualChartEditor').then(m => ({ default: m.VisualChartEditor })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => ({ default: m.SettingsModal })));
 import type { EditorTool, BatchSelection, QuickCreateDelta, MarqueeMode } from './components/VisualChartEditor';
+// 故事板宿主（§3.7）：轻量组件（无 three.js），静态导入即可。
+import { StoryboardHost, type StoryboardHostHandle } from './components/StoryboardHost';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
 import { OrientationHint } from './components/OrientationHint';
 import { TimingBar, type TimingBarHandle } from './components/TimingBar';
 import { DEMO_CHARTS } from './data/demoCharts';
-import { storeFile, getFile, generateId } from './data/idb';
+import { storeFile, storeFileDedup, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
-import { resolveBeatmapUrl, parseDifficultyMeta } from './data/beatmapLoader';
+import { resolveBeatmapUrl, parseDifficultyMeta, resolveStoryboardUrl, resolveCoverUrl } from './data/beatmapLoader';
 import type { QualityMode, SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { editorTimeStore } from './editorTimeStore';
@@ -30,6 +32,7 @@ import { clampInt } from './utils/math';
 import { safeStorage } from './utils/storage';
 import { createFrameGate } from './utils/frameLimiter';
 import { getChartDuration, beatToSecondsMultiBpm, secondsToBeatMultiBpm, countPlayableNotes, getFirstNoteTime } from './utils/beatTime';
+import { buildLayerTree, layerOffsetAt } from './utils/layers';
 import { parseAndValidateChart, exportChartJson } from './utils/chartParser';
 import { submitScore, clearHighScore, getScoreKey, calcBadgeFromStats, getAllHighScores, mergeCloudHighScores, type HighScoreMap } from './utils/scoreStore';
 import { getPlatform, hasPlatformIdentity } from './platform';
@@ -95,6 +98,9 @@ const DEFAULT_SETTINGS = {
   // 默认开启：多数设备关闭后音画同步更好，但部分设备音频时钟不稳会出问题，
   // 故以兼容模式为默认，异常时反而更稳。
   compatMode: true,
+  // 禁用附加内容：勾上后歌曲目录里的 bg.jpg / bga.mp4 / story.js 一律不加载
+  // （画面退回渐变背景）。低配设备或只想读谱时用来省内存/显存。
+  disableExtraContent: false,
   // 当前选中的皮肤 id；null 表示使用默认纯色外观。
   selectedSkinId: null as string | null,
   // 默认皮肤（未选皮肤包时）的自定义项。
@@ -186,6 +192,23 @@ export function App() {
   useEffect(() => () => loadChartAbortRef.current?.abort(), []);
 
   const [currentChart, setCurrentChart] = useState<ChartData>(DEMO_CHARTS['neon-cyberspace']);
+  /** 当前局的背景媒体（歌曲目录约定 bg.jpg / bga.mp4；编辑器预览恒为空 → 纯渐变）。 */
+  const [bgMedia, setBgMedia] = useState<{ image?: string; video?: string } | undefined>(undefined);
+  /** 当前局的故事板脚本地址（歌曲目录约定 story.js，§3.7；仅 3D 渲染器挂载）。 */
+  const [storyUrl, setStoryUrl] = useState<string | undefined>(undefined);
+  // 故事板宿主挂点：bg/overlay 占位（z 序由 App 树决定）+ 3D 画布容器（game.style 目标）+ 句柄。
+  const storyBgRef = useRef<HTMLDivElement | null>(null);
+  const storyOverlayRef = useRef<HTMLDivElement | null>(null);
+  const gameViewportRef = useRef<HTMLDivElement | null>(null);
+  /** 判定面→屏幕投影（GameCanvas 挂载时写入；StoryboardHost 经 api.toScreen 消费）。 */
+  const gameProjectorRef = useRef<((x: number, y: number) => { sx: number; sy: number }) | null>(null);
+  const storyboardHostRef = useRef<StoryboardHostHandle | null>(null);
+  /**
+   * 编辑器内挂载的歌曲媒体（bg.jpg / bga.mp4 / story.js 的 idb 引用，§3.7）。
+   * 挂载即实时预览；已知目标歌曲（editorTarget.songId）时立即写回库，
+   * 尚无歌曲上下文（自由编辑器首次保存）时暂存于此，随「保存到本地」落到新歌曲上。
+   */
+  const editorMediaRef = useRef<Partial<SongItem>>({});
   /** 由卡片发起谱面编辑/新建时的上下文；为 null 表示自由编辑器（保存至 Editor 专辑）。 */
   const [editorTarget, setEditorTarget] = useState<EditorLaunchInfo | null>(null);
   const [appToast, setAppToast] = useState<string | null>(null);
@@ -195,10 +218,19 @@ export function App() {
   }, []);
   const [gameState, setGameState] = useState<'menu' | 'playing' | 'paused' | 'editor'>('menu');
   const [gameTime, setGameTime] = useState(0);
+  /** 故事板回退时间源（秒）：镜像 `gameTime`，与 GameCanvas 的 gameTimeRef 同语义。
+   *  音频时钟未运行（暂停 / 编辑器未预览 / 曲终）时 `globalAudio.getCurrentTime()`
+   *  返回陈旧值，故事板据此改读这里 —— 拖进度条画面才会跟着走。
+   *  用 ref 而非 prop：seek/暂停时更新不触发重渲染（与 HUD 的 ref 直写同理）。 */
+  const storyboardFallbackTimeRef = useRef(gameTime);
+  storyboardFallbackTimeRef.current = gameTime;
   const [speedMultiplier, setSpeedMultiplier] = useState(initialSettings.speedMultiplier);
   const [autoPlay, setAutoPlay] = useState(false);
   const [audioOffsetMs, setAudioOffsetMs] = useState(initialSettings.audioOffsetMs);
   const [compatMode, setCompatMode] = useState(initialSettings.compatMode);
+  /** 禁用附加内容（bg.jpg / bga.mp4 / story.js）。原始挂载值保留，只在消费点闸门处
+   *  派生为 undefined —— 于是开关切换即时生效，取消勾选也不必重开当前曲目。 */
+  const [disableExtraContent, setDisableExtraContent] = useState(initialSettings.disableExtraContent);
   // 兼容模式 → AudioManager 时钟源切换（谱面走墙钟）。在渲染副作用中同步，
   // 避免在 AudioContext 初始化前误设；play() 内会根据 compatMode 锚定墙钟。
   useEffect(() => {
@@ -345,6 +377,19 @@ export function App() {
   // the place handler stale between rapid placements).
   const currentChartRef = useRef(currentChart);
   currentChartRef.current = currentChart;
+
+  // —— 图层（Layer）编辑态 ——
+  // editorLayerId：null = 总览（合成视图）；'' = 默认根图层；其它 = 显式图层 id。
+  const [editorLayerId, setEditorLayerId] = useState<string | null>(null);
+  // 放置音符 / 新增事件的目标图层：隔离某图层 → 该图层；总览与默认根图层 → 默认根
+  // （不写 layerId 的旧形态）。
+  const placeTargetLayerId = editorLayerId ?? '';
+  // 编辑器画布只看当前隔离图层的音符（总览 = 全部）。游玩 / 试玩始终用完整谱面。
+  const editorChart = useMemo(() => {
+    if (gameState !== 'editor' || editorLayerId === null) return currentChart;
+    const lid = editorLayerId;
+    return { ...currentChart, notes: currentChart.notes.filter((n) => (n.layerId ?? '') === lid) };
+  }, [currentChart, editorLayerId, gameState]);
   // Gameplay HUD is driven imperatively (no React re-render during play):
   const progressRef = useRef<HTMLDivElement | null>(null);
   // P0：连击 / 分数 / 精度+排名 也改为 ref 直写（原先绑定 React state，导致每次
@@ -517,10 +562,10 @@ export function App() {
     saveSettings({
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
       noteSizeScale, qualityMode: quality.qualityMode, customAntialias: quality.customAntialias, customBloom: quality.customBloom,
-      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, maxFps: quality.maxFps, musicVolume, effectVolume, compatMode,
+      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, maxFps: quality.maxFps, musicVolume, effectVolume, compatMode, disableExtraContent,
       selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
-  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, compatMode, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
+  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, compatMode, disableExtraContent, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
   // 皮肤资产按需加载（去重 + 可等待）：key = 皮肤 id | 渲染器种类。
   // - 菜单态不加载：避免把 three 拉进首屏（保持原有约束）；
@@ -615,7 +660,7 @@ export function App() {
     globalAudio.play(p.startSec, p.leadIn);
   }, [clearPendingAudioStart]);
 
-  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string) => {
+  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string, bgMedia?: { image?: string; video?: string }, storyboardUrl?: string) => {
     // Reset the end-of-song lock BEFORE the fade-out timer starts, so the
     // player can pause during the lead-in of the *next* song if they want.
     songEndedRef.current = false;
@@ -624,6 +669,10 @@ export function App() {
       window.clearTimeout(transitionTimerRef.current);
       transitionTimerRef.current = null;
     }
+    // 背景媒体（约定命名 bg.jpg / bga.mp4，随歌曲走；重开局未传时清空）。
+    setBgMedia(bgMedia);
+    // 故事板脚本（约定命名 story.js，§3.7；仅 3D 渲染器；重开局未传时清空）。
+    setStoryUrl(storyboardUrl);
     /* 并行预热（与 200ms 淡出重叠进行）：渲染器代码块（首局需下载+解析 three /
      * 2D 渲染器）+ 皮肤资产。预热完成前不启动音频时钟 —— 否则弱机/慢网下画布
      * 尚未挂载、黑屏期间谱面时间已在走，玩家会白丢开头的判定窗口。 */
@@ -837,6 +886,8 @@ export function App() {
     setEditorTarget(null);
     customAudioFileRef.current = null;
     currentAudioRefRef.current = null;
+    // 自由编辑器 = 打开最近游玩的谱面：故事板/背景媒体**保留**（不清 storyUrl）。
+    editorMediaRef.current = {};
     setGameState('editor');
   }, []);
 
@@ -859,21 +910,32 @@ export function App() {
   };
 
   // 加载编辑器对应的音乐：本地（idb://）读取 blob 生成临时 URL，其余按 URL 加载。
-  const loadEditorAudio = async (audio?: string) => {
-    if (!audio) return;
+  // 返回**是否成功加载了真实音频**（决定编辑器预览/试玩走音频还是合成器）。
+  // 失败时给出用户可见提示 + 带引用形状的诊断日志。
+  const loadEditorAudio = async (audio?: string): Promise<boolean> => {
+    if (!audio) return false;
     try {
       if (audio.startsWith('idb://')) {
         const blob = await getFile(audio.slice('idb://'.length));
-        if (blob) {
-          const url = URL.createObjectURL(blob);
-          await globalAudio.loadAudioURL(url);
-          return;
+        if (!blob) {
+          console.warn('[editor] 音频 idb 引用无效（库中无此文件）：', audio);
+          setAppToast('编辑器音频加载失败：本地音频引用不存在');
+          return false;
         }
+        const url = URL.createObjectURL(blob);
+        await globalAudio.loadAudioURL(url);
+        return true;
       }
       const url = resolveBeatmapUrl(audio);
-      if (url) await globalAudio.loadAudioURL(url);
+      if (url) {
+        await globalAudio.loadAudioURL(url);
+        return true;
+      }
+      return false;
     } catch (e) {
-      console.error('加载编辑器音频失败', e);
+      console.error('加载编辑器音频失败', { audio }, e);
+      setAppToast('编辑器音频加载失败，详见控制台');
+      return false;
     }
   };
 
@@ -911,14 +973,21 @@ export function App() {
     }
 
     // 加载对应音乐，使编辑器可预览/播放（内置/在线走 URL，本地走 idb://）。
-    await loadEditorAudio(info.audio);
+    // 返回值决定预览/试玩走真实音频还是合成器（见下方 setHasCustomAudio）。
+    const editorHasAudio = await loadEditorAudio(info.audio);
+
+    // 故事板（§3.7）：编辑器也挂载该曲的 MV（预览/试玩时随 globalAudio 时钟走）。
+    setStoryUrl(info.storyboard ? await resolveStoryboardUrl({ storyboard: info.storyboard }) : undefined);
+    editorMediaRef.current = {};
 
     // 记录当前音频引用（URL 或 idb://），保存至 Editor 专辑时若用户未重新上传则沿用。
     currentAudioRefRef.current = info.audio ?? null;
     customAudioFileRef.current = null;
-    // 切换谱面时重置“自定义音频”标记，避免上一首曲目的音频（hasCustomAudio 仍为真）
-    // 遗留到当前合成器曲目，导致误播旧音频。
-    setHasCustomAudio(false);
+    // ⚠️ 老 bug 修复：此前无条件 setHasCustomAudio(false) —— 本地曲目（idb:// 音频）明明
+    // 已加载进 globalAudio，编辑器预览/试玩（`if (!hasCustomAudio) setSynthesizedTrack`）
+    // 却永远回退合成器。现在「加载成功才走音频」；失败保持合成器 + toast 提示，
+    // 同时也保住了原本要防的「上一首音频标记泄漏到合成器谱面」。
+    setHasCustomAudio(editorHasAudio);
 
     setEditorTarget(info);
     setCurrentChart(chart);
@@ -954,6 +1023,41 @@ export function App() {
       notes: [],
     };
   };
+
+  // 编辑器「导入与导出」：把 bg.jpg / bga.mp4 / story.js 挂到当前编辑目标歌曲（§3.7）。
+  // 挂载即实时预览（bgMedia / storyUrl）；有 songId 立即写回库，否则随「保存到本地」落地。
+  const handleAttachEditorMedia = useCallback(async (kind: 'bgImage' | 'bgVideo' | 'storyboard', file: File) => {
+    const ref = await storeFileDedup(file);
+    if (kind === 'storyboard') {
+      setStoryUrl(await resolveStoryboardUrl({ storyboard: ref }));
+    } else {
+      const url = await resolveCoverUrl(ref);
+      setBgMedia((prev) => (kind === 'bgImage'
+        ? { image: url || undefined, video: prev?.video }
+        : { image: prev?.image, video: url || undefined }));
+    }
+    editorMediaRef.current = { ...editorMediaRef.current, [kind]: ref };
+    const sid = editorTarget?.songId;
+    if (sid) {
+      await updateSongById(sid, kind === 'bgImage' ? { bgImage: ref } : kind === 'bgVideo' ? { bgVideo: ref } : { storyboard: ref });
+    }
+  }, [editorTarget]);
+
+  // 卸载已挂载的歌曲媒体（编辑器「导入与导出」✕ 按钮）：实时预览同步清除 + 写回库。
+  const handleDetachEditorMedia = useCallback((kind: 'bgImage' | 'bgVideo' | 'storyboard') => {
+    try {
+      if (kind === 'storyboard') setStoryUrl(undefined);
+      else setBgMedia((prev) => (kind === 'bgImage' ? { ...prev, image: undefined } : { ...prev, video: undefined }));
+      delete editorMediaRef.current[kind];
+      const sid = editorTarget?.songId;
+      if (sid) {
+        void updateSongById(sid, kind === 'bgImage' ? { bgImage: undefined } : kind === 'bgVideo' ? { bgVideo: undefined } : { storyboard: undefined });
+      }
+    } catch (err) {
+      console.error('卸载歌曲媒体失败', err);
+      setAppToast('卸载失败，详见控制台');
+    }
+  }, [editorTarget]);
 
   // 编辑器“保存到本地”：本地谱面回写原位；否则存入 Editor 专辑。
   const handleSaveChartToLocal = useCallback(async () => {
@@ -994,6 +1098,10 @@ export function App() {
         // 若未改动则等于原值，写回是幂等的。封面取自谱面 jacket（若有）。
         const songPatch: Partial<SongItem> = { audio: currentAudioRefRef.current || '' };
         if (currentChart.metadata.jacket) songPatch.cover = currentChart.metadata.jacket;
+        // 编辑器内挂载的背景/故事板随保存落地（幂等：已写回过的引用再写一次无妨）。
+        if (editorMediaRef.current.bgImage) songPatch.bgImage = editorMediaRef.current.bgImage;
+        if (editorMediaRef.current.bgVideo) songPatch.bgVideo = editorMediaRef.current.bgVideo;
+        if (editorMediaRef.current.storyboard) songPatch.storyboard = editorMediaRef.current.storyboard;
         await updateSongById(sid, songPatch);
         // 难度名可能已在编辑中被改动；保存后以最新 name 刷新上下文，使下次保存
         // 仍能定位到同一难度条目（而不是退化为新增难度）。mode 置为 'edit' 让
@@ -1024,6 +1132,10 @@ export function App() {
           difficulties: [{ name, level, chartFile: ref, noteCount }],
           source: 'local',
         };
+        // 编辑器内挂载的背景/故事板随首次保存落到新歌曲上。
+        if (editorMediaRef.current.bgImage) song.bgImage = editorMediaRef.current.bgImage;
+        if (editorMediaRef.current.bgVideo) song.bgVideo = editorMediaRef.current.bgVideo;
+        if (editorMediaRef.current.storyboard) song.storyboard = editorMediaRef.current.storyboard;
         await addSong(EDITOR_ALBUM_ID, song);
         // 记住刚创建的本地歌曲：此后再次“保存到本地”将回写该歌曲的难度原位，
         // 而不是每次都新建一首 Editor 曲目。diffName 记录首次创建的难度名，
@@ -1067,6 +1179,8 @@ export function App() {
   const applyJudgement = useCallback((fb: JudgementFeedback) => {
     // P0：游玩热路径完全不触碰 React state。判定结果直接写进 statsRef，
     // HUD（连击/分数/精度+排名）由 HUD rAF 从 statsRef 直读并直写 DOM。
+    // 不计分音符（noScore）：参与判定，但不计分、不计数量、不计连击 —— 统计整条跳过。
+    if (fb.noScore) return;
     const prev = statsRef.current;
     const isHit = fb.type !== 'Miss';
     const newCombo = isHit ? prev.combo + 1 : 0;
@@ -1092,6 +1206,17 @@ export function App() {
       perfectEarly: pEarly, perfectLate: pLate, goodEarly: gEarly, goodLate: gLate,
       accuracy: newAcc, rank: calculateRank(newScore),
     };
+
+    // 故事板（§3.7）：判定事件流转发。只读旁路 —— 宿主内部对回调异常兜底，
+    // 这里即使无人订阅也只是一次 ref 空判，热路径零额外分配。
+    storyboardHostRef.current?.dispatchJudge({
+      level: fb.type,
+      timeSec: globalAudio.getCurrentTime(),
+      deltaT: fb.deltaT,
+      x: fb.x,
+      y: fb.y,
+      noteType: fb.noteType,
+    });
 
     if (newCombo > 0 && newCombo % 10 === 0) {
       setComboBurst({ key: Date.now(), value: newCombo });
@@ -1514,8 +1639,18 @@ export function App() {
   }, [gameState, editorPreviewPlaying, quality, compatMode]);
 
   // Visual Editor Callbacks
-  const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number): { id: string; x: number; y: number; beat: number } | null => {
+  /**
+   * 放置音符。`x/y` 是**显示坐标**（所见即所得）；`offset` 为该音符所在图层在它
+   * 自己时刻的合成偏移（缺省 0）。内部统一换算成存储坐标 base = 显示 − 偏移，
+   * 并把 offset 透传给 DSL 出口裁剪 —— 否则有偏移的图层上 base 会被 ±2.4/±1.5
+   * 直接裁掉，导致「指哪不打哪」（设计 §4.3/§4.4）。
+   */
+  const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number, offset?: { x: number; y: number }): { id: string; x: number; y: number; beat: number } | null => {
     const exactBeat = Math.round((beat ?? editorTimeStore.getSnapshot().beat) * 1000) / 1000;
+    const ox = offset?.x ?? 0;
+    const oy = offset?.y ?? 0;
+    const bx = Math.round((x - ox) * 10) / 10;
+    const by = Math.round((y - oy) * 10) / 10;
 
     const noteType: NoteData['type'] =
       editorTool === 'place-slide' ? 'slide' : editorTool === 'place-touch' ? 'touch' : 'tap';
@@ -1535,7 +1670,7 @@ export function App() {
       const childIndex = (sel.nodes ?? []).length;
       setCurrentChart((prev) => {
         const updatedNotes = prev.notes.map((n) =>
-          n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x, y }] } : n
+          n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x: bx, y: by }] } : n
         );
         return { ...prev, notes: updatedNotes };
       });
@@ -1543,15 +1678,21 @@ export function App() {
       setSelectedNoteId(sel.id);
       setSelectedNoteIds([sel.id]);
       // 返回新子节点的 id 与 x/y/beat（slide 子节点不受 DSL 影响，即传入值）。
-      return { id: `${sel.id}#${childIndex + 1}`, x, y, beat: newBeat };
+      return { id: `${sel.id}#${childIndex + 1}`, x: bx, y: by, beat: newBeat };
     }
 
     // Short, collision-resistant id: a 7-char base36 random (~78e9 combos).
     const newNoteId = `ed-${Math.random().toString(36).slice(2, 9)}`;
-    const newNote: NoteData = applyDslToNote(
-      { id: newNoteId, beat: exactBeat, x, y, type: noteType, nodes: [] },
-      editorDslRef.current
+    const dslNote = applyDslToNote(
+      { id: newNoteId, beat: exactBeat, x: bx, y: by, type: noteType, nodes: [] },
+      editorDslRef.current,
+      offset
     );
+    // 放入当前目标图层（默认根图层不写 layerId，保持旧格式形态）。
+    const newNote: NoteData =
+      placeTargetLayerId && placeTargetLayerId !== ''
+        ? { ...dslNote, layerId: placeTargetLayerId }
+        : dslNote;
     // 统一选中数据源：单选焦点与多选集合都指向新音符，避免 Ctrl 切到多选后
     // 该音符不被视为已选中（多选集合为空）。
     setSelectedNoteId(newNoteId);
@@ -1560,7 +1701,7 @@ export function App() {
     // 返回新音符 id 与 DSL 处理后的实际 x/y/beat，供 2D 放置后仅调整 y、
     // x/beat 使用规则结果（不再拉回拖动前的原值）。
     return { id: newNoteId, x: newNote.x, y: newNote.y, beat: newNote.beat };
-  }, [editorTool, selectedNoteId, snapSubdivision]);
+  }, [editorTool, selectedNoteId, snapSubdivision, placeTargetLayerId]);
 
   const handleMoveEditorNote = useCallback((id: string, x: number, y: number, beat?: number) => {
     const hashIdx = id.indexOf('#');
@@ -1661,7 +1802,9 @@ export function App() {
   }, []);
 
   /** 批量移动：接收一组绝对位置（头节点与子节点 id 均可），一次性写入。
-   *  x 钳制 ±2.4、y 钳制 ±1.5；beat 不做下限钳制（2D 允许负拍）。
+   *  坐标为 **base**（存储坐标）；屏幕坐标 ±2.4/±1.5 的钳制已在画布侧按显示
+   *  坐标完成（有图层偏移时 base 可合法越界，此处不再钳）。
+   *  beat 不做下限钳制（2D 允许负拍）。
    *  传入绝对位置而非位移，避免节流多次提交造成位移累积。 */
   const handleMoveEditorNotes = useCallback((positions: Array<{ id: string; x: number; y: number; beat: number }>) => {
     if (positions.length === 0) return;
@@ -1677,9 +1820,7 @@ export function App() {
         let next = n;
         let changed = false;
         if (hp) {
-          const nx = Math.max(-2.4, Math.min(2.4, hp.x));
-          const ny = Math.max(-1.5, Math.min(1.5, hp.y));
-          next = { ...n, x: nx, y: ny, beat: hp.beat };
+          next = { ...n, x: hp.x, y: hp.y, beat: hp.beat };
           changed = true;
         }
         // 整条链一起移动：子节点也按绝对位置写入。
@@ -1702,30 +1843,48 @@ export function App() {
   /** Batch-note insertion used by the "quick-create" gesture system. */
   type QcSlideEntry = NonNullable<QuickCreateDelta['slides']>[number];
   const handleApplyQuickCreateDelta = useCallback((delta: QuickCreateDelta) => {
-    const newTaps: NoteData[] = (delta.taps ?? []).map((t) =>
-      applyDslToNote(
-        {
-          id: `qc-${Math.random().toString(36).slice(2, 9)}`,
-          beat: t.beat,
-          x: t.x,
-          y: t.y,
-          type: 'tap',
-        },
-        editorDslRef.current
-      )
-    );
-    const newTouches: NoteData[] = (delta.touches ?? []).map((t) =>
-      applyDslToNote(
-        {
-          id: `qc-${Math.random().toString(36).slice(2, 9)}`,
-          beat: t.beat,
-          x: t.x,
-          y: t.y,
-          type: 'touch',
-        },
-        editorDslRef.current
-      )
-    );
+    // 快速创建的手势坐标同样是**显示坐标**：按每个单位自己的 beat 反解成 base
+    // （偏移随 beat 变，不能整批用同一个偏移），并把 offset 交给 DSL 出口裁剪。
+    const qcTree = buildLayerTree(currentChartRef.current);
+    const qcIdx = qcTree.byId[placeTargetLayerId] ?? 0;
+    const qcMeta = currentChartRef.current.metadata;
+    const qcBase = (x: number, y: number, beat: number) => {
+      const o = layerOffsetAt(
+        qcTree,
+        qcIdx,
+        beatToSecondsMultiBpm(beat, qcMeta.bpm, qcMeta.offset, qcMeta.bpmlist)
+      );
+      return {
+        x: Math.round((x - o.x) * 10) / 10,
+        y: Math.round((y - o.y) * 10) / 10,
+        off: o,
+      };
+    };
+    // 与放置一致：放入当前目标图层（默认根不写 layerId）。
+    const qcLayer = placeTargetLayerId ? { layerId: placeTargetLayerId } : {};
+
+    const newTaps: NoteData[] = (delta.taps ?? []).map((t) => {
+      const b = qcBase(t.x, t.y, t.beat);
+      return {
+        ...applyDslToNote(
+          { id: `qc-${Math.random().toString(36).slice(2, 9)}`, beat: t.beat, x: b.x, y: b.y, type: 'tap' },
+          editorDslRef.current,
+          b.off
+        ),
+        ...qcLayer,
+      };
+    });
+    const newTouches: NoteData[] = (delta.touches ?? []).map((t) => {
+      const b = qcBase(t.x, t.y, t.beat);
+      return {
+        ...applyDslToNote(
+          { id: `qc-${Math.random().toString(36).slice(2, 9)}`, beat: t.beat, x: b.x, y: b.y, type: 'touch' },
+          editorDslRef.current,
+          b.off
+        ),
+        ...qcLayer,
+      };
+    });
 
     // Slide handling is dedup-aware: for an incoming slide {headBeat, headX,
     // headY, nodes[]}, we try to find an EXISTING slide note in the chart
@@ -1733,8 +1892,24 @@ export function App() {
     // are MERGED into the existing note's nodes[] (deduplicated by beat) so
     // repeated in-place slide dispatches from qcOnMove don't pile up
     // duplicate slide notes.
-    const slidePatches: Array<{ matchId: string | null; head: QcSlideEntry }> =
-      (delta.slides ?? []).map((s: QcSlideEntry) => ({ matchId: null, head: s }));
+    // slide 的头与每个子节点各自按自己的 beat 反解（比较与写入都在 base 空间进行）。
+    const slidePatches: Array<{ matchId: string | null; head: QcSlideEntry; off: { x: number; y: number } }> =
+      (delta.slides ?? []).map((s: QcSlideEntry) => {
+        const hb = qcBase(s.headX, s.headY, s.headBeat);
+        return {
+          matchId: null,
+          off: hb.off,
+          head: {
+            ...s,
+            headX: hb.x,
+            headY: hb.y,
+            nodes: (s.nodes ?? []).map((nd) => {
+              const nb = qcBase(nd.x, nd.y, nd.beat);
+              return { ...nd, x: nb.x, y: nb.y };
+            }),
+          },
+        };
+      });
 
     setCurrentChart((prev) => {
       const slidesUpdate = [...prev.notes];
@@ -1766,8 +1941,8 @@ export function App() {
       // Create any slides that did NOT match an existing head.
       const newSlides: NoteData[] = slidePatches
         .filter((p) => p.matchId === null)
-        .map((p) =>
-          applyDslToNote(
+        .map((p) => ({
+          ...applyDslToNote(
             {
               id: `qc-${Math.random().toString(36).slice(2, 9)}`,
               beat: p.head.headBeat,
@@ -1776,9 +1951,11 @@ export function App() {
               type: 'slide',
               nodes: [...p.head.nodes],
             },
-            editorDslRef.current
-          )
-        );
+            editorDslRef.current,
+            p.off
+          ),
+          ...qcLayer,
+        }));
 
       const updatedNotes = [...slidesUpdate, ...newTaps, ...newTouches, ...newSlides]
         .sort((a, b) => a.beat - b.beat);
@@ -1790,7 +1967,7 @@ export function App() {
     // In quick-create we always suppress, so just clear any stale selection.
     setSelectedNoteId(null);
     setSelectedNoteIds([]);
-  }, []);
+  }, [placeTargetLayerId]);
 
   const chartDuration = useMemo(() => getChartDuration(currentChart), [currentChart]);
   chartDurationRef.current = chartDuration;
@@ -1895,6 +2072,10 @@ export function App() {
         <div ref={ambientBgRef} className="absolute inset-0 pointer-events-none opacity-75" />
       )}
 
+      {/* 故事板背景层占位（§3.7）：ambient 渐变之上、3D 画布之下。故事板的 bg 层
+          优先级最高（> bga.mp4 > bg.jpg > 渐变），DOM z 序天然实现覆盖。 */}
+      <div ref={storyBgRef} className="absolute inset-0 z-0 pointer-events-none" />
+
       {/* 3D Viewport — mounted lazily: only when entering the editor or a chart,
           so three.js is not pulled into the first paint (menu). Inside the editor
           the viewport stays mounted and GameCanvas pauses its rAF render loop via
@@ -1904,14 +2085,17 @@ export function App() {
           GameCanvas2D is used during play instead (see below). */}
       {show3D && (
       <div
+        ref={gameViewportRef}
         className="absolute inset-0 z-0"
         data-viewport="3d"
         onWheel={handleEditorWheel}
       >
         <Suspense fallback={null}>
         <GameCanvas
-          chart={currentChart}
+          chart={editorChart}
           ambientBgRef={ambientBgRef}
+          bgMedia={gameState === 'editor' || disableExtraContent ? undefined : bgMedia}
+          projectorRef={gameProjectorRef}
           viewportActive={viewportActive}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}
@@ -1939,7 +2123,18 @@ export function App() {
           onFirstFrame={startPendingAudio}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
-          onPlaceEditorNote={handlePlaceEditorNote}
+          onPlaceEditorNote={(x: number, y: number) => {
+            // 3D 编辑视图所见 = 合成后落点；写回前反解出存储坐标 base（§4.3：
+            // 偏移按「被放置音符自己的时间」取值，这里即当前编辑拍的时刻）。
+            const meta = currentChartRef.current.metadata;
+            const b = editorTimeStore.getSnapshot().beat;
+            const t = beatToSecondsMultiBpm(b, meta.bpm, meta.offset, meta.bpmlist);
+            const tree = buildLayerTree(currentChartRef.current);
+            const idx = tree.byId[placeTargetLayerId] ?? 0;
+            const off = layerOffsetAt(tree, idx, t);
+            // 传「显示坐标 + 偏移」，由 handlePlaceEditorNote 统一换算并做落点裁剪。
+            return handlePlaceEditorNote(x, y, b, off);
+          }}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           skinTextures={skinTextures}
           defaultSkinInnerEnabled={defaultSkinInnerEnabled}
@@ -1962,7 +2157,8 @@ export function App() {
       >
         <Suspense fallback={null}>
         <GameCanvas2D
-          chart={currentChart}
+          chart={editorChart}
+          bgMedia={gameState === 'editor' || disableExtraContent ? undefined : bgMedia}
           viewportActive={viewportActive}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}
@@ -2003,7 +2199,7 @@ export function App() {
         <div className="absolute inset-0 z-0" data-viewport="2d">
           <Suspense fallback={null}>
           <Editor2DCanvas
-            chart={currentChart}
+            chart={editorChart}
             gameTime={gameTime}
             preview={editorPreview3D}
             showWaveform={editorShowWaveform}
@@ -2016,7 +2212,14 @@ export function App() {
             marqueeMode={marqueeMode}
             vlineCount={editorVlineCount}
             pxPerBeat={editorPxPerBeat}
-            onPlaceNote={(x, y, beat) => handlePlaceEditorNote(x, y, beat)}
+            onPlaceNote={(x, y, beat) => {
+              // 2D 俯视画布传屏幕坐标（所见即所得）：按放置目标图层在该 beat 的合成偏移反解 base。
+              const tree = buildLayerTree(currentChartRef.current);
+              const idx = tree.byId[placeTargetLayerId] ?? 0;
+              const meta = currentChartRef.current.metadata;
+              const off = layerOffsetAt(tree, idx, beatToSecondsMultiBpm(beat, meta.bpm, meta.offset || 0, meta.bpmlist));
+              return handlePlaceEditorNote(x, y, beat, off);
+            }}
             onMoveNote={(id, x, y, beat) => handleMoveEditorNote(id, x, y, beat)}
             onSelectNote={handleSelectEditorNote}
             onSeekBeat={handleSeekBeat}
@@ -2026,6 +2229,28 @@ export function App() {
           />
           </Suspense>
         </div>
+      )}
+
+      {/* 故事板覆盖层占位（§3.7）：画布之上、HUD(z-10)/菜单(z-20) 之下。 */}
+      <div ref={storyOverlayRef} className="absolute inset-0 z-[5] pointer-events-none" />
+
+      {/* 故事板宿主（§3.7）：仅 3D 渲染器；编辑器/菜单不挂（storyUrl → undefined 即卸载）。
+          组件本身不渲染 JSX，只向上面两个占位容器命令式追加故事板 DOM。 */}
+      {quality.qualityMode !== 'lite' && (
+        <StoryboardHost
+          ref={storyboardHostRef}
+          bgSlotRef={storyBgRef}
+          overlaySlotRef={storyOverlayRef}
+          gameViewportRef={gameViewportRef}
+          projectorRef={gameProjectorRef}
+          statsRef={statsRef}
+          chartRef={currentChartRef}
+          fallbackTimeRef={storyboardFallbackTimeRef}
+          storyUrl={disableExtraContent || gameState === 'menu' ? undefined : storyUrl}
+          playSession={playSession}
+          playing={gameState === 'playing'}
+          paused={gameState === 'paused'}
+        />
       )}
 
       {/* ── UI 层：游戏内 / 编辑器 UI 全屏铺满，仅靠 safe-area 避开刘海/灵动岛；不再有 2:1 强行限制 ── */}
@@ -2067,6 +2292,8 @@ export function App() {
             }
           }}
           onUpdateChart={(updated) => setCurrentChart((prev) => ({ ...prev, ...updated }))}
+          editorLayerId={editorLayerId}
+          onEditorLayerChange={setEditorLayerId}
           onSeekBeat={handleSeekBeat}
           onTogglePlay={handleEditorTogglePlay}
           onSetActiveTool={(tool) => {
@@ -2107,6 +2334,8 @@ export function App() {
           }}
           onExitEditor={handleReturnToMenu}
           onSaveToLocal={handleSaveChartToLocal}
+          onAttachMedia={handleAttachEditorMedia}
+          onDetachMedia={handleDetachEditorMedia}
           onStartPlayTest={handleStartPlayTest}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           editorDsl={editorDsl}
@@ -2270,7 +2499,7 @@ export function App() {
 
                   {/* Restart/Retry button (subtle accent-tinted glass) */}
                   <button
-                    onClick={() => isPlayTestMode ? handleStartPlayTest(false, true) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.scoreKey, currentSongInfo?.diffName)}
+                    onClick={() => isPlayTestMode ? handleStartPlayTest(false, true) : handleStartGame(currentChart, hasCustomAudio, currentSongInfo?.songId, currentSongInfo?.scoreKey, currentSongInfo?.diffName, bgMedia, storyUrl)}
                     className="w-14 h-14 rounded-full border flex items-center justify-center transition cursor-pointer group"
                     title={t('hud.retry')}
                     style={{
@@ -2373,7 +2602,7 @@ export function App() {
             onOpenEditor={handleOpenVisualEditor}
             onLaunchChartEditor={handleLaunchChartEditor}
             onSwitchLite={() => { window.location.href = 'lite/index.html'; }}
-            onStartGame={(chart, hasAudio, songId, scoreKey, diffName) => handleStartGame(chart, hasAudio, songId, scoreKey, diffName)}
+            onStartGame={(chart, hasAudio, songId, scoreKey, diffName, bgMedia, storyboardUrl) => handleStartGame(chart, hasAudio, songId, scoreKey, diffName, bgMedia, storyboardUrl)}
             onStateChange={handleSongSelectStateChange}
           />
         </div>
@@ -2399,6 +2628,8 @@ export function App() {
         setEffectVolume={setEffectVolume}
         compatMode={compatMode}
         setCompatMode={setCompatMode}
+        disableExtraContent={disableExtraContent}
+        setDisableExtraContent={setDisableExtraContent}
         selectedSkinId={selectedSkinId}
         setSelectedSkinId={setSelectedSkinId}
         defaultSkinInnerEnabled={defaultSkinInnerEnabled}

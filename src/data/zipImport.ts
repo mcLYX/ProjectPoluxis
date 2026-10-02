@@ -6,6 +6,15 @@ const AUDIO_EXT = ['mp3', 'ogg', 'wav', 'm4a', 'flac', 'webm', 'aac'];
 const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
 const CHART_EXT = ['json', 'chart'];
 
+// 歌曲目录约定命名（与 update-beatmaps.mjs / info.json 文档一致）。
+// zip 导入不再"任意匹配"：音频/封面/背景只认约定名，谱面只认 N.json（0 起编号）。
+const CONV_AUDIO = 'base.mp3';
+const CONV_COVER = 'cover.jpg';
+const CONV_BG_IMAGE = 'bg.jpg';
+const CONV_BG_VIDEO = 'bga.mp4';
+const CONV_CHART_RE = /^\d+\.json$/;
+const DIFFICULTY_NAMES = ['Easy', 'Normal', 'Hard', 'Insane', 'Another'];
+
 // ---- Robustness limits ----
 const MAX_SONGS_PER_IMPORT = 200;
 const MAX_LOOSE_FILES = 50;
@@ -106,44 +115,135 @@ function tailName(group: GroupedSong, fullName: string): string {
   return group.folder ? fullName.slice(group.folder.length + 1) : fullName;
 }
 
-function findInGroup(group: GroupedSong, exts: string[]): ZipEntry | undefined {
-  return group.entries.find((e) => exts.includes(extOf(tailName(group, e.name))));
-}
-
 function groupHasChart(group: GroupedSong): boolean {
   return group.entries.some((e) => CHART_EXT.includes(extOf(tailName(group, e.name))));
 }
 
-async function buildSong(group: GroupedSong, fallbackTitle: string): Promise<SongItem> {
-  const audio = findInGroup(group, AUDIO_EXT);
-  const cover = findInGroup(group, IMAGE_EXT);
-  const chartEntries = group.entries.filter((e) => CHART_EXT.includes(extOf(tailName(group, e.name))));
+/** 按歌曲目录内的相对文件名（大小写不敏感）找条目。 */
+function findByName(group: GroupedSong, lowerName: string): ZipEntry | undefined {
+  return group.entries.find((e) => tailName(group, e.name).toLowerCase() === lowerName);
+}
+
+/** 把组内条目存进 idb，返回 idb:// 引用。 */
+async function storeEntry(entry: ZipEntry): Promise<string> {
+  return storeFileDedup(
+    new File([entry.data as unknown as BlobPart], entry.name, { type: mimeFromExt(extOf(entry.name)) }),
+  );
+}
+
+/**
+ * 解析 info.json / 约定命名里相对歌曲目录的路径 → 组内条目的 idb:// 引用。
+ * 远程地址（http/blob/idb）原样保留；找不到返回 ''。
+ */
+async function resolveGroupRef(group: GroupedSong, relPath: string): Promise<string> {
+  if (!relPath) return '';
+  if (/^(https?:|blob:|idb:)/i.test(relPath)) return relPath;
+  const clean = relPath.replace(/^\.?\//, '').toLowerCase();
+  const entry = group.entries.find((e) => tailName(group, e.name).toLowerCase() === clean);
+  return entry ? storeEntry(entry) : '';
+}
+
+/**
+ * 按 info.json 构建歌曲（格式与 beatmaps.json 的 "type":"song" 条目类似，
+ * 路径相对歌曲目录）。无有效难度时返回 null（调用方回落约定命名）。
+ */
+async function buildSongFromInfo(group: GroupedSong, info: Record<string, unknown>, fallbackTitle: string): Promise<SongItem | null> {
+  const rel = (v: unknown): string => (typeof v === 'string' && v ? v : '');
+  const diffArr = Array.isArray(info.difficulties) ? (info.difficulties as unknown[]) : [];
+  const difficulties: DifficultyEntry[] = [];
+  for (let i = 0; i < diffArr.length; i++) {
+    const d = (diffArr[i] ?? {}) as Record<string, unknown>;
+    const chartRef = await resolveGroupRef(group, rel(d.chartFile));
+    if (!chartRef) continue;
+    const dmeta = resolveDifficulty(d.difficulty);
+    difficulties.push({
+      name: typeof d.name === 'string' && d.name ? d.name : DIFFICULTY_NAMES[i] || `D${i + 1}`,
+      level: typeof d.level === 'number' ? (d.level as number) : dmeta.level,
+      chartFile: chartRef,
+    });
+  }
+  if (!difficulties.length) return null;
+
+  const [audioRef, coverRef, bgImageRef, bgVideoRef, storyboardRef] = await Promise.all([
+    resolveGroupRef(group, rel(info.audio)),
+    resolveGroupRef(group, rel(info.cover)),
+    resolveGroupRef(group, rel(info.bgImage)),
+    resolveGroupRef(group, rel(info.bgVideo)),
+    resolveGroupRef(group, rel(info.storyboard)),
+  ]);
+
+  return {
+    type: 'song',
+    id: generateId('song'),
+    title: typeof info.title === 'string' && info.title ? info.title : fallbackTitle,
+    artist: typeof info.artist === 'string' ? info.artist : '',
+    bpm: typeof info.bpm === 'number' ? (info.bpm as number) : 120,
+    cover: coverRef,
+    accentColor: typeof info.accentColor === 'string' ? info.accentColor : undefined,
+    audio: audioRef,
+    ...(bgImageRef ? { bgImage: bgImageRef } : {}),
+    ...(bgVideoRef ? { bgVideo: bgVideoRef } : {}),
+    ...(storyboardRef ? { storyboard: storyboardRef } : {}),
+    basePath: '',
+    difficulties,
+  };
+}
+
+/**
+ * 按约定命名构建歌曲：info.json 优先，否则 base.mp3 / cover.jpg / N.json / bg.jpg / bga.mp4。
+ * 无可用谱面（且 info.json 无有效难度）时返回 null。
+ */
+async function buildSong(group: GroupedSong, fallbackTitle: string): Promise<SongItem | null> {
+  // info.json 优先
+  const infoEntry = findByName(group, 'info.json');
+  if (infoEntry) {
+    try {
+      const info = JSON.parse(new TextDecoder().decode(infoEntry.data));
+      if (info && typeof info === 'object') {
+        const song = await buildSongFromInfo(group, info as Record<string, unknown>, fallbackTitle);
+        if (song) return song;
+      }
+    } catch {
+      /* 解析失败回落约定命名 */
+    }
+  }
+
+  // 谱面：N.json（0 起编号，按数字排序）
+  const chartEntries = group.entries
+    .filter((e) => CONV_CHART_RE.test(tailName(group, e.name)))
+    .sort((a, b) => parseInt(tailName(group, a.name), 10) - parseInt(tailName(group, b.name), 10));
+  if (!chartEntries.length) return null;
+
+  const audio = findByName(group, CONV_AUDIO);
+  const cover = findByName(group, CONV_COVER);
+  const bgImage = findByName(group, CONV_BG_IMAGE);
+  const bgVideo = findByName(group, CONV_BG_VIDEO);
+  const storyboard = findByName(group, 'story.js');
 
   const difficulties: DifficultyEntry[] = [];
   let firstMeta: ChartMeta | null = null;
 
-  for (const ce of chartEntries) {
+  for (let i = 0; i < chartEntries.length; i++) {
+    const ce = chartEntries[i];
     const text = new TextDecoder().decode(ce.data);
     const meta = parseChartMeta(text);
     if (!meta) continue;
     if (!firstMeta) firstMeta = meta;
-    const file = new File([ce.data as unknown as BlobPart], 'chart.json', { type: 'application/json' });
-    const ref = await storeFileDedup(file);
+    const ref = await storeEntry(ce);
     const d = resolveDifficulty(meta.difficulty);
     difficulties.push({
-      name: d.name || extOf(ce.name) || 'NORMAL',
+      name: d.name && d.name !== 'NORMAL' ? d.name : DIFFICULTY_NAMES[i] || `D${i + 1}`,
       level: d.level,
       chartFile: ref,
       noteCount: meta.noteCount,
     });
   }
 
-  const audioRef = audio
-    ? await storeFileDedup(new File([audio.data as unknown as BlobPart], audio.name, { type: mimeFromExt(extOf(audio.name)) }))
-    : '';
-  const coverRef = cover
-    ? await storeFileDedup(new File([cover.data as unknown as BlobPart], cover.name, { type: mimeFromExt(extOf(cover.name)) }))
-    : '';
+  const audioRef = audio ? await storeEntry(audio) : '';
+  const coverRef = cover ? await storeEntry(cover) : '';
+  const bgImageRef = bgImage ? await storeEntry(bgImage) : '';
+  const bgVideoRef = bgVideo ? await storeEntry(bgVideo) : '';
+  const storyboardRef = storyboard ? await storeEntry(storyboard) : '';
 
   return {
     type: 'song',
@@ -154,6 +254,9 @@ async function buildSong(group: GroupedSong, fallbackTitle: string): Promise<Son
     cover: coverRef,
     accentColor: firstMeta?.accentColor || '#22d3ee',
     audio: audioRef,
+    ...(bgImageRef ? { bgImage: bgImageRef } : {}),
+    ...(bgVideoRef ? { bgVideo: bgVideoRef } : {}),
+    ...(storyboardRef ? { storyboard: storyboardRef } : {}),
     basePath: '',
     difficulties,
   };
@@ -222,9 +325,12 @@ async function normalizeZipManifest(raw: unknown, entryMap: Map<string, ZipEntry
   const normSong = async (o: Record<string, unknown>): Promise<SongItem | null> => {
     const id = asStr(o.id);
     if (!id) return null;
-    const [cover, audio, difficulties] = await Promise.all([
+    const [cover, audio, bgImage, bgVideo, storyboard, difficulties] = await Promise.all([
       resolveZipFileRef(o.cover, entryMap),
       resolveZipFileRef(o.audio, entryMap),
+      resolveZipFileRef(o.bgImage, entryMap),
+      resolveZipFileRef(o.bgVideo, entryMap),
+      resolveZipFileRef(o.storyboard, entryMap),
       Promise.all(
         (Array.isArray(o.difficulties) ? (o.difficulties as unknown[]) : []).map(normDifficulty),
       ),
@@ -238,6 +344,9 @@ async function normalizeZipManifest(raw: unknown, entryMap: Map<string, ZipEntry
       cover,
       accentColor: asStr(o.accentColor) || undefined,
       audio,
+      ...(bgImage ? { bgImage } : {}),
+      ...(bgVideo ? { bgVideo } : {}),
+      ...(storyboard ? { storyboard } : {}),
       basePath: '',
       difficulties,
     };
@@ -369,8 +478,14 @@ export async function importZip(
     }
     const fallbackTitle = g.folder || file.name.replace(/\.zip$/i, '');
     const song = await buildSong(g, fallbackTitle);
+    if (!song) {
+      warnings.push(
+        t ? t('import.warnNoChart', { name: g.folder || file.name }) : `已跳过「${g.folder || file.name}」：缺少可用谱面（需要 N.json 或 info.json）`,
+      );
+      continue;
+    }
     if (!song.audio) {
-      warnings.push(t ? t('import.warnNoAudio', { name: song.title }) : `「${song.title}」缺少音频文件`);
+      warnings.push(t ? t('import.warnNoAudio', { name: song.title }) : `「${song.title}」缺少音频文件（约定名 base.mp3）`);
     }
     songs.push(song);
   }

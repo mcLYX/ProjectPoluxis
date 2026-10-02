@@ -440,8 +440,14 @@ async function fetchAndStoreLocal(url: string): Promise<string> {
 export async function downloadSongToLibrary(song: SongItem): Promise<void> {
   const audioUrl = song.onlineUrls?.audio ?? song.audio;
   const coverUrl = song.onlineUrls?.cover ?? song.cover;
+  const bgImageUrl = song.onlineUrls?.bgImage ?? song.bgImage;
+  const bgVideoUrl = song.onlineUrls?.bgVideo ?? song.bgVideo;
+  const storyboardUrl = song.onlineUrls?.storyboard ?? song.storyboard;
   const audioRef = audioUrl ? await fetchAndStoreLocal(audioUrl) : '';
   const coverRef = coverUrl ? await fetchAndStoreLocal(coverUrl) : '';
+  const bgImageRef = bgImageUrl ? await fetchAndStoreLocal(bgImageUrl) : '';
+  const bgVideoRef = bgVideoUrl ? await fetchAndStoreLocal(bgVideoUrl) : '';
+  const storyboardRef = storyboardUrl ? await fetchAndStoreLocal(storyboardUrl) : '';
   const difficulties: DifficultyEntry[] = [];
   for (let i = 0; i < song.difficulties.length; i++) {
     const d = song.difficulties[i];
@@ -455,12 +461,18 @@ export async function downloadSongToLibrary(song: SongItem): Promise<void> {
     ...song,
     audio: audioRef,
     cover: coverRef,
+    ...(bgImageRef ? { bgImage: bgImageRef } : { bgImage: undefined }),
+    ...(bgVideoRef ? { bgVideo: bgVideoRef } : { bgVideo: undefined }),
+    ...(storyboardRef ? { storyboard: storyboardRef } : { storyboard: undefined }),
     difficulties,
     source: 'local',
     onlineId,
     onlineUrls: {
       audio: (song.onlineUrls?.audio ?? song.audio) || undefined,
       cover: (song.onlineUrls?.cover ?? song.cover) || undefined,
+      bgImage: bgImageUrl || undefined,
+      bgVideo: bgVideoUrl || undefined,
+      storyboard: storyboardUrl || undefined,
       charts: song.difficulties.map((d, i) => song.onlineUrls?.charts?.[i] ?? d.chartFile),
     },
   };
@@ -471,6 +483,9 @@ export function collectSongRefs(song: SongItem): string[] {
   const refs: string[] = [];
   if (song.audio?.startsWith('idb://')) refs.push(song.audio.replace(/^idb:\/\//, ''));
   if (song.cover?.startsWith('idb://')) refs.push(song.cover.replace(/^idb:\/\//, ''));
+  if (song.bgImage?.startsWith('idb://')) refs.push(song.bgImage.replace(/^idb:\/\//, ''));
+  if (song.bgVideo?.startsWith('idb://')) refs.push(song.bgVideo.replace(/^idb:\/\//, ''));
+  if (song.storyboard?.startsWith('idb://')) refs.push(song.storyboard.replace(/^idb:\/\//, ''));
   song.difficulties.forEach((d) => {
     if (d.chartFile?.startsWith('idb://')) refs.push(d.chartFile.replace(/^idb:\/\//, ''));
   });

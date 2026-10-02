@@ -37,20 +37,34 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
   const commitJudgement = (note: ResolvedNote, j: JudgementType, dtMs: number): void => {
     if (ctx.isEditorModeRef.current) return;
     if (ctx.judgedNotesRef.current.has(note.id)) return;
+    if (note.fake) return; // 假音符：完全不参与判定（防御；命中检测层已跳过）
     ctx.judgedNotesRef.current.add(note.id);
-    ctx.judgedCountRef.current++;
-    const sc = calculateNoteScore(j, countPlayableNotes(ctx.chartRef.current));
+    // 不计分音符：参与判定，但不计分、不计数量（judgedCount）、不计连击（App 侧整条跳过）。
+    const noScore = note.noScore === true;
+    if (!noScore) ctx.judgedCountRef.current++;
+    const sc = noScore ? 0 : calculateNoteScore(j, countPlayableNotes(ctx.chartRef.current));
     if (j !== 'Miss') globalAudio.playHitSound(note.type);
-    // Note color = per-note override, then event-driven current color, then chart default.
-    const noteColor = note.color || ctx.currentNoteColorRef.current || ctx.chartRef.current.metadata.noteColor;
+    // Note color = per-note override, then layer color (inherit / layer events), then chart default.
+    const noteColor = ctx.getNoteColor
+      ? ctx.getNoteColor(note)
+      : note.color || ctx.currentNoteColorRef.current || ctx.chartRef.current.metadata.noteColor;
     // Spawn the burst at the note's ACTUAL z position when hit, not at the
     // judgement plane. noteZ = JUDGE_Z + (dtMs/1000)*speed: early hits
     // (dtMs<0) place the burst behind the plane (note still approaching);
     // late hits (dtMs>0) place it in front (note has passed). +0.05 keeps
     // particles just in front of the note mesh to avoid z-fighting.
     const noteZ = noteHitZ(dtMs, ctx.speedRef.current);
-    spawnBurst(note.x, note.y, j, note.type, noteColor, noteZ, note.angle ?? 0);
-    ctx.onJudgementRef.current?.({ id: note.id, type: j, x: note.x, y: note.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: note.type });
+    // 图层偏移：打击特效与判定反馈**钉在判定落位**（不随播放中的整列平移跑动）；
+    // 未注入 getLandingPos 时退回 getEffectivePos / 原坐标。
+    const ep = ctx.getLandingPos
+      ? ctx.getLandingPos(note)
+      : ctx.getEffectivePos
+        ? ctx.getEffectivePos(note)
+        : note;
+    spawnBurst(ep.x, ep.y, j, note.type, noteColor, noteZ, note.angle ?? 0);
+    ctx.onJudgementRef.current?.({ id: note.id, type: j, x: ep.x, y: ep.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: note.type, noScore: noScore || undefined });
+    // 音符触发器（§3.4）：判定提交后分发（幂等由 judgedNotesRef 保证每个音符只判一次）。
+    ctx.dispatchNoteTrigger?.(note, j);
   };
 
   const commitSlideNode = (
@@ -64,16 +78,25 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
     if (ctx.isEditorModeRef.current) return;
     const key = `${slide.id}#${idx}`;
     if (ctx.judgedNotesRef.current.has(key)) return;
+    if (slide.fake) return; // 假音符：整条 slide 链（含全部子节点）不判定、不产生 Miss
     ctx.judgedNotesRef.current.add(key);
-    ctx.judgedCountRef.current++;
-    const sc = calculateNoteScore(j, countPlayableNotes(ctx.chartRef.current));
+    const noScore = slide.noScore === true;
+    if (!noScore) ctx.judgedCountRef.current++;
+    const sc = noScore ? 0 : calculateNoteScore(j, countPlayableNotes(ctx.chartRef.current));
     if (j !== 'Miss') globalAudio.playHitSound('slide');
-    const noteColor = slide.color || ctx.currentNoteColorRef.current || ctx.chartRef.current.metadata.noteColor;
+    const noteColor = ctx.getNoteColor
+      ? ctx.getNoteColor(slide)
+      : slide.color || ctx.currentNoteColorRef.current || ctx.chartRef.current.metadata.noteColor;
     // Spawn at the slide node's actual z position (see commitJudgement).
     const noteZ = noteHitZ(dtMs, ctx.speedRef.current);
     const nodeAngle = idx === 0 ? (slide.angle ?? 0) : (slide.resolvedNodes?.[idx - 1]?.angle ?? 0);
-    spawnBurst(nx, ny, j, 'slide', noteColor, noteZ, nodeAngle);
-    ctx.onJudgementRef.current?.({ id: key, type: j, x: nx, y: ny, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: 'slide' });
+    // 特效/反馈钉落位：slide 子节点用各自 timeSec 求落点偏移（nx/ny 是嵌入
+    // curTime 偏移后的坐标，仅作未注入时的回退）。
+    const lp = ctx.getLandingPos ? ctx.getLandingPos(slide, idx) : { x: nx, y: ny };
+    spawnBurst(lp.x, lp.y, j, 'slide', noteColor, noteZ, nodeAngle);
+    ctx.onJudgementRef.current?.({ id: key, type: j, x: lp.x, y: lp.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: 'slide', noScore: noScore || undefined });
+    // slide 子节点沿用**头节点**的触发器（子节点不带自己的 trigger）。
+    ctx.dispatchNoteTrigger?.(slide, j);
   };
 
   const getSlideRt = (id: string, nodeCount: number): SlideRt => {
@@ -110,6 +133,7 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
    */
   const processSlide = (note: ResolvedNote, curTime: number): void => {
     // Cached: avoids rebuilding [head, ...resolvedNodes] every frame.
+    if (note.fake) return; // 假音符：整条 slide 链不判定（含漏掉也不打断连击）
     const allNodes = ctx.getAllNodes(note);
     const rt = getSlideRt(note.id, allNodes.length);
 
