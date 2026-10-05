@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Sliders, Volume2, Focus, Eye, Maximize2, X, Zap, Languages, Globe, Info, Palette,
-  User, Upload, Trash2, LogIn, LogOut, Gauge, Gamepad2, Ban,
+  User, Upload, Trash2, LogIn, LogOut, Gauge, Gamepad2, Monitor,
 } from 'lucide-react';
 import type { QualityMode } from '../types/game';
 import { useI18n, LANGS } from '../i18n';
@@ -113,7 +113,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   defaultSkinJudgeWidth, setDefaultSkinJudgeWidth,
 }) => {
   const { t, lang, setLang } = useI18n();
-  const [tab, setTab] = useState<SettingsTab>('graphics');
+  /* 默认落在「游戏」页：这里放的是每次上手都要动的那几项（延迟调整 / 流速 /
+     判定辅助）。玩家打开设置的第一需求通常不在图形页。 */
+  const [tab, setTab] = useState<SettingsTab>('game');
   // R4-6: quality 切片从 qualityStore 订阅（仅本组件重渲染）。
   const quality = useQuality();
   /* ---- 账号切片（必须在 isOpen 早退之前声明，保证 hook 顺序稳定） ---- */
@@ -234,7 +236,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           Lite 预设下整体置灰不可用。 */}
       <section className={`space-y-1.5 transition-opacity ${customOptDisabled ? 'opacity-40 pointer-events-none' : ''}`}>
         <div className="flex items-center justify-between gap-3">
-          <label className="text-sm font-medium text-white/80">{t('settings.custom.renderScale')}</label>
+          {/* 图标 + 蓝色标题，与同页其它滑杆项（渲染距离 / 音符缩放 / 帧率上限）保持一致；
+              原本是白字且无图标，在这一排里显得像个附属说明而不是一个设置项。 */}
+          <label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Monitor size={16} /> {t('settings.custom.renderScale')}</label>
           <span className={valueClass}>{(quality.customRenderScale * 100).toFixed(0)}%</span>
         </div>
         <input
@@ -286,16 +290,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     </div>
   );
 
+  /* 延迟调整在「游戏」和「声音」两个 Tab 都要出现 —— 一半玩家认为它属于声音。
+     刻意做成**同一份 JSX 复用同一个 state**（而不是各自派生一份）：两边读写的是
+     AudioManager/App 里那一个值，天然双向同步，不存在"一边改了另一边还是旧的"。 */
+  const audioOffsetSection = (
+    <section className="space-y-1.5">
+      <div className="flex justify-between"><label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Focus size={16} /> {t('settings.audioOffset')}</label><span className={valueClass}>{audioOffsetMs > 0 ? '+' : ''}{audioOffsetMs}ms</span></div>
+      <input type="range" min="-600" max="400" step="5" value={audioOffsetMs} onChange={(e) => setAudioOffsetMs(Number(e.target.value))} className={sliderClass} />
+      <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>+400ms</span></div>
+      <p className="text-[11px] text-white/50 leading-relaxed">
+        {t('settings.audioOffsetHint')}
+      </p>
+    </section>
+  );
+
   const gameContent = (
     <div className="space-y-5">
-      <section className="space-y-1.5">
-        <div className="flex justify-between"><label className="flex items-center gap-2 text-sm font-bold text-cyan-300"><Focus size={16} /> {t('settings.audioOffset')}</label><span className={valueClass}>{audioOffsetMs > 0 ? '+' : ''}{audioOffsetMs}ms</span></div>
-        <input type="range" min="-600" max="400" step="5" value={audioOffsetMs} onChange={(e) => setAudioOffsetMs(Number(e.target.value))} className={sliderClass} />
-        <div className="flex justify-between text-[11px] text-white/40 font-mono"><span>-600ms</span><span>+400ms</span></div>
-        <p className="text-[11px] text-white/50 leading-relaxed">
-          {t('settings.audioOffsetHint')}
-        </p>
-      </section>
+      {audioOffsetSection}
 
       <section className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
@@ -386,7 +397,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
       <section className="space-y-1.5">
         <label className="flex items-center gap-2 text-sm font-bold text-cyan-300 cursor-pointer select-none" onClick={() => setDisableExtraContent(!disableExtraContent)}>
-          <Ban size={16} />
           <input type="checkbox" checked={disableExtraContent} onChange={() => setDisableExtraContent(!disableExtraContent)} className="w-4 h-4 rounded border-white/30 bg-white/10 focus:outline-none cursor-pointer" />
           {t('settings.disableExtraContent')}
         </label>
@@ -708,6 +718,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {t('settings.sfxVolHint')}
         </p>
       </section>
+      {/* 延迟调整：与「游戏」页复用同一份 state，两边天然同步（见 audioOffsetSection）。
+          排在两个音量之后、兼容模式之前：音量 → 时序 → 同步引擎，层级顺。 */}
+      {audioOffsetSection}
       <section className="space-y-1.5">
         <label className="flex items-center gap-2 text-sm font-bold text-cyan-300 cursor-pointer select-none" onClick={() => setCompatMode(!compatMode)}>
           <input type="checkbox" checked={compatMode} onChange={() => setCompatMode(!compatMode)} className="w-4 h-4 rounded border-white/30 bg-white/10 focus:outline-none cursor-pointer" />

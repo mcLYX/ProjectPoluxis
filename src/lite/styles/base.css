@@ -12,6 +12,11 @@
       font-family: 'Consolas', 'Courier New', monospace;
       overflow: hidden; -ms-user-select: none; -moz-user-select: none; -webkit-user-select: none; user-select: none;
       -ms-touch-action: none; touch-action: none;
+      /* 长按气泡 / 双击放大气泡（iOS）。`-webkit-touch-callout` 是可继承属性，
+         写在这里即覆盖全页（含 canvas 与按钮）；游戏内 canvas 上还有一条
+         非被动 touchstart + preventDefault 兜底（见 09-engine.js bindInput）——
+         只靠 CSS 在部分 iOS 版本上仍会弹出放大镜气泡。 */
+      -webkit-touch-callout: none;
     }
     #app { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; }
     /* touch-action MUST be set on the canvas itself (the actual touch target
@@ -27,6 +32,9 @@
       position: absolute; top: 0; right: 0; bottom: 0; left: 0;
       width: 100%; height: 100%; display: block;
       -ms-touch-action: none; touch-action: none;
+      /* 同上：canvas 才是触摸真正落点，单独再写一份（不依赖继承），
+         配合 09-engine.js 里非被动 touchstart 的 preventDefault 压掉 iOS 放大镜。 */
+      -webkit-touch-select: none; -webkit-touch-callout: none;
     }
     /* overlay is click-through by default; only visible .screen children capture
      * pointer events. This lets the HUD pause button (z-index 5, below the

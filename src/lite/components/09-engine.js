@@ -41,6 +41,10 @@
     /* 默认开启：多数设备关闭后音画同步更好，但部分设备音频时钟不稳会出问题，
      * 故以兼容模式为默认，异常时反而更稳。仅改默认值，文案与完整版不同步。 */
     compatMode: true,
+    /* 禁用附加内容：勾选后不再加载歌曲目录的背景图（bg.jpg），画面退回渐变背景。
+     * Lite 的"附加内容"只有背景图这一种（无视频、无故事板）。低配设备或只想读谱时
+     * 用它省内存 —— 与完整版设置同名，便于两版互相迁移认知。 */
+    disableExtraContent: false,
     /* Render frame-rate cap (0 = unlimited). Mirrors the full version's
      * qualityStore.maxFps default: on 90/120/144Hz screens this drops the drawn
      * frame count (and with it power draw) with almost no visual difference. */
@@ -1529,6 +1533,28 @@
     window.addEventListener('orientationchange', invalidateRect);
     function offset(e) { var r = rect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
     function touchOffset(t) { var r = rect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; }
+
+    /* iOS: kill the "double-tap and hold" magnifier bubble (loupe).
+       Same approach as the full build's 3D canvas (GameCanvas.tsx) — all three
+       parts are needed:
+         1) CSS `-webkit-touch-callout: none` (see styles/base.css) turns off
+            the long-press callout;
+         2) a NON-PASSIVE touchstart whose preventDefault() actually suppresses
+            the loupe. Browsers default touchstart to passive on the root but
+            also honour `{passive:true}` if anything sets it, and in a passive
+            listener preventDefault() is a silent no-op — so the option object
+            must be explicit. CSS alone still pops the bubble on some iOS
+            versions;
+         3) touch-action / -webkit-touch-select / -webkit-touch-callout are set
+            on the canvas itself, since that is the real hit target and none of
+            these inherit reliably.
+       Legacy engines (IE9/IE11) treat the options object as a truthy `capture`
+       flag, which is harmless — the listener just runs in the capture phase. */
+    if (canvasEl.addEventListener) {
+      canvasEl.addEventListener('touchstart', function (e) {
+        if (e.preventDefault) e.preventDefault();
+      }, { passive: false });
+    }
 
     if (window.PointerEvent) {
       /* IE11 (and modern) Pointer Events. pointerdown judges taps immediately

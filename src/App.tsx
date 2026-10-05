@@ -388,6 +388,10 @@ export function App() {
   const editorChart = useMemo(() => {
     if (gameState !== 'editor' || editorLayerId === null) return currentChart;
     const lid = editorLayerId;
+    /* 防御：隔离的图层在当前谱面里已不存在（换谱面 / 图层被删）→ 退回总览。
+       否则 filter 会滤掉全部音符，表现为"谱面没有显示"。'' = 默认根图层，恒存在。 */
+    const exists = lid === '' || (currentChart.layers ?? []).some((l) => l.id === lid);
+    if (!exists) return currentChart;
     return { ...currentChart, notes: currentChart.notes.filter((n) => (n.layerId ?? '') === lid) };
   }, [currentChart, editorLayerId, gameState]);
   // Gameplay HUD is driven imperatively (no React re-render during play):
@@ -884,6 +888,9 @@ export function App() {
     setSelectedNoteId(null);
     setEditorPreviewPlaying(false);
     setEditorTarget(null);
+    // 图层隔离必须跟着谱面走：上一个谱面选中的图层 id 在新谱面里通常不存在，
+    // editorChart 会把所有音符滤掉 → "打开新谱面却什么都不显示"。回到总览。
+    setEditorLayerId(null);
     customAudioFileRef.current = null;
     currentAudioRefRef.current = null;
     // 自由编辑器 = 打开最近游玩的谱面：故事板/背景媒体**保留**（不清 storyUrl）。
@@ -990,6 +997,8 @@ export function App() {
     setHasCustomAudio(editorHasAudio);
 
     setEditorTarget(info);
+    // 同上：换谱面时把图层隔离复位到总览，避免沿用上一张谱面的图层 id。
+    setEditorLayerId(null);
     setCurrentChart(chart);
     setGameState('editor');
   }, []);
@@ -1659,26 +1668,38 @@ export function App() {
     const sel = base ? currentChartRef.current.notes.find((n) => n.id === base) : undefined;
 
     // Only the slide tool auto-chains: placing while a node of an existing slide
-    // chain is selected appends a child node (selection stays on the head).
+    // chain is selected appends a child node to that chain. Two rules:
+    //  1. 落点时间**早于**当前选中节点（头节点或子节点）→ 不连接，落进下方分支
+    //     另起一条新的 slide 链（原来是把节点硬推到链末之后）。
+    //  2. 连接成功后选中**刚放下的那个子节点**（原来保持选中链头，便于连续追加）。
     // Tap/Touch (and any non-chainable case) place a standalone note and select it.
     if (editorTool === 'place-slide' && sel && sel.type === noteType) {
-      const lastBeat = sel.nodes && sel.nodes.length > 0 ? sel.nodes[sel.nodes.length - 1].beat : sel.beat;
-      const step = Math.max(snapSubdivision, 0.05);
-      const newBeat = exactBeat > lastBeat + 0.001
-        ? exactBeat
-        : Math.round((lastBeat + step) * 1000) / 1000;
-      const childIndex = (sel.nodes ?? []).length;
-      setCurrentChart((prev) => {
-        const updatedNotes = prev.notes.map((n) =>
-          n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x: bx, y: by }] } : n
-        );
-        return { ...prev, notes: updatedNotes };
-      });
-      // 保持选中在链头上：多选集合同步为头节点，避免 Ctrl 切到多选后集合为空。
-      setSelectedNoteId(sel.id);
-      setSelectedNoteIds([sel.id]);
-      // 返回新子节点的 id 与 x/y/beat（slide 子节点不受 DSL 影响，即传入值）。
-      return { id: `${sel.id}#${childIndex + 1}`, x: bx, y: by, beat: newBeat };
+      // 选中节点自身的时间：id 带 `#i` 即子节点，否则是链头。
+      const hash = selectedNoteId ? selectedNoteId.indexOf('#') : -1;
+      const selIdx = hash >= 0 ? parseInt(selectedNoteId!.slice(hash + 1), 10) - 1 : -1;
+      const selNode = hash >= 0 ? sel.nodes?.[selIdx] : undefined;
+      const selBeat = selNode ? selNode.beat : sel.beat;
+      // 0.001 与既有 beat 容差一致：落点不早于选中节点才连接（相等仍按原逻辑顺延）。
+      if (exactBeat >= selBeat - 0.001) {
+        const lastBeat = sel.nodes && sel.nodes.length > 0 ? sel.nodes[sel.nodes.length - 1].beat : sel.beat;
+        const step = Math.max(snapSubdivision, 0.05);
+        const newBeat = exactBeat > lastBeat + 0.001
+          ? exactBeat
+          : Math.round((lastBeat + step) * 1000) / 1000;
+        const childIndex = (sel.nodes ?? []).length;
+        const childId = `${sel.id}#${childIndex + 1}`;
+        setCurrentChart((prev) => {
+          const updatedNotes = prev.notes.map((n) =>
+            n.id === sel.id ? { ...n, nodes: [...(n.nodes ?? []), { beat: newBeat, x: bx, y: by }] } : n
+          );
+          return { ...prev, notes: updatedNotes };
+        });
+        // 选中刚放下的子节点：单选焦点与多选集合同步（Ctrl 切多选时集合不会为空）。
+        setSelectedNoteId(childId);
+        setSelectedNoteIds([childId]);
+        // 返回新子节点的 id 与 x/y/beat（slide 子节点不受 DSL 影响，即传入值）。
+        return { id: childId, x: bx, y: by, beat: newBeat };
+      }
     }
 
     // Short, collision-resistant id: a 7-char base36 random (~78e9 combos).

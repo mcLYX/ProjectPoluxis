@@ -7,6 +7,7 @@ import type { ChartData, NoteData, EasingType, EventType, EventData } from '../t
 import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
 import { buildLayerTree, layerOffsetAt } from '../utils/layers';
+import { shouldDeselectOnRightClick } from '../utils/editorPointer';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 
 /** 判定平面世界 X 范围（权威源 types/game.NOTE_X_RANGE）。屏幕坐标钳制同用它。 */
@@ -863,6 +864,16 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    /* 右键 = 取消选中（单选 / 放置工具），浏览器上下文菜单由 canvas 的
+       onContextMenu 拦掉。在 setPointerCapture 之前返回：右键不进入放置 / 拖拽 /
+       scrub 任何分支，也不该留下悬停捕获状态。 */
+    if (shouldDeselectOnRightClick(e.button, true, toolRef.current)) {
+      e.preventDefault();
+      dragRef.current = null;
+      marqueeRectRef.current = null;
+      onSelectRef.current(null);
+      return;
+    }
     (e.target as Element).setPointerCapture?.(e.pointerId);
     const { px, py, w, h } = getPos(e);
     const curTime = isPlayingRef.current ? globalAudio.getCurrentTime() : gameTimeRef.current;
@@ -951,7 +962,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // 进入 Y 调整模式：垂直拖动超过死区后按 0.1 步进调整 y。
       // 基准为 DSL 处理后的实际 x/y/beat（placed.*，base）——规则可能改写 x/beat，
       // 拖动调 Y 时保持规则结果不变，仅调整 y（屏幕 y 钳 ±1.5）。
-      const pn = chartRef.current.notes.find((n) => n.id === placed.id);
+      // placed.id 可能是子节点（`head#i`，slide 链追加即如此），图层要回到链头查。
+      const headId = placed.id.split('#')[0];
+      const pn = chartRef.current.notes.find((n) => n.id === headId);
       const placeOy = offAt(pn?.layerId, placed.beat).y;
       dragRef.current = {
         id: placed.id, isNew: true, isScrub: false, isMarquee: false, isMultiDrag: false,
@@ -1201,6 +1214,9 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        /* 编辑器内屏蔽浏览器右键菜单：右键已被赋予「取消选中」语义，
+           系统菜单会打断制谱节奏（尤其放置工具连点时）。 */
+        onContextMenu={(e) => e.preventDefault()}
       />
     </div>
   );

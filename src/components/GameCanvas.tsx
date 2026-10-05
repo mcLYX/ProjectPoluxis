@@ -27,6 +27,7 @@ import type { JudgeSystemContext } from '../hooks/judgeContext';
 import { useJudgeSystem } from '../hooks/useJudgeSystem';
 import { useNoteEffects, recycleBurst, recycleShatter, disposeEffectPools } from '../hooks/useNoteEffects';
 import { useEditorGestures } from '../hooks/useEditorGestures';
+import { shouldDeselectOnRightClick } from '../utils/editorPointer';
 import { setCanvasCapturer } from '../utils/canvasCapture';
 
 import { globalAudio } from '../audio/AudioManager';
@@ -3511,6 +3512,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         isEditorMode ? (activeEditorTool === 'select' ? 'cursor-move' : activeEditorTool === 'quick-create' ? 'cursor-grab' : 'cursor-crosshair') : 'cursor-crosshair'
       }`}
       onPointerDown={(e) => {
+        /* 编辑器右键 = 取消选中（单选 / 放置工具）；在 updatePointer 之前返回，
+           右键既不进入判定/放置/quick-create 任何分支，也不写入 pointersRef
+           （否则没有配对的 pointerup，悬停态与 QC 轨迹会残留）。 */
+        if (shouldDeselectOnRightClick(e.button, !!isEditorModeRef.current, activeToolRef.current)) {
+          e.preventDefault();
+          onSelectEditorNoteRef.current?.(null);
+          return;
+        }
         updatePointer(e.pointerId, e.clientX, e.clientY, true, e.pointerType);
         const p = pointersRef.current.get(e.pointerId);
         if (!p) return;
@@ -3538,6 +3547,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           return;
         }
         handlePointerInteraction(p.x, p.y);
+      }}
+      onContextMenu={(e) => {
+        /* 编辑器内屏蔽系统右键菜单：右键已被赋予「取消选中」语义。
+           非编辑（游玩）态仍放行系统菜单。 */
+        if (isEditorModeRef.current) e.preventDefault();
       }}
       onPointerMove={(e) => {
         const inQC = isEditorModeRef.current && activeToolRef.current === 'quick-create';

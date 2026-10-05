@@ -36,6 +36,7 @@ import {
   Clock,
   BoxSelect,
   FileDown,
+  Layers,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { lintDsl, applyDslToNote } from '../utils/editorRules';
@@ -998,10 +999,11 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     });
     if (!topHit && !layerHit) return;
     const updated: ChartData = { ...chart };
-    if (topHit) {
-      if (nextTop.length > 0) updated.events = nextTop;
-      else delete updated.events;
-    }
+    /* ⚠️ 删最后一个事件时不能用 `delete updated.events`：上层 onUpdateChart 是
+       `{ ...prev, ...updated }` 的浅合并 —— **缺键等于不覆盖**，旧数组会原样留着，
+       表现为"最后一个事件删不掉"。必须显式写成 undefined 才会被覆盖
+       （与图层内事件的写法一致；undefined 在序列化时会被丢弃，符合可选字段语义）。 */
+    if (topHit) updated.events = nextTop.length > 0 ? nextTop : undefined;
     if (layerHit) updated.layers = nextLayers;
     onUpdateChart(updated);
   };
@@ -2158,7 +2160,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
             {/* === Layers Section（图层） === */}
             <div className={sectionClass}>
               <button onClick={() => toggleSection('layers')} className={sectionHeaderClass}>
-                <span className="flex items-center gap-1.5"><Music size={12} /> {t('editor.layers')}</span>
+                <span className="flex items-center gap-1.5"><Layers size={12} /> {t('editor.layers')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.layers ? '−' : '+'}</span>
               </button>
               {sectionOpen.layers && (

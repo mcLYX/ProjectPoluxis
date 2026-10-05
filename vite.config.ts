@@ -260,7 +260,14 @@ export default defineConfig({
   },
   build: {
     target: "es2019",
-    cssTarget: "chrome73",
+    // CSS 目标浏览器（Lightning CSS 据此补前缀 / 降级）。
+    // ⚠️ 不能只写 chrome73：iOS Safari 直到 18 才支持**无前缀**的 backdrop-filter，
+    // 老 iOS 只认 -webkit-backdrop-filter；而单独写 chrome73 时 Lightning CSS 判定
+    // 目标浏览器都支持无前缀版本 → 产物里一个 -webkit- 都没有 → iOS 玻璃 UI 不磨砂
+    // （历史上的反向坑：手写 -webkit- 而不带目标时会被折叠，退化成安卓不磨砂）。
+    // 加上 safari/ios 目标后，Lightning CSS 会同时输出 `-webkit-backdrop-filter`
+    // 与标准 `backdrop-filter` 两条声明，iOS 与桌面/安卓都正确。
+    cssTarget: ["chrome73", "edge100", "firefox103", "safari13", "ios13"],
     assetsDir: "assets",
     chunkSizeWarningLimit: 1500,
     rolldownOptions: {

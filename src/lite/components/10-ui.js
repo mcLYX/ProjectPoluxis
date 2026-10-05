@@ -24,6 +24,9 @@
    * currentSongItem because album cards need the same "select, then its action
    * button appears" treatment (otherwise their Enter button could never show). */
   var selectedItem = null;
+  /* 当前曲目请求的背景图 URL（受「禁用附加内容」闸门控制，见 startGameWithChart）。
+     记住它，是为了在设置里取消勾选时能立刻把背景恢复回来，不必重开曲目。 */
+  var bgRequestUrl = null;
 
   /* data-role lookup: walks up from an event target. IE9 has no
    * Element.closest(), so this ES5 helper replaces the old fragile
@@ -448,10 +451,10 @@
     resetGame(chart);
     /* 背景媒体：歌曲目录约定文件 bg.jpg（songItem.bgImage 为索引相对路径，按服务器根
      * 重写）。优先级 视频 > 图片，但 Lite 仅支持图片 → 有视频也回落图片（若同时提供）。
-     * 必须在 resetGame 之后设置（resetGame 会清空媒体层）。 */
-    if (songItem && songItem.bgImage) {
-      setBgImageLite(resolveServerUrl(songItem.bgImage));
-    }
+     * 必须在 resetGame 之后设置（resetGame 会清空媒体层）。
+     * 「禁用附加内容」勾选时连图都不请求（screen 就存在于 bgRequestUrl 里但不加载）。 */
+    bgRequestUrl = (songItem && songItem.bgImage) ? resolveServerUrl(songItem.bgImage) : null;
+    setBgImageLite(settings.disableExtraContent ? null : bgRequestUrl);
     game.autoPlay = document.getElementById('autoplay-toggle').checked;
     audio.init();
     audio.setMusicVolume(settings.musicVolume);
@@ -884,6 +887,7 @@
       document.getElementById(map[i][2]).textContent = map[i][3](map[i][1]);
     }
     try { document.getElementById('set-compat').checked = !!settings.compatMode; } catch (e) {}
+    try { document.getElementById('set-noextra').checked = !!settings.disableExtraContent; } catch (e) {}
     settingsModal.classList.add('active');
   }
   function closeSettings() { settingsModal.classList.remove('active'); }
@@ -963,6 +967,20 @@
       settings.compatMode = on;
       audio.setCompatMode(on);
       saveSettings();
+    }
+    el.addEventListener('change', update);
+  })();
+
+  /* 「禁用附加内容」复选框：Lite 的附加内容只有背景图（bg.jpg）一种。
+     勾选 → 不加载（并立即丢掉已加载的那张）；取消勾选 → 把当前曲目的图恢复回来，
+     不必重开曲目。闸门同时做在 startGameWithChart，保证开局就一次都不请求。 */
+  (function () {
+    var el = document.getElementById('set-noextra');
+    function update() {
+      var on = !!el.checked;
+      settings.disableExtraContent = on;
+      saveSettings();
+      setBgImageLite(on ? null : bgRequestUrl);
     }
     el.addEventListener('change', update);
   })();

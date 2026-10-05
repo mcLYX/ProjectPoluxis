@@ -1,4 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
+// 卡片专属样式（收起态 hover 光晕 + 结算入场动画的 keyframes）。
+// ⚠️ 历史上这个文件没有被任何模块 import，里面两条规则一直是死代码；组件必须显式引入。
+import './SongCard.css';
 import { cssVars } from '../utils/style';
 import { BeatmapItem, SongItem, AlbumItem, DifficultyEntry } from '../types/beatmap';
 
@@ -62,26 +65,47 @@ interface SongCardProps {
   onSave?: () => void;
 }
 
-function rankColor(rank: GameStats['rank']): string {
+/** 结算文字阴影：可读性主力是它（+局部渐变），而不是把整张曲绘压暗。 */
+const RESULT_TEXT_SHADOW = '0 2px 10px rgba(0,0,0,0.92), 0 0 24px rgba(0,0,0,0.5)';
+/** 小字号标签用：只做"贴住背景"的最小保证 —— 一层 1px 硬影 + 一层很淡的扩散。
+ *  刻意保持轻：多层浓阴影会让每个小块各自"浮"起来，反而暴露出布局的分块边界
+ *  （哪块从哪开始、到哪结束一目了然），看着像拼装件而不像一张画面。 */
+const RESULT_TEXT_SHADOW_SM = '0 1px 2px rgba(0,0,0,0.88), 0 0 6px rgba(0,0,0,0.55)';
+
+interface RankVisual {
+  /** 评级字形的渐变填充（配合 .gradient-text 的 background-clip:text）。 */
+  gradient: string;
+  /** 外发光色（`filter: drop-shadow()`），与填充同色系。 */
+  glow: string;
+}
+
+/** 评级配色：EX 系金橙、S 青、A 绿、B/C 冷紫、F 灰。
+ *  用渐变+发光而非纯色文字 —— 结算卡没有玻璃底衬托，纯色压在曲绘上容易发灰。 */
+function rankVisual(rank: GameStats['rank']): RankVisual {
   switch (rank) {
     case 'EX+':
+      return { gradient: 'linear-gradient(165deg,#fff8e1 0%,#ffd166 34%,#fb923c 68%,#f43f5e 100%)', glow: 'rgba(251,146,60,0.78)' };
     case 'EX':
-      return 'text-amber-400';
+      return { gradient: 'linear-gradient(165deg,#fffbeb 0%,#fcd34d 42%,#f59e0b 100%)', glow: 'rgba(251,191,36,0.66)' };
     case 'S':
-      return 'text-cyan-300';
+      return { gradient: 'linear-gradient(165deg,#ecfeff 0%,#7dd3fc 40%,#22d3ee 100%)', glow: 'rgba(34,211,238,0.62)' };
     case 'A':
-      return 'text-emerald-400';
+      return { gradient: 'linear-gradient(165deg,#ecfdf5 0%,#6ee7b7 42%,#10b981 100%)', glow: 'rgba(52,211,153,0.56)' };
+    case 'B':
+      return { gradient: 'linear-gradient(165deg,#eef2ff 0%,#a5b4fc 42%,#6366f1 100%)', glow: 'rgba(129,140,248,0.5)' };
+    case 'C':
+      return { gradient: 'linear-gradient(165deg,#f5f3ff 0%,#c4b5fd 42%,#8b5cf6 100%)', glow: 'rgba(167,139,250,0.46)' };
     default:
-      return 'text-white/50';
+      return { gradient: 'linear-gradient(165deg,#f8fafc 0%,#cbd5e1 42%,#94a3b8 100%)', glow: 'rgba(148,163,184,0.42)' };
   }
 }
 
 function badgeClass(badge: ClearBadge): string {
   return badge === 'FC'
-    ? 'bg-sky-500/20 border-sky-400 text-sky-300 shadow-[0_0_20px_rgba(56,189,248,0.5)]'
+    ? 'bg-sky-500/20 border-sky-400 text-sky-300 shadow-[0_0_14px_rgba(56,189,248,0.38)]'
     : badge === 'AP'
-    ? 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.5)]'
-    : 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-[0_0_28px_rgba(251,146,60,0.7)]';
+    ? 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-[0_0_14px_rgba(251,191,36,0.38)]'
+    : 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-[0_0_18px_rgba(251,146,60,0.5)]';
 }
 
 const DEFAULT_ACCENT = '#0ea5e9';
@@ -116,6 +140,59 @@ function isAvailable(item: BeatmapItem): boolean {
   // Local / online songs: a difficulty is enough to play (synth audio when no
   // audio file is present).
   return item.difficulties.length > 0;
+}
+
+/** 判定小分区：只有一道顶高光 + 底部一条渐隐色条，不画整圈边框 —— 画满边框会把
+ *  曲绘切成一格一格的小方块，视觉上"盖"在封面上而不是"长"在封面上。 */
+function JudgeStat({
+  label, value, color, glow, onClick,
+}: {
+  label: string;
+  value: React.ReactNode;
+  color: string;
+  glow: string;
+  onClick?: () => void;
+}) {
+  const paint: React.CSSProperties = {
+    /* 渐变对比压低 + 顶部内高光减弱：让小块读作"一层光"而不是"一块面板"。
+       底色一旦太实、边缘一旦太亮，格子与格子之间就会浮出布局的边界线。 */
+    background: 'linear-gradient(180deg, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.045) 52%, rgba(255,255,255,0.015) 100%)',
+    boxShadow: `inset 0 1px 0 rgba(255,255,255,0.14), 0 6px 16px -14px ${glow}`,
+  };
+  const shell = 'relative block overflow-hidden rounded-xl px-2 py-1.5 text-left transition';
+  const body = (
+    <>
+      <span
+        className="absolute left-2.5 right-2.5 bottom-0 h-[2px] rounded-full"
+        style={{ background: `linear-gradient(90deg, transparent, ${color}, transparent)` }}
+      />
+      <span
+        className="block text-[9px] font-bold font-orbitron tracking-[0.18em]"
+        style={{ color, textShadow: `0 0 12px ${glow}` }}
+      >
+        {label}
+      </span>
+      <span
+        className="block font-mono font-bold text-white text-[clamp(12px,3.9vw,15px)] leading-tight mt-0.5 tabular-nums"
+        style={{ textShadow: RESULT_TEXT_SHADOW }}
+      >
+        {value}
+      </span>
+    </>
+  );
+  return onClick ? (
+    <button
+      type="button"
+      data-action="judge-split"
+      onClick={onClick}
+      className={`${shell} cursor-pointer hover:brightness-125 active:scale-[0.97]`}
+      style={paint}
+    >
+      {body}
+    </button>
+  ) : (
+    <div className={`${shell} cursor-default`} style={paint}>{body}</div>
+  );
 }
 
 export const SongCard: React.FC<SongCardProps> = ({
@@ -153,6 +230,8 @@ export const SongCard: React.FC<SongCardProps> = ({
 
   const accent = getAccent(item);
   const inResult = isExpanded && !!resultData;
+  /** 结算评级配色（渐变填充 + 外发光）。 */
+  const rv = rankVisual(resultData ? resultData.stats.rank : 'F');
   // The result card represents a chart that was just played — always startable.
   const available = !!resultData || isAvailable(item);
   const coverUrl = item.cover ? resolveBeatmapUrl(item.cover) : '';
@@ -289,8 +368,30 @@ export const SongCard: React.FC<SongCardProps> = ({
         </div>
       )}
 
-      {/* Dark gradient overlay for readability */}
-      <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/20 pointer-events-none" />
+      {/* 可读性底衬。
+          常态：整卡自下而上的压暗渐变（卡片小、信息少，代价可忽略）。
+          结算态：改为「底部渐隐条 + 左上角题名晕 + 强调色氛围光」—— 只托住文字真正
+          占住的那一带，卡片中上部的大片曲绘保持通透，UI 不会把封面横切成两半。 */}
+      <div
+        className={`absolute inset-0 pointer-events-none ${inResult ? '' : 'bg-gradient-to-t from-black/90 via-black/30 to-black/20'}`}
+        style={inResult ? {
+          backgroundImage: [
+            // 底栏：只托住文字这一带，顶部完全消失（无硬边）。有下面的"聚焦带"分担
+            // 对比度需求，这里刻意比上一版轻 —— 压暗不再是小字可读性的唯一手段。
+            'linear-gradient(to top, rgba(3,5,9,0.78) 0%, rgba(3,5,9,0.58) 26%, rgba(3,5,9,0.30) 50%, rgba(3,5,9,0.10) 72%, rgba(3,5,9,0) 90%)',
+            // 题名角晕：只压左上角一小块，右上角曲绘留白
+            'radial-gradient(70% 36% at 6% 4%, rgba(3,5,9,0.70) 0%, rgba(3,5,9,0.28) 50%, rgba(3,5,9,0) 100%)',
+            // 强调色氛围光：让成绩区与曲绘同色系，视觉上"长"在封面上
+            `radial-gradient(58% 44% at 50% 92%, ${rgba(accent, 0.24)} 0%, ${rgba(accent, 0.07)} 46%, transparent 74%)`,
+          ].join(', '),
+        } : undefined}
+      />
+
+      {/* 聚焦带（仅结算态）：把封面在文字所在的那一带有色地"收一收"——
+          轻模糊 + 降饱和 + 微压暗，向上渐隐消失。全卡唯一一处模糊，范围只有下方
+          58%，中上部曲绘原样保留；像镜头景深把繁复背景推远，文字自然浮出。
+          样式与 mask 的 @supports 兜底都在 SongCard.css。 */}
+      {inResult && <div className="result-focus-band" />}
 
       {/* Collapsed state: vertical text (left bottom) */}
       <div
@@ -429,109 +530,221 @@ export const SongCard: React.FC<SongCardProps> = ({
         </div>
       )}
 
-      {/* Result overlay: judgement breakdown panel (result mode only) */}
+      {/* 结算成绩：直接落在曲绘上，**没有玻璃面板**。
+          可读性来自「底部渐隐底衬 + 字形发光 + 小分区渐变」三层，而不是把整张封面压暗。 */}
       {item.type === 'song' && resultData && (
         <div
           className={`
-            absolute left-1/2 -translate-x-1/2 top-[5.75rem] bottom-[4.75rem] short:top-[4.5rem] short:bottom-[4.25rem]
-            flex items-center justify-center
+            absolute left-1/2 -translate-x-1/2 top-[84px] bottom-[92px] short:top-[72px] short:bottom-[88px]
+            flex flex-col justify-end
             transition-opacity duration-400
             ${isExpanded ? 'opacity-100' : 'opacity-0 pointer-events-none'}
           `}
-          /* Viewport-anchored width (result card inner width = `min(94vw,600px)
-           * - 32px`). The result card animates 420→600 on entry, so a `left-4
-           * right-4` box would re-wrap the judgement grid every frame. Center it
-           * with translateX(-50%) (compositor, no reflow) and fix the width. */
-          style={{ width: 'calc(min(94vw, 600px) - 2rem)' }}
+          /* 视口锚定宽度（结算卡内宽 = min(94vw,600px) - 2.5rem）：卡片 420→600 的
+             入场过渡期间若用 left/right 锚定，判定数字会每帧重排。用 translateX(-50%)
+             居中（走合成器，不触发重排）+ 固定宽度。 */
+          style={{ width: 'calc(min(94vw, 600px) - 2.5rem)' }}
         >
-          <div className="w-full max-h-full overflow-y-auto rounded-2xl bg-[rgba(255,255,255,0.06)] result-card-blur border border-[rgba(255,255,255,0.2)] px-4 py-3 short:py-2 text-center" style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18)' }}>
-            <div className="flex items-center justify-center gap-1.5 text-white mb-1 short:mb-0.5">
-              <Award size={13} />
-              <span className="text-[10px] font-bold font-orbitron tracking-[0.3em] uppercase">
+          {/* 刻意**不加** overflow / 滚动容器。
+              坑：`overflow-y: auto` 会让 `overflow-x` 从 visible 强制变成 auto
+              （CSS 规范：两轴中只要有一个不是 visible，另一个就取 auto），于是这个
+              盒子横竖都在裁剪 —— 评级 EX+ 的 30px 辉光和分数的 18px 辉光一跨出盒子
+              左右边缘就被切断，屏幕上出现两条笔直的"版面边界"切口，比裁之前更难看。
+              想靠滚动兜底纵向溢出也不行：裁剪必然带来切口。
+              纵向已由 clamp 尺寸 + 横屏单行布局压到最小，正常不会溢出。 */}
+          <div>
+            {/* ① 眉标：关卡完成 */}
+            <div className="result-rise flex items-center gap-2 mb-1.5" style={{ animationDelay: '40ms' }}>
+              <span
+                className="w-[3px] h-3 rounded-full"
+                style={{
+                  background: `linear-gradient(180deg, ${accent}, ${rgba(accent, 0.15)})`,
+                  boxShadow: `0 0 10px ${rgba(accent, 0.85)}`,
+                }}
+              />
+              <Award size={12} className="text-white/75" />
+              <span
+                className="text-[10px] font-bold font-orbitron tracking-[0.32em] uppercase text-white/85"
+                style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
+              >
                 {t('songcard.trackCleared')}
               </span>
-            </div>
-
-            <div className="flex items-center justify-center gap-3 mb-1 short:mb-0.5">
-              <span
-                className={`font-orbitron font-black text-4xl short:text-2xl tracking-widest drop-shadow-lg ${rankColor(
-                  resultData.stats.rank
-                )}`}
-              >
-                {resultData.stats.rank}
-              </span>
-              {resultData.badge && (
+              {/* 新纪录提示挪到眉标行右端：它和"关卡完成"是同一层级的状态标记，
+                  挤在评级旁边会把主视觉挤成一团（横屏尤其明显）。 */}
+              {(resultData.isNewHighScore || resultData.isNewBadge) && (
                 <span
-                  className={`px-2.5 py-1 rounded-lg font-black font-orbitron text-sm short:text-xs tracking-widest border-2 ${badgeClass(
-                    resultData.badge
-                  )}`}
+                  className="result-rise ml-auto px-2 py-[2px] rounded-md text-[10px] font-bold font-orbitron tracking-[0.12em] text-amber-100 whitespace-nowrap"
+                  style={{
+                    animationDelay: '240ms',
+                    /* 描边与外辉都收一档：描边太实 + 光晕太浓时，pill 会变成一个
+                       独立贴片，把"这里是一块 UI"写在脸上。 */
+                    background: 'linear-gradient(100deg, rgba(251,191,36,0.30), rgba(251,146,60,0.12))',
+                    border: '1px solid rgba(253,224,71,0.38)',
+                    boxShadow: '0 0 12px rgba(251,191,36,0.32)',
+                    textShadow: RESULT_TEXT_SHADOW_SM,
+                  }}
                 >
-                  {resultData.badge}
+                  {resultData.isNewHighScore && resultData.isNewBadge
+                    ? t('songcard.newRecordAndBadge')
+                    : resultData.isNewHighScore
+                    ? t('songcard.newRecord')
+                    : t('songcard.newBadge')}
                 </span>
               )}
             </div>
 
-            {(resultData.isNewHighScore || resultData.isNewBadge) && (
-              <div className="text-amber-300 text-[10px] font-bold font-orbitron tracking-widest animate-pulse mb-0.5">
-                {resultData.isNewHighScore && resultData.isNewBadge
-                  ? t('songcard.newRecordAndBadge')
-                  : resultData.isNewHighScore
-                  ? t('songcard.newRecord')
-                  : t('songcard.newBadge')}
+            {/* ② 主视觉：评级（渐变 + 发光）+ 徽章 + 分数。
+                竖屏两行、分数在评级下方；横屏（short）压成一行、分数右对齐 ——
+                宽屏的横向空间本来就空着，纵向高度则寸土寸金。 */}
+            <div className="flex flex-col wide:flex-row wide:items-end wide:gap-5">
+              <div className="flex items-end gap-2.5">
+                <span
+                  className="result-rank-in font-orbitron font-black leading-[0.8] tracking-tight gradient-text"
+                  style={{
+                    fontSize: 'clamp(46px, min(15vw, 12vh), 88px)',
+                    backgroundImage: rv.gradient,
+                    filter: `drop-shadow(0 3px 10px rgba(0,0,0,0.9)) drop-shadow(0 0 30px ${rv.glow})`,
+                    animationDelay: '80ms',
+                  }}
+                >
+                  {resultData.stats.rank}
+                </span>
+                {resultData.badge && (
+                  <span
+                    className={`result-rise mb-1.5 wide:mb-2.5 px-2 py-[3px] rounded-md font-black font-orbitron text-[11px] tracking-[0.16em] border-2 ${badgeClass(
+                      resultData.badge
+                    )}`}
+                    style={{ animationDelay: '200ms' }}
+                  >
+                    {resultData.badge}
+                  </span>
+                )}
               </div>
-            )}
 
-            <div className="text-3xl short:text-2xl font-black font-orbitron tracking-tight gradient-text bg-gradient-to-r from-cyan-300 via-white to-amber-300 mb-2 short:mb-1">
-              {Math.round(resultData.stats.score).toLocaleString()}
-            </div>
-
-            {/* Perfect merges S-Perfect: "15(+7)"；点击切换为 early/late 拆分 E/L */}
-            <div className="grid grid-cols-3 gap-1.5 mb-1.5 short:mb-1">
               <div
-                onClick={() => setSplit((s) => (s === 'perfect' ? null : 'perfect'))}
-                className="rounded-lg bg-[rgba(255,255,255,0.05)] border border-[rgba(234,179,8,0.4)] py-1.5 short:py-1 cursor-pointer hover:bg-[rgba(255,255,255,0.1)] active:scale-95 transition select-none"
+                className="result-rise mt-1 wide:mt-0 wide:ml-auto flex items-baseline gap-2"
+                style={{ animationDelay: '150ms' }}
               >
-                <div className="text-yellow-300 text-[10px] font-bold tracking-wider">PERFECT</div>
-                <div className="font-mono font-bold text-white text-sm">
-                  {split === 'perfect' ? (
-                    <span>
-                      <span className="text-cyan-300">E{resultData.stats.perfectEarly}</span>{' '}
-                      <span className="text-red-300">L{resultData.stats.perfectLate}</span>
-                    </span>
-                  ) : (
-                    <>
-                      {resultData.stats.perfectCount + resultData.stats.sPerfectCount}
-                      {resultData.stats.sPerfectCount > 0 && (
-                        <span className="text-orange-400">(+{resultData.stats.sPerfectCount})</span>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-              <div
-                onClick={() => setSplit((s) => (s === 'good' ? null : 'good'))}
-                className="rounded-lg bg-[rgba(255,255,255,0.05)] border border-[rgba(14,165,233,0.4)] py-1.5 short:py-1 cursor-pointer hover:bg-[rgba(255,255,255,0.1)] active:scale-95 transition select-none"
-              >
-                <div className="text-sky-400 text-[10px] font-bold tracking-wider">GOOD</div>
-                <div className="font-mono font-bold text-white text-sm">
-                  {split === 'good' ? (
-                    <span>
-                      <span className="text-cyan-300">E{resultData.stats.goodEarly}</span>{' '}
-                      <span className="text-red-300">L{resultData.stats.goodLate}</span>
-                    </span>
-                  ) : (
-                    resultData.stats.goodCount
-                  )}
-                </div>
-              </div>
-              <div className="rounded-lg bg-[rgba(255,255,255,0.05)] border border-[rgba(239,68,68,0.4)] py-1.5 short:py-1">
-                <div className="text-red-400 text-[10px] font-bold tracking-wider">MISS</div>
-                <div className="font-mono font-bold text-white text-sm">{resultData.stats.missCount}</div>
+                <span
+                  className="text-[9px] font-orbitron tracking-[0.3em] text-white/55"
+                  style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
+                >
+                  SCORE
+                </span>
+                <span
+                  className="font-orbitron font-black leading-none tracking-tight gradient-text"
+                  style={{
+                    fontSize: 'clamp(24px, min(7.6vw, 6.2vh), 40px)',
+                    backgroundImage: 'linear-gradient(96deg, #a5f3fc 0%, #ffffff 46%, #fcd34d 100%)',
+                    filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.9)) drop-shadow(0 0 18px rgba(103,232,249,0.35))',
+                  }}
+                >
+                  {Math.round(resultData.stats.score).toLocaleString()}
+                </span>
               </div>
             </div>
 
-            <div className="text-[11px] text-white/70 font-mono">
-              MAX COMBO {resultData.stats.maxCombo}x · ACC {resultData.stats.accuracy.toFixed(2)}%
+            {/* ④ 发丝分隔线：两端都是渐隐（连起点也不画出来），刻意压得很淡 ——
+                分隔线越"完整"，越像一条把画面切成两块的硬边界。 */}
+            <div
+              className="result-rise mt-2.5 mb-2 short:mt-1.5 short:mb-1.5 h-px w-full"
+              style={{
+                animationDelay: '220ms',
+                background: `linear-gradient(90deg, transparent 0%, ${rgba(accent, 0.42)} 20%, rgba(255,255,255,0.13) 48%, transparent 100%)`,
+              }}
+            />
+
+            {/* ⑤ 判定小分区 + ⑥ ACC/COMBO：横屏并到同一行 —— 判定占主位，
+                ACC/COMBO 靠右且刻意做小做淡（次要信息不该和判定数字抢视觉）。
+                竖屏则上下两行，避免窄屏挤在一起。 */}
+            <div
+              className="result-rise flex flex-col gap-2.5 wide:flex-row wide:items-end wide:gap-3"
+              style={{ animationDelay: '260ms' }}
+            >
+              <div className="result-judge-grid flex-1">
+                <JudgeStat
+                  label="PERFECT"
+                  color="#fde047"
+                  glow="rgba(250,204,21,0.55)"
+                  onClick={() => setSplit((s) => (s === 'perfect' ? null : 'perfect'))}
+                  value={
+                    split === 'perfect' ? (
+                      <span className="whitespace-nowrap">
+                        <span className="text-cyan-300">E{resultData.stats.perfectEarly}</span>{' '}
+                        <span className="text-rose-300">L{resultData.stats.perfectLate}</span>
+                      </span>
+                    ) : (
+                      <span className="whitespace-nowrap">
+                        {resultData.stats.perfectCount + resultData.stats.sPerfectCount}
+                        {resultData.stats.sPerfectCount > 0 && (
+                          /* S-Perfect 附加分：比主数字小一档，宽度吃紧时还能再缩
+                             （字号跟视口联动），保证 "1536 (+1462)" 单行不折行 */
+                          <span className="text-orange-400 text-[clamp(9px,2.9vw,11px)]"> (+{resultData.stats.sPerfectCount})</span>
+                        )}
+                      </span>
+                    )
+                  }
+                />
+                <JudgeStat
+                  label="GOOD"
+                  color="#38bdf8"
+                  glow="rgba(56,189,248,0.55)"
+                  onClick={() => setSplit((s) => (s === 'good' ? null : 'good'))}
+                  value={
+                    split === 'good' ? (
+                      <span>
+                        <span className="text-cyan-300">E{resultData.stats.goodEarly}</span>{' '}
+                        <span className="text-rose-300">L{resultData.stats.goodLate}</span>
+                      </span>
+                    ) : (
+                      resultData.stats.goodCount
+                    )
+                  }
+                />
+                <JudgeStat label="MISS" color="#fb7185" glow="rgba(244,63,94,0.5)" value={resultData.stats.missCount} />
+              </div>
+
+              {/* ACC / MAX COMBO：次要信息，字号与不透明度都刻意压低一档。
+                  横屏（wide）改成上下两行 —— 单行时这块要占掉 ~190px，判定分区
+                  每格只剩 ~100px，"1536 (+1462)" 就会折行把 chip 撑高；改成两行后
+                  宽度还回一半，正好和并排的判定分区高度相当。竖屏仍单行（下面独占
+                  一整行，横向本来就够）。 */}
+              <div className="flex items-center gap-3 wide:flex-col wide:items-start wide:gap-1 wide:pb-1.5 shrink-0">
+                <span className="flex items-baseline gap-1.5">
+                  <span
+                    className="text-[9px] font-orbitron tracking-[0.22em] text-white/55"
+                    style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
+                  >
+                    ACC
+                  </span>
+                  <span
+                    className="font-orbitron font-bold text-[13px] text-white/85 leading-none tabular-nums"
+                    style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
+                  >
+                    {resultData.stats.accuracy.toFixed(2)}
+                    <span className="text-[9px] text-white/50 ml-0.5">%</span>
+                  </span>
+                </span>
+                <span
+                  className="w-px h-3 wide:hidden"
+                  style={{ background: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.22), transparent)' }}
+                />
+                <span className="flex items-baseline gap-1.5">
+                  <span
+                    className="text-[9px] font-orbitron tracking-[0.22em] text-white/55"
+                    style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
+                  >
+                    COMBO
+                  </span>
+                  <span
+                    className="font-orbitron font-bold text-[13px] text-white/85 leading-none tabular-nums"
+                    style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
+                  >
+                    {resultData.stats.maxCombo}
+                    <span className="text-[9px] text-white/50 ml-0.5">x</span>
+                  </span>
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -604,7 +817,9 @@ export const SongCard: React.FC<SongCardProps> = ({
         )}
       </div>
 
-      {/* Bottom-left: high score + difficulty (song only, expanded) */}
+      {/* Bottom-left: high score + difficulty (song only, expanded).
+          结算态**照常显示**（难度变静态 tag）：与展开态保持同一套版面语言，
+          也正好利用左下角空位 —— 成绩区因此不必为了避让它而往上长。 */}
       {item.type === 'song' && (
         <div
           className={`
@@ -640,12 +855,11 @@ export const SongCard: React.FC<SongCardProps> = ({
           )}
           {currentDiff && (
             inResult ? (
-              // Result card: show difficulty as a static tag (no switching allowed
-              // mid-result), always visible so the player knows which level they
-              // just cleared (it got accidentally hidden by the previous
-              // !inResult guard).
+              // 结算态：难度是静态 tag（成绩已定，不允许中途换难度），但仍要显示
+              // —— 玩家得知道自己刚打完的是哪一档。
               <div
                 className="px-3 py-1.5 rounded-lg text-xs font-bold font-orbitron tracking-wider border bg-black/30 border-white/20 text-white/80 cursor-default select-none"
+                style={{ textShadow: RESULT_TEXT_SHADOW_SM }}
               >
                 {currentDiff.name}
                 {currentDiff.level != null && currentDiff.level > 0 && (

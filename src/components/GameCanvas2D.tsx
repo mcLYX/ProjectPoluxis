@@ -63,6 +63,7 @@ import {
   type QCTrack,
 } from '../systems/quickCreate';
 import { createFrameGate } from '../utils/frameLimiter';
+import { shouldDeselectOnRightClick } from '../utils/editorPointer';
 import { qualityStore } from '../qualityStore';
 
 /* ------------------------------------------------------------------ *
@@ -1978,6 +1979,22 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       add(window, 'resize', invalidate);
       add(window, 'scroll', invalidate, true);
       add(window, 'orientationchange', invalidate);
+
+      /* iOS：压掉"同一处双击并按住"弹出的放大镜气泡（loupe）。
+         与 3D 画布（GameCanvas.tsx）同一套做法，三条缺一不可：
+         1) `-webkit-touch-callout: none` —— 关掉长按气泡；
+         2) **非被动** touchstart + preventDefault —— passive 监听器里 preventDefault
+            是空操作（浏览器会警告并忽略），而这一脚才是真正让 loupe 不弹的关键；
+            只靠 CSS 在部分 iOS 版本上仍会弹。必须显式 `{ passive: false }`，
+            否则 Chrome/Safari 对 touchstart 默认按 passive 处理。
+         3) touch-action / user-select 写在 canvas **自身**：触摸真正落点是 canvas，
+            而这两个属性都不从父级继承（父级写 `touch-action: none` 只影响它自己的命中区域）。
+         用 add() 登记，StrictMode 双挂载时随 cleanup 正确解绑。 */
+      el.style.touchAction = 'none';
+      el.style.userSelect = 'none';
+      el.style.webkitUserSelect = 'none';
+      (el.style as CSSStyleDeclaration & { webkitTouchCallout?: string }).webkitTouchCallout = 'none';
+      add(el, 'touchstart', (e) => { e.preventDefault(); }, { passive: false });
       const offset = (e: PointerEvent | MouseEvent): { x: number; y: number } => {
         const r = rect();
         return { x: e.clientX - r.left, y: e.clientY - r.top };
@@ -1986,6 +2003,14 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       if (window.PointerEvent) {
         add(el, 'pointerdown', (e) => {
           const ev = e as PointerEvent;
+          /* 编辑器右键 = 取消选中（单选 / 放置工具），与 3D/2D 画布同一判据。
+             在 setPointerCapture / handleTapInput 之前返回：右键不进放置、拖拽、
+             判定任何分支，也不写入 pendingMoves（无配对 pointerup 会残留）。 */
+          if (shouldDeselectOnRightClick(ev.button, !!propsRef.current.isEditorMode, propsRef.current.activeEditorTool)) {
+            if (ev.preventDefault) ev.preventDefault();
+            propsRef.current.onSelectEditorNote?.(null);
+            return;
+          }
           const p = offset(ev);
           if (ev.preventDefault) ev.preventDefault();
           try {

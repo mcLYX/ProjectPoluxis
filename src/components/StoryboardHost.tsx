@@ -362,6 +362,48 @@ export interface StoryboardHostProps {
   paused: boolean;
 }
 
+/**
+ * 立刻作废一个 canvas 的 WebGL 上下文。
+ *
+ * 背景：`renderer.dispose()`（three）只释放资源与 program，**不会**释放 WebGL
+ * context —— 上下文要等 canvas 被 GC 才回收。而浏览器有活动上下文上限（Chrome
+ * 约 16），反复进出带故事板的曲目（编辑器试玩尤其密集：进一次建一次）就会堆满，
+ * 抛 `Too many active WebGL contexts. Oldest context will be lost.`，**被强杀的往往
+ * 是游戏自己那个更早创建的上下文**（表现为游戏画面渲染失效）。
+ *
+ * 这里用 `WEBGL_lose_context` 主动作废，不依赖故事板自身是否自觉调用
+ * `forceContextLoss()` —— 对第三方 story.js 同样有效。失败一律静默。
+ */
+function loseWebglContext(canvas: HTMLCanvasElement): void {
+  try {
+    // getContext 返回与创建时同一个上下文（浏览器按 contextType 缓存）；
+    // 纯 2D canvas 再请求 webgl 会返回 null（一个 canvas 只能有一种上下文）。
+    const gl = (canvas.getContext('webgl2') ||
+      canvas.getContext('webgl')) as WebGLRenderingContext | null;
+    const ext = gl?.getExtension('WEBGL_lose_context') as
+      | { loseContext?: () => void }
+      | null
+      | undefined;
+    ext?.loseContext?.();
+    // 缩到 1×1：即使上面失败（扩展不可用），也显著降低显存占用并帮助 GC 回收。
+    canvas.width = 1;
+    canvas.height = 1;
+  } catch {
+    /* 忽略：拿不到上下文说明它本来就没建 */
+  }
+}
+
+/**
+ * 收集容器内的 canvas。**必须在故事板 dispose 之前调用**：
+ * 不少故事板（含本项目的 story-mv.ts）会先 `canvas.remove()` 再返回，
+ * 之后再遍历容器就一个 canvas 都找不到了 —— 宿主这层兜底会完全失效
+ * （这正是"编辑器试玩反复加载仍耗尽上下文"的直接原因）。
+ */
+function collectCanvases(root: HTMLElement | null): HTMLCanvasElement[] {
+  if (!root) return [];
+  return Array.prototype.slice.call(root.querySelectorAll('canvas')) as HTMLCanvasElement[];
+}
+
 function makeLayerContainer(layer: StoryboardLayer): HTMLDivElement {
   const div = document.createElement('div');
   div.dataset.storyboardLayer = layer;
@@ -470,11 +512,20 @@ function StoryboardHostImpl(
       dead = true;
       const inst = instanceRef.current;
       instanceRef.current = null;
+      // 先快照 canvas：故事板 dispose 里常会先 `canvas.remove()`，之后再查就查不到了。
+      const canvases: HTMLCanvasElement[] = [];
+      containersRef.current.forEach((div) => {
+        const found = collectCanvases(div);
+        for (let i = 0; i < found.length; i++) canvases.push(found[i]);
+      });
       try {
         inst?.dispose?.();
       } catch (e) {
         console.warn('[storyboard] dispose 异常（已忽略）', e);
       }
+      /* 故事板建了自己的 WebGLRenderer：dispose 不释放上下文，这里主动作废，
+         否则反复加载会耗尽浏览器的上下文上限（丢失最旧的那个）。 */
+      for (let i = 0; i < canvases.length; i++) loseWebglContext(canvases[i]);
       containersRef.current.forEach((div) => div.remove());
       containersRef.current.clear();
       const vp = gameViewportRef.current;
@@ -694,11 +745,19 @@ function StoryboardHostImpl(
             // update 抛异常只 warn 一次并停止驱动，避免每帧刷屏；游戏不受影响。
             console.warn('[storyboard] update() 抛异常，停用该故事板。', e);
             dead = true;
+            // 与 disposeAll 同序：先快照 canvas（dispose 会先 remove 它们），
+            // 再 dispose，最后作废上下文 —— 否则这条路径每局泄漏一个 context。
+            const canvases: HTMLCanvasElement[] = [];
+            containersRef.current.forEach((div) => {
+              const found = collectCanvases(div);
+              for (let i = 0; i < found.length; i++) canvases.push(found[i]);
+            });
             try {
               inst.dispose?.();
             } catch {
               /* 忽略 */
             }
+            for (let i = 0; i < canvases.length; i++) loseWebglContext(canvases[i]);
             instanceRef.current = null;
           }
         };

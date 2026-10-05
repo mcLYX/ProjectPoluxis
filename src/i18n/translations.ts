@@ -366,7 +366,7 @@ export const translations: AllDicts = {
     'settings.compatModeHint': '如果出现谱面跟随音频卡顿、时间不同步的问题，尝试开启此选项。开启后谱面按独立时钟运行，音频卡顿时自动校准跟上谱面。',
     'settings.compatModeHintOn': '如果需要更好的音画同步性，尝试关闭此选项。关闭后谱面按音频时钟运行，这在部分设备可能造成一些问题。',
     'settings.disableExtraContent': '禁用附加内容',
-    'settings.disableExtraContentHint': '勾选后不再加载歌曲目录下的背景图片（bg.jpg）、背景视频（bga.mp4）与故事板（story.js），画面退回渐变背景。适合低配设备或只想专心读谱时开启。',
+    'settings.disableExtraContentHint': '勾选后不再加载背景图片、视频，与故事板。',
     'settings.done': '完成',
     'settings.language': '语言',
 
@@ -916,7 +916,7 @@ export const translations: AllDicts = {
     'settings.compatModeHint': 'If the chart stutters with the audio or they fall out of sync, try enabling this option. The chart then runs on its own clock and audio is auto-recalibrated to follow it.',
     'settings.compatModeHintOn': 'For better audio-visual sync, try turning this off. When off, the chart runs on the audio clock, which may cause issues on some devices.',
     'settings.disableExtraContent': 'Disable extra content',
-    'settings.disableExtraContentHint': 'When enabled, background images (bg.jpg), background videos (bga.mp4) and storyboards (story.js) in the song folder are never loaded — the stage falls back to the plain gradient. Useful on low-end devices or when you only want to read the chart.',
+    'settings.disableExtraContentHint': 'When enabled, background images, videos and storyboards are never loaded.',
     'settings.done': 'Done',
     'settings.language': 'Language',
 
@@ -1466,7 +1466,7 @@ export const translations: AllDicts = {
     'settings.compatModeHint': '譜面が音声と一緒にカクつく、または時間がずれる問題が出た場合は、このオプションを有効にしてください。譜面は独立時計で動作し、音声が途切れた際は自動で譜面に追従校正されます。',
     'settings.compatModeHintOn': 'より良い音ズレ同期のためには、このオプションをオフにしてみてください。オフにすると譜面は音声クロックで動作するようになり、一部の端末では問題が生じる場合があります。',
     'settings.disableExtraContent': '追加コンテンツを無効化',
-    'settings.disableExtraContentHint': '有効にすると、楽曲フォルダ内の背景画像（bg.jpg）・背景動画（bga.mp4）・ストーリーボード（story.js）を読み込みません。舞台は単純なグラデーション背景になります。低スペック端末や譜面の確認に集中したい場合に有効です。',
+    'settings.disableExtraContentHint': '有効にすると、楽曲フォルダ内の背景画像・背景動画・ストーリーボードを読み込みません。',
     'settings.done': '完了',
     'settings.language': '言語',
 

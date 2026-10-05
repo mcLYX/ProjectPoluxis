@@ -5,3 +5,72 @@
 .song-card__collapsed:hover {
   box-shadow: var(--song-card-hover-glow);
 }
+
+/* 聚焦带（仅结算态，JSX 在 SongCard.tsx 里按 inResult 挂载）。
+   思路：不靠"再压暗一点"换可读性，而是把封面在文字区**降饱和 + 模糊 + 微压暗**
+   —— 繁复的背景被"推远"（像镜头景深），文字浮出来。范围只有下方 58%，向上用
+   mask 渐隐消失，因此不会在封面上留硬边，卡片中上部曲绘原样保留。
+   ⚠️ 三个关键点（都是踩过的坑）：
+   1) 必须 `transform: translateZ(0)` 强制独立合成层。卡片根节点带
+      `backdrop-filter` + `overflow-hidden`，子元素若没有自己的合成层，ArkWeb /
+      部分 WebView 会采不到背景（项目里 .editor-sidebar-glass 已踩过同一个坑）。
+   2) 自带一层极淡的中性色：`backdrop-filter` 不可用时仍有一点点"收"，不至于
+      完全退化成"什么都没做"。
+   3) 模糊 + mask 都放进 @supports：不支持 mask 的内核整条都不启用，否则会看到
+      一条硬边的糊带（比不做更糟）。 */
+.result-focus-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 58%;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(6, 9, 14, 0.24) 0%, rgba(6, 9, 14, 0.12) 40%, rgba(6, 9, 14, 0.04) 72%, transparent 100%);
+}
+@supports ((-webkit-mask-image: linear-gradient(#000, #000)) or (mask-image: linear-gradient(#000, #000))) {
+  .result-focus-band {
+    -webkit-mask-image: linear-gradient(to top, #000 0%, #000 46%, rgba(0, 0, 0, 0.5) 76%, transparent 100%);
+    mask-image: linear-gradient(to top, #000 0%, #000 46%, rgba(0, 0, 0, 0.5) 76%, transparent 100%);
+    -webkit-backdrop-filter: blur(5px) saturate(0.7) brightness(0.88) contrast(0.97);
+    backdrop-filter: blur(5px) saturate(0.7) brightness(0.88) contrast(0.97);
+    transform: translateZ(0);
+  }
+}
+
+/* 判定分区的三列网格。刻意**不用** `grid-cols-3` 工具类：
+   项目里曾有一条 `@media (max-width:480px) .grid-cols-3 {...}` 的全局覆盖（现已
+   删除），把任何用该工具类的元素在窄屏劫持成竖排 flex。语义类不会被这种事波及。
+   列宽按内容分配而非均分：PERFECT 一格里还要塞 "1536 (+1462)"（S-Perfect 附加分），
+   均分时窄卡（横屏手机 ~600px 视口 → 内容区 ~520px → 每格 ~100px）会放不下而换行，
+   把整块 chip 撑高。1.35fr 让 PERFECT 拿到多出来的那一份。 */
+.result-judge-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr 1fr;
+  gap: 6px;
+}
+
+/* ===== 结算成绩（无玻璃面板版） ============================================
+   成绩直接压在曲绘上，靠文字阴影 / 字形发光 / 小分区渐变保证可读性。
+   入场做成「评级先砸下来 → 其余逐行浮起」的节奏，呼应音游结算的打击感。
+   `both` 保证延迟期间保持起始态（不会先闪一下再动）。 */
+@keyframes result-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes result-rank-in {
+  from { opacity: 0; transform: scale(1.16) translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.result-rise {
+  animation: result-rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.result-rank-in {
+  animation: result-rank-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* 尊重系统的"减少动态效果"：直接落到终态。 */
+@media (prefers-reduced-motion: reduce) {
+  .result-rise,
+  .result-rank-in {
+    animation: none;
+  }
+}

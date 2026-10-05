@@ -6,7 +6,7 @@
  *
  * 约定命名（歌曲目录内）：
  *   音频 base.mp3 · 封面 cover.jpg · 谱面 0.json/1.json/…（0 起编号）
- *   视频背景 bga.mp4 · 图片背景 bg.jpg · 故事板 story.js（占位，尚未实现）
+ *   视频背景 bga.mp4 · 图片背景 bg.jpg · 故事板 story.js
  * 若歌曲目录内有 info.json（格式与 beatmaps.json 的 "type":"song" 条目类似，
  * 路径相对歌曲目录），则其字段优先，未提供的字段回落到约定命名扫描。
  * 若专辑/曲目目录内存在封面，会自动提取 Vibrant 主题色写入 accentColor。

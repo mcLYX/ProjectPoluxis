@@ -16,6 +16,7 @@
 - [本地谱面库管理](#本地谱面库管理)
 - [如何打包 ZIP 谱面包](#如何打包-zip-谱面包)
 - [添加自己的谱面 / 封面 / 音乐（beatmaps）](#添加自己的谱面--封面--音乐beatmaps)
+- [扩展内容：图层 / 背景媒体 / 故事板](#扩展内容图层--背景媒体--故事板)
 - [搭建在线谱面服务器](#搭建在线谱面服务器)
 - [谱面编辑器](#谱面编辑器)
 - [多选与批量编辑](#多选与批量编辑)
@@ -156,7 +157,10 @@ ZIP 谱面包用于快速分享整张专辑或一套曲目。**两种格式都�
 │   ├── 1.json            # 难度谱面（任意命名，按 metadata.difficulty 识别难度）
 │   ├── 2.json
 │   ├── cover.png         # 可选：封面
-│   └── audio.mp3         # 可选：背景音乐（mp3/ogg/wav/m4a/aac/flac/webm）
+│   ├── audio.mp3         # 可选：背景音乐（mp3/ogg/wav/m4a/aac/flac/webm）
+│   ├── bg.jpg            # 可选：背景图片（见「扩展内容」章节）
+│   ├── bga.mp4           # 可选：背景视频（优先级高于图片）
+│   └── story.js          # 可选：故事板（完整版 3D 专属）
 └── 歌曲B/
     ├── chart.json        # 文件名随意
     └── song.ogg
@@ -190,7 +194,10 @@ beatmaps/
 │   │   ├── 1.json            # 难度谱面（文件名数字 = 难度顺序，见下）
 │   │   ├── 2.json
 │   │   ├── cover.jpg         # 可选：歌曲封面（优先于专辑封面取色）
-│   │   └── audio.mp3         # 背景音乐（见下命名约定）
+│   │   ├── audio.mp3         # 背景音乐（见下命名约定）
+│   │   ├── bg.jpg            # 可选：背景图片
+│   │   ├── bga.mp4           # 可选：背景视频（优先级高于图片）
+│   │   └── story.js          # 可选：故事板（完整版 3D 专属）
 │   └── 歌曲二/
 │       ├── 1.json
 │       └── base.mp3
@@ -204,6 +211,7 @@ beatmaps/
   `1→Easy`、`2→Normal`、`3→Hard`、`4→Insane`、`5→Another`。若谱面 `metadata.difficulty` 里写了名字（如 `"Hard Lv.7"`），则以谱面内写的为准。
 - **音频文件**：优先识别 `base.mp3` / `audio.mp3` / `song.mp3`；若都不是，会取该目录下的任意 `.mp3`。
 - **封面**：专辑级 `cover.jpg` 或歌曲级 `cover.jpg`（推荐 jpg）。脚本会**自动提取封面主色调**作为该专辑 / 歌曲的强调色（`accentColor`）；若没有 `node-vibrant` 或取色失败，则回退到谱面 `metadata.bgScheme.accentColor` 或默认色。
+- **背景与故事板**：歌曲目录下的 `bg.jpg` / `bga.mp4` / `story.js` 会被自动扫描并写入索引，详见[扩展内容：图层 / 背景媒体 / 故事板](#扩展内容图层--背景媒体--故事板)。
 
 ### 2. 编写 beatmaps.json 索引
 
@@ -271,6 +279,102 @@ npm run preview            # 本地预览（未带私有内容时仅显示内置
 ```
 
 > 注意：因为 `beatmaps/` 与 `public/beatmaps/` 都默认被 `.gitignore` 忽略，它们**不会上传到远程仓库**。请自行备份这些个人内容，或在自己的私有仓库 / 网盘里管理。
+
+---
+
+## 扩展内容：图层 / 背景媒体 / 故事板
+
+这三样都是**可选增强**：一个都不给也能正常游玩，给了才有对应的演出。它们都与歌曲 / 谱面一起走（不写死在代码里），因此可以直接打包分享、离线游玩。
+
+> 想一次性全部关掉：**设置 → 游戏 → 禁用附加内容**。勾选后 `bg.jpg` / `bga.mp4` / `story.js` 一律不加载，画面退回内置的渐变背景 —— 低配设备或只想专心读谱时用它省内存。取消勾选即时生效，不必重开曲目。
+
+### 图层（Layer）
+
+图层是**谱面级**的组织方式（`ChartData.layers`），用来让一批音符共享运动与外观。它构成一棵**树**：没有 `parentId` 的即为根图层，音符用 `layerId` 归属某个图层。
+
+同一图层内的音符共享三条通道，子图层的有效值 = 自身与所有祖先的合成，**三条通道的合成规则各不相同**：
+
+| 通道 | 合成规则 | 缺省 |
+|---|---|---|
+| 坐标偏移 `offsetX/Y` | **相加**：`自身 + Σ 祖先` | 0 |
+| 流速 `speedMul` | **相乘**：`自身 × Π 祖先` | 1 |
+| 音符色 `noteColor` | **就近继承**：自身 → 最近祖先 → `metadata.noteColor` | 继承 |
+
+要点：
+
+- **向后兼容**：音符省略 `layerId` 即属于默认根图层，所以旧谱面完全不用改。只有显式写了 `layers` 字段时，才需要把 `metadata.schemaVersion` 标为 `'v2'`。
+- **背景色不属于图层**：`bg_change` 写在任何图层上都全局生效。
+- 编辑器侧边栏「**图层**」区可以增删根 / 子图层、重命名，以及把选中音符移动到指定图层。
+
+```jsonc
+{
+  "metadata": { "schemaVersion": "v2", "title": "…", "bpm": 160 },
+  "layers": [
+    { "id": "main", "speedMul": 1 },
+    { "id": "drift", "parentId": "main", "speedMul": 1.2, "offsetX": 0.6 }
+  ],
+  "notes": [
+    { "beat": 4, "x": 0, "y": 0, "type": "tap" },            // 默认根图层
+    { "beat": 4, "x": -1, "y": 0, "type": "tap", "layerId": "drift" }
+  ]
+}
+```
+
+### 背景图 / 背景视频
+
+放在**歌曲目录**下按约定命名即可，无需改谱面：
+
+| 文件 | 作用 |
+|---|---|
+| `bg.jpg` | 背景图片（Lite 版只支持图片） |
+| `bga.mp4` | 背景视频（完整版；优先级高于图片） |
+
+- 随**歌曲**走而不是随谱面走 —— 同一首歌的所有难度共用，方便打包分享。
+- 渲染优先级：**视频 > 图片 > 内置渐变**；媒体层按 `cover` 方式铺满画面叠在渐变之上。
+- 想改文件名或路径，在歌曲目录的 `info.json` 里用 `bgImage` / `bgVideo` 覆盖（相对歌曲目录）。
+- `node update-beatmaps.mjs` 会自动扫描到这两个文件并写入索引；也可以手动在 `beatmaps.json` 的歌曲条目里加 `bgImage` / `bgVideo`。
+- 编辑器「导入与导出」区可以把这两个文件直接挂载到当前歌曲，并立即预览效果。
+
+### 故事板（story.js）
+
+歌曲目录下放置 `story.js`（ES Module），即可在游戏画面上叠加一套自己的演出 —— 也就是所谓的 **MV / 背景动画**。
+
+- **纯表现层**：只读游戏实时数据来驱动自身演出，**绝不回写**，不影响判定与计分。
+- **仅完整版 3D 渲染器**挂载：2D / Lite 版与「Lite」画质预设都不挂。缺少 `create()` 或加载失败会静默降级为「无故事板」，不影响游玩。
+- 菜单态不挂载；离开即卸载，并主动释放 WebGL 上下文，避免反复进出把上下文耗尽。
+- 编辑器里挂载的故事板会**实时预览**，拖动进度条时演出跟着走（`storyUrl` 置空即卸载）。
+
+最小骨架：
+
+```js
+export default {
+  create(api) {
+    const ov = api.mount('overlay');        // 'bg'（音符后）/ 'overlay'（音符上、HUD 下）
+    // 自建 canvas / renderer 挂到 ov 上；three 用 api.three（与游戏同一实例，别再打包一份）
+    const el = document.createElement('div');
+    ov.appendChild(el);
+    return {
+      update(t, snapshot) {                  // t = 歌曲绝对秒
+        el.style.opacity = String(0.5 + 0.5 * Math.sin(t));
+      },
+      setSize(w, h) {},                      // 可选
+      dispose() {},                          // 可选：重开局 / 切歌 / 卸载时调用
+    };
+  },
+};
+```
+
+常用的 `api` 能力（完整契约见 `src/types/storyboard.ts`）：
+
+- `api.three` —— three.js 命名空间，**与游戏同一模块实例**；故事板自建 renderer，互不干扰。建议把 `three` 设为 external 构建，运行时从这里取。
+- `api.chart` / `api.beatAt(t)` / `api.timeAtBeat(beat)` —— 谱面元数据与拍↔秒换算。**不要硬编码 BPM**，变速谱会全错。
+- `api.notes(fromSec, toSec)` —— 整谱音符切片（开局缓存，不进热路径），用来让演出与谱面「共舞」。
+- `api.toScreen(x, y)` / `api.safeZone(margin)` —— 判定面坐标 → 画布像素；中央判定区留给音符与打击特效，发光元素请排在其外。
+- `api.audio.levels()` —— 实时频谱（⚠️ 非 seek 安全，仅用于非关键调制）。
+- `api.onJudge` / `api.onSeek` / `api.onPlayState` / `api.onEnd` —— 事件订阅，均返回退订函数。
+- `api.game.style({ opacity, filter, transform })` —— 受限地调整游戏画布本身的视觉（白名单三个键，seek / 重开局时宿主自动复位）。
+
+`api.snapshot` 是**同一对象每帧原地刷新**，读到的永远是最新值，不要持有旧引用。
 
 ---
 
