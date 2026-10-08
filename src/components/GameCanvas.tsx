@@ -2,11 +2,11 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { ChartData, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import type { JudgeProjector, StoryboardPointerBridge, StoryboardRawPointer } from '../types/storyboard';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
-import { getChartRuntime, scrollDistanceAt, speedAt, scrollDistWindow, updateLayerCurDist, layerDistAt } from '../utils/chartRuntime';
+import { getChartRuntime, scrollDistanceAt, speedAt, scrollDistWindow, updateLayerCurDist, layerDistAt, type PreparedNote } from '../utils/chartRuntime';
 import { buildLayerTree, layerOffsetAt, layerOffsetAtInto, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
 import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/triggers';
 import { createFrameGate } from '../utils/frameLimiter';
@@ -263,16 +263,16 @@ function cachedColor(hex: string): THREE.Color {
  * `processSlide` and the slide renderer both previously rebuilt this array
  * every frame for every slide via `[head, ...resolvedNodes]` spread, which
  * produced significant GC pressure. Since `resolvedNodes` is stable for a
- * given ResolvedNote object (created once by resolveChart useMemo), we
+ * given PreparedNote object (created once by resolveChart useMemo), we
  * cache the combined array Weakly-keyed on the note object. When the chart
- * changes and old ResolvedNote objects become unreachable, the cache entries
+ * changes and old PreparedNote objects become unreachable, the cache entries
  * are GC'd automatically.
  */
 const _allNodesCache = new WeakMap<
-  ResolvedNote,
+  PreparedNote,
   Array<{ x: number; y: number; timeSec: number; angle: number; easing: EasingType }>
 >();
-function getAllNodes(note: ResolvedNote): Array<{ x: number; y: number; timeSec: number; angle: number; easing: EasingType }> {
+function getAllNodes(note: PreparedNote): Array<{ x: number; y: number; timeSec: number; angle: number; easing: EasingType }> {
   let cached = _allNodesCache.get(note);
   if (!cached) {
     // angle/easing are static per note — computed once here. x/y are re-synced
@@ -677,7 +677,7 @@ interface SlideMeshSet {
  * throttled separately, so a long drag no longer re-resolves 2000 notes every
  * frame — that was the source of per-frame jank on lower-end Android WebViews.
  */
-function liveMoveResolvedNote(noteIndex: Map<string, ResolvedNote>, id: string, x: number, y: number): void {
+function liveMoveResolvedNote(noteIndex: Map<string, PreparedNote>, id: string, x: number, y: number): void {
   const hashIdx = id.indexOf('#');
   if (hashIdx < 0) {
     const n = noteIndex.get(id);
@@ -973,13 +973,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
    *  we hide every note that was in last frame's window but is outside this
    *  frame's window. The notes array identity is stored so a chart change
    *  (which clears meshes via resetPlayState) invalidates the stale window. */
-  const lastWindowRef = useRef<{ firstIdx: number; lastIdx: number; notes: ResolvedNote[] | null }>({ firstIdx: 0, lastIdx: 0, notes: null });
+  const lastWindowRef = useRef<{ firstIdx: number; lastIdx: number; notes: PreparedNote[] | null }>({ firstIdx: 0, lastIdx: 0, notes: null });
   /** 负流速：并集遍历的复用缓冲（每帧 reset，避免分配）。 */
   const unionScratchRef = useRef<number[]>([]);
   /** 负流速：并集去重的帧戳数组 + 当前帧号。 */
   const unionStampRef = useRef<{ arr: Int32Array | null; frame: number }>({ arr: null, frame: 0 });
   /** 负流速：上一帧访问过的音符下标（用于幽灵网格的帧戳差分清理）。 */
-  const lastVisitedRef = useRef<{ notes: ResolvedNote[] | null; list: number[] }>({ notes: null, list: [] });
+  const lastVisitedRef = useRef<{ notes: PreparedNote[] | null; list: number[] }>({ notes: null, list: [] });
   const touchTrackRef = useRef<Map<string, TouchTrackState>>(new Map());
   const slideStateRef = useRef<Map<string, SlideRt>>(new Map());
 
@@ -1056,12 +1056,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
 
   const resolvedNotes = chartRuntime.notes;
   const resolvedRef = useRef(resolvedNotes);
-  // id → ResolvedNote 索引（P2-6）：把编辑器 gizmo 每帧的 O(N) notes.find 改为 O(1) 查表。
+  // id → PreparedNote 索引（P2-6）：把编辑器 gizmo 每帧的 O(N) notes.find 改为 O(1) 查表。
   // 仅在 resolvedNotes 变化时重建；in-place 编辑改的是同一 note 对象引用，Map 取到的是最新值。
-  const noteIndexRef = useRef<Map<string, ResolvedNote>>(new Map());
+  const noteIndexRef = useRef<Map<string, PreparedNote>>(new Map());
   useEffect(() => {
     resolvedRef.current = resolvedNotes;
-    const idx = new Map<string, ResolvedNote>();
+    const idx = new Map<string, PreparedNote>();
     for (const n of resolvedNotes) idx.set(n.id, n);
     noteIndexRef.current = idx;
   }, [resolvedNotes]);
@@ -1330,7 +1330,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
    *  window-cleanup pass to retire notes that have fallen outside the current
    *  frame's sliding window — otherwise the windowed render loop never visits
    *  them and they'd keep their last-frame `visible = true`. */
-  const hideNoteMeshes = (note: ResolvedNote) => {
+  const hideNoteMeshes = (note: PreparedNote) => {
     if (note.type === 'slide') {
       const sm = slideMeshesRef.current.get(note.id);
       if (!sm) return;
@@ -1492,7 +1492,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
    * 只支持运行时可即时生效的类型（文本 / 音符色 / 背景）；变速与偏移已预先积分，
    * 无法在判定时刻改变，直接忽略（编辑器会对此给 warning）。
    */
-  const dispatchNoteTrigger = (note: ResolvedNote, judgement: JudgementType): void => {
+  const dispatchNoteTrigger = (note: PreparedNote, judgement: JudgementType): void => {
     if (!note.trigger) return;
     const evts = resolveTriggerEvents(note, judgement, (id) => eventByIdRef.current.get(id));
     const now = gameTimeRef.current;
@@ -2302,7 +2302,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   // getAllNodes 的偏移感知包装：缓存元素本就每帧从活对象**绝对重同步** x/y，
   // 在此叠加当前帧的图层偏移后，slide 判定（processSlideCore）与 slide 渲染
   // （节点网格 / 管线 / 投影）消费的是同一份「合成后坐标」，天然一致。
-  const getAllNodesEff = (note: ResolvedNote) => {
+  const getAllNodesEff = (note: PreparedNote) => {
     const arr = getAllNodes(note);
     const off = offOf(note);
     if (off.x !== 0 || off.y !== 0) {
@@ -2322,13 +2322,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     resolvedRef, isPlayingRef, isPausedRef, gameTimeRef, activeToolRef,
     onPlaceEditorNoteRef, onSelectEditorNoteRef, isDraggingRef,
     getAllNodes: getAllNodesEff,
-    getEffectivePos: (n: ResolvedNote) => {
+    getEffectivePos: (n: PreparedNote) => {
       const off = offOf(n);
       return off.x === 0 && off.y === 0 ? n : { x: n.x + off.x, y: n.y + off.y };
     },
     dispatchNoteTrigger,
-    getLandingPos: (n: ResolvedNote, childIdx?: number) => {
-      // ResolvedNote 本体不会被嵌入偏移（嵌入只发生在 getAllNodes 的缓存副本里），
+    getLandingPos: (n: PreparedNote, childIdx?: number) => {
+      // PreparedNote 本体不会被嵌入偏移（嵌入只发生在 getAllNodes 的缓存副本里），
       // 这里拿到的是原始 base，直接加「音符/子节点自己 timeSec」的图层偏移即落位。
       let bx = n.x;
       let by = n.y;
@@ -2344,7 +2344,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const off = layerOffAtIdx(layerIdxOf(n), t);
       return { x: bx + off.x, y: by + off.y };
     },
-    getNoteColor: (n: ResolvedNote) => {
+    getNoteColor: (n: PreparedNote) => {
       const global = chartRef.current.metadata.noteColor || '#00f0ff';
       if (n.color) return n.color;
       const tree = layerTreeRef.current;
@@ -2360,7 +2360,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const { commitJudgement, getSlideRt, processSlide } = useJudgeSystem(judgeCtx, spawnBurst);
   const handlePointerInteraction = useEditorGestures(judgeCtx, commitJudgement);
 
-  const ensureSlideMeshes = (note: ResolvedNote, colorHex: string): SlideMeshSet | null => {
+  const ensureSlideMeshes = (note: PreparedNote, colorHex: string): SlideMeshSet | null => {
     const scene = sceneRef.current;
     if (!scene) return null;
     const count = 1 + (note.resolvedNodes?.length ?? 0);
@@ -2670,8 +2670,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           }
           // 按音符**所属图层**的时间轴取滚动距离（图层流速已积分在内）。
           const rtG = runtimeRef.current;
-          const noteScrollDist = rtG ? layerDistAt(rtG, n.layerIdx ?? 0, pt) : getScrollDistance(pt, speedPointsRef.current);
-          const gz = JUDGE_Z - (noteScrollDist - layerCurDist[n.layerIdx ?? 0]) * unitPerSecond;
+          const noteScrollDist = rtG ? layerDistAt(rtG, n.layerIdx, pt) : getScrollDistance(pt, speedPointsRef.current);
+          const gz = JUDGE_Z - (noteScrollDist - layerCurDist[n.layerIdx]) * unitPerSecond;
           // gizmo 必须贴着「合成后」的音符位置（slide 子节点沿用头节点图层）。
           const off = offOf(n);
           selGizmo.position.set(px + off.x, py + off.y, gz + 0.1);
@@ -2707,8 +2707,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           if (c) { px = c.x; py = c.y; pt = c.timeSec; }
         }
         const rtG2 = runtimeRef.current;
-        const noteScrollDist = rtG2 ? layerDistAt(rtG2, n.layerIdx ?? 0, pt) : getScrollDistance(pt, speedPointsRef.current);
-        const gz = JUDGE_Z - (noteScrollDist - layerCurDist[n.layerIdx ?? 0]) * unitPerSecond;
+        const noteScrollDist = rtG2 ? layerDistAt(rtG2, n.layerIdx, pt) : getScrollDistance(pt, speedPointsRef.current);
+        const gz = JUDGE_Z - (noteScrollDist - layerCurDist[n.layerIdx]) * unitPerSecond;
         const off = offOf(n);
         const g = multiGizmos[mi++];
         g.position.set(px + off.x, py + off.y, gz + 0.1);
@@ -2927,7 +2927,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // allNodes 由 getAllNodes 构造，元素类型不含 scrollDist，故按需取可选字段。
           const nd = (allNodes[i] as { scrollDist?: number }).scrollDist;
           // 图层时间轴：子节点沿用头节点的图层（resolvedNodes 不带 layerId）。
-          const nli = note.layerIdx ?? 0;
+          const nli = note.layerIdx;
           const nodeScrollDist = nd !== undefined ? nd : layerDistAt(runtimeRef.current, nli, allNodes[i].timeSec);
           const z = JUDGE_Z - (nodeScrollDist - layerCurDist[nli]) * unitPerSecond;
           _slideZs.push(z);
@@ -3121,7 +3121,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // pipe length / playhead honour the speed change; otherwise fall back to the
           // cheap linear ramp (prior behaviour, no per-frame getScrollDistance calls).
           // 用该音符**所属图层**的时间轴采样（含图层自身的 speed_change）。
-          const nli2 = note.layerIdx ?? 0;
+          const nli2 = note.layerIdx;
           const lrt = runtimeRef.current;
           const lpts = (lrt.layerDist[nli2] && lrt.layerDist[nli2].points) || sp;
           let midSpeed = false;
@@ -3241,10 +3241,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       }
 
       // ---------- TAP / TOUCH ----------
-      // 预处理层已按 timeSec 预计算滚动距离；缺失时回退现算（保持数值一致）。
-      const nsd = note.scrollDist;
-      const nli = note.layerIdx ?? 0;
-      const noteScrollDist = nsd !== undefined ? nsd : layerDistAt(runtimeRef.current, nli, note.timeSec);
+      // 预处理层已按 timeSec 预计算滚动距离；PreparedNote 保证该字段必填，直接读。
+      const nli = note.layerIdx;
+      const noteScrollDist = note.scrollDist;
       const nz = JUDGE_Z - (noteScrollDist - layerCurDist[nli]) * unitPerSecond;
       const judged = judgedNotesRef.current.has(note.id);
       // Respsect "音符渲染距离" in both gameplay and editor mode.

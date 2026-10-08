@@ -24,16 +24,11 @@ import type {
   JudgementFeedback,
   JudgementType,
   NoteType,
-  ResolvedNote,
   SkinImageSet,
 } from '../types/game';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
-import {
-  getScrollDistance,
-  secondsToBeatMultiBpm,
-  type SpeedPoint,
-} from '../utils/beatTime';
-import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt, type ChartRuntime } from '../utils/chartRuntime';
+import { secondsToBeatMultiBpm, type SpeedPoint } from '../utils/beatTime';
+import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt, type ChartRuntime, type PreparedNote } from '../utils/chartRuntime';
 import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/triggers';
 import { calculateNoteScore, evaluateJudgement } from '../utils/scoring';
 import {
@@ -769,7 +764,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       chart: null as ChartData | null,
       /** 谱面运行时预处理结果（滚动距离 / 变速前缀和 / 统计量）。 */
       runtime: null as ChartRuntime | null,
-      notes: [] as ResolvedNote[],
+      notes: [] as PreparedNote[],
       events: [] as ResolvedEventEntry[],
       speedPoints: [] as SpeedPoint[],
       nextEventIdx: 0,
@@ -899,7 +894,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     let layerTree: LayerTree | null = null;
     let layerOffs: Array<{ x: number; y: number }> = [{ x: 0, y: 0 }];
     let noteLayerCache = new WeakMap<object, number>();
-    const noteById = new Map<string, ResolvedNote>();
+    const noteById = new Map<string, PreparedNote>();
     function layerIdxOf2D(n: object): number {
       let idx = noteLayerCache.get(n);
       if (idx === undefined) {
@@ -1011,7 +1006,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     /* { ref } 形式需要 id → 事件表（顶层 + 各图层事件轴）。 */
     const eventById2D = new Map<string, ResolvedEventEntry>();
     /** 执行触发器事件：只支持运行时可即时生效的类型（变速/偏移已预先积分，忽略）。 */
-    function dispatchTrigger2D(note: ResolvedNote, j: JudgementType): void {
+    function dispatchTrigger2D(note: PreparedNote, j: JudgementType): void {
       if (!note.trigger) return;
       const evts = resolveTriggerEvents(note, j, (id) => eventById2D.get(id));
       const t = game.curTime;
@@ -1173,23 +1168,19 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     /**
      * 音符 z（透视深度）。
-     * `noteDist` 传入预处理层算好的滚动距离（可省去对变速点的线性扫描）；
-     * 缺失时回退现算，保证数值一致。当前时刻的滚动距离走前缀和二分。
+     * `noteDist` = 预处理层算好的该音符滚动距离；`curDist` = 该音符**所属图层**在
+     * 当前时刻的滚动距离（图层流速已积分在内，由每帧 `updateLayerCurDist` 求得）。
+     * 二者均由调用方无条件提供（PreparedNote / layerCurDist 已保证必填），
+     * 判定时刻两者相等 → z = JUDGE_Z。
      */
-    /**
-     * `curDist` = 该音符**所属图层**在当前时刻的滚动距离（图层流速已积分在内），
-     * 由每帧的 `updateLayerCurDist` 统一求得；判定时刻两者相等 → z = JUDGE_Z。
-     */
-    function noteZPos(noteTimeSec: number, curTime: number, baseSpeed: number, noteDist?: number, curDist?: number): number {
-      const nd = noteDist !== undefined ? noteDist : getScrollDistance(noteTimeSec, game.speedPoints);
-      const cd = curDist !== undefined ? curDist : (game.runtime ? scrollDistanceAt(game.runtime, curTime) : getScrollDistance(curTime, game.speedPoints));
-      return JUDGE_Z - (nd - cd) * baseSpeed;
+    function noteZPos(baseSpeed: number, noteDist: number, curDist: number): number {
+      return JUDGE_Z - (noteDist - curDist) * baseSpeed;
     }
 
     /* ---------------- slide 运行态助手 ---------------- */
     /** slide 节点视图（head + 子节点）。自带 `scrollDist`（预处理层预计算的滚动距离），
      *  使 noteZPos 不必再对每个节点线性扫描变速点。 */
-    type SlideNodeView = { x: number; y: number; timeSec: number; angle: number; easing?: EasingType; scrollDist?: number };
+    type SlideNodeView = { x: number; y: number; timeSec: number; angle: number; easing?: EasingType; scrollDist: number };
 
     /**
      * 节点视图缓存：原实现每帧调用两次（processSlide + render），每次为
@@ -1197,9 +1188,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
      * 以 note 对象为键缓存（WeakMap）：谱面被替换（切歌 / 编辑器改动生成新对象）
      * 时自然失效，返回的是最新值。与 3D 侧 `getAllNodes` 的缓存策略一致。
      */
-    const slideNodesCache = new WeakMap<ResolvedNote, SlideNodeView[]>();
+    const slideNodesCache = new WeakMap<PreparedNote, SlideNodeView[]>();
 
-    function getAllSlideNodes(note: ResolvedNote): SlideNodeView[] {
+    function getAllSlideNodes(note: PreparedNote): SlideNodeView[] {
       let nodes = slideNodesCache.get(note);
       if (!nodes) {
         nodes = [
@@ -1318,7 +1309,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
      * 同一套语义，消除此前三份实现各自复制导致的行为分叉）。这里只做适配：
      * Record<string, PointerState> 指针 + Record<string, boolean> 绑定容器 → 核心的中立入参，
      * 并把提交回调接到本端的计分 / 音效 / 特效上。 */
-    function processSlide(note: ResolvedNote, curTime: number): void {
+    function processSlide(note: PreparedNote, curTime: number): void {
       if (note.fake) return; /* 假音符：整条 slide 链不判定、不产生 Miss */
       const allNodes = getAllSlideNodes(note);
       const rt = getSlideRt(note.id, allNodes.length);
@@ -1365,7 +1356,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return false;
     }
 
-    function processTouchNote(note: ResolvedNote, curTime: number): void {
+    function processTouchNote(note: PreparedNote, curTime: number): void {
       if (note.fake) return; /* 假音符：完全不参与判定 */
       const off = offOf2D(note);
       landingOffOf2DInto(note, _touchOff2DScratch);
@@ -1497,11 +1488,13 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     function render(): void {
       const chart = game.chart;
-      if (!chart) return;
+      const rtNow = game.runtime;
+      // chart 与 runtime 在 resetGame 中同处赋值，二者同真同假。
+      if (!chart || !rtNow) return;
       const curTime = game.curTime;
       const baseSpeed = game.speed * game.speedMul;
       // 各图层「当前时刻」的滚动距离（图层流速已按图层积分；与 3D 同构，原地更新）。
-      const layerCurDist = game.runtime ? updateLayerCurDist(game.runtime, curTime) : null;
+      const layerCurDist = updateLayerCurDist(rtNow, curTime);
       const spawnLimit = -game.renderDist;
       const vScale = game.sizeScale;
       const colorHex = game.currentNoteColor || game.noteColor;
@@ -1537,9 +1530,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           for (let pi = 0; pi < allNodes.length - 1; pi++) {
             const nodeA = allNodes[pi];
             const nodeB = allNodes[pi + 1];
-            const cdSlide = layerCurDist ? layerCurDist[note.layerIdx ?? 0] : undefined;
-            const zA = noteZPos(nodeA.timeSec, curTime, baseSpeed, nodeA.scrollDist, cdSlide);
-            const zB = noteZPos(nodeB.timeSec, curTime, baseSpeed, nodeB.scrollDist, cdSlide);
+            const cdSlide = layerCurDist[note.layerIdx];
+            const zA = noteZPos(baseSpeed, nodeA.scrollDist, cdSlide);
+            const zB = noteZPos(baseSpeed, nodeB.scrollDist, cdSlide);
             const judgedA = !!game.judged[note.id + '#' + pi];
             const judgedB = !!game.judged[note.id + '#' + (pi + 1)];
             if (judgedA && judgedB) continue;
@@ -1557,9 +1550,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             const easeFn = EASING_FNS[nodeB.easing || 'linear'] || EASING_FNS.linear;
 
             // 用该音符**所属图层**的时间轴采样（含图层自身的 speed_change）。
-            const nli2 = note.layerIdx ?? 0;
-            const lrt = game.runtime;
-            const lpts = (lrt && lrt.layerDist[nli2] && lrt.layerDist[nli2].points) || game.speedPoints;
+            const nli2 = note.layerIdx;
+            const lpts = (rtNow.layerDist[nli2] && rtNow.layerDist[nli2].points) || game.speedPoints;
             let midSpeed = false;
             for (const s of lpts) {
               if (s.timeSec > nodeA.timeSec && s.timeSec < nodeB.timeSec) {
@@ -1567,8 +1559,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
                 break;
               }
             }
-            const distAtT = (tt: number): number =>
-              lrt ? layerDistAt(lrt, nli2, tt) : getScrollDistance(tt, game.speedPoints);
+            const distAtT = (tt: number): number => layerDistAt(rtNow, nli2, tt);
             const scrollDistA = midSpeed ? distAtT(nodeA.timeSec) : 0;
             const zAtTau = (tt: number): number => {
               if (!midSpeed) return zA + tt * dz;
@@ -1688,7 +1679,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           /* slide 节点 + 落地投影引导 */
           for (let nj = 0; nj < allNodes.length; nj++) {
             if (game.judged[note.id + '#' + nj]) continue;
-            const nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist, layerCurDist ? layerCurDist[note.layerIdx ?? 0] : undefined);
+            const nz = noteZPos(baseSpeed, allNodes[nj].scrollDist, layerCurDist[note.layerIdx]);
             const ent = toDrawAt(toDraw.length);
             if (projectInto(ent.p, allNodes[nj].x, allNodes[nj].y, nz, spawnLimit)) {
               ent.kind = 'slide';
@@ -1714,7 +1705,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           }
         } else {
           if (game.judged[note.id]) continue;
-          const tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist, layerCurDist ? layerCurDist[note.layerIdx ?? 0] : undefined);
+          const tz = noteZPos(baseSpeed, note.scrollDist, layerCurDist[note.layerIdx]);
           const off = offOf2D(note);
           const ent = toDrawAt(toDraw.length);
           if (projectInto(ent.p, note.x + off.x, note.y + off.y, tz, spawnLimit)) {
@@ -1804,9 +1795,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     /** tap 命中（pointerdown 即时判定）；含同刻重叠合并（方案二）。 */
     /* tap 音符子集（按 timeSec 升序，与 game.notes 同源）。findHitTapNote 只扫这个子集，
      * 不再逐音符跳过非 tap。按 game.notes 引用缓存，换谱时自动失效重建。 */
-    let tapNotesCache: ResolvedNote[] | null = null;
-    let tapNotesCacheKey: ResolvedNote[] | null = null;
-    function getTapNotes(): ResolvedNote[] {
+    let tapNotesCache: PreparedNote[] | null = null;
+    let tapNotesCacheKey: PreparedNote[] | null = null;
+    function getTapNotes(): PreparedNote[] {
       if (tapNotesCache && tapNotesCacheKey === game.notes) return tapNotesCache;
       tapNotesCache = game.notes.filter((n) => n.type === 'tap');
       tapNotesCacheKey = game.notes;
@@ -1814,7 +1805,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     }
 
     /* 通用时间窗二分（对任意按 timeSec 升序的数组），供 tap 子集复用。 */
-    function timeWindowOf(notes: ResolvedNote[], curTime: number, spawnLimit: number): { first: number; last: number } {
+    function timeWindowOf(notes: PreparedNote[], curTime: number, spawnLimit: number): { first: number; last: number } {
       const speed = game.speed * game.speedMul;
       const pastBuffer = 0.3 + (game.maxSlideSpan || 0);
       const futureBuffer = -spawnLimit / speed + 0.3;
@@ -1827,9 +1818,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return { first, last: lo };
     }
 
-    function findHitTapNote(wx: number, wy: number, curTime: number): ResolvedNote | null {
+    function findHitTapNote(wx: number, wy: number, curTime: number): PreparedNote | null {
       const tapNotes = getTapNotes();
-      const overlapSet: ResolvedNote[] = [];
+      const overlapSet: PreparedNote[] = [];
       // 命中判定用时间窗（与流速符号无关）。只扫 tap 子集，避免每次 pointerdown
       // 对窗口内所有音符（含 touch/slide）做无谓的距离判定。
       const win = timeWindowOf(tapNotes, curTime, -game.renderDist);
@@ -1864,7 +1855,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           bestTimeSec = m.timeSec;
         }
       }
-      let best: ResolvedNote | null = null;
+      let best: PreparedNote | null = null;
       let bestDist = Infinity;
       for (const m of overlapSet) {
         if (m.timeSec !== bestTimeSec) continue;
@@ -1878,7 +1869,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         }
       }
       if (best) {
-        const chosen = best as ResolvedNote;
+        const chosen = best as PreparedNote;
         const chosenOff = offOf2D(chosen);
         const merged = { x: chosen.x + chosenOff.x, y: chosen.y + chosenOff.y, half: TAP_HIT_HALF };
         for (const other of overlapSet) {

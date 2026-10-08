@@ -223,9 +223,6 @@ export interface ResolvedSlideNode extends SlideNodeData {
   layerIdx?: number;
   /** 全局时间轴下的滚动距离（不含图层流速）。仅供负流速下的距离窗排序使用。 */
   globalDist?: number;
-  /** @deprecated 图层流速已改为「按图层各自积分滚动距离」，倍率已并入 scrollDist，
-   *  不再单独乘用。保留字段仅为兼容旧运行期数据。 */
-  layerSpeedMul?: number;
 }
 
 /** A rectangular hit region (axis-aligned) in note-space, used by the
@@ -255,14 +252,6 @@ export interface ResolvedNote extends NoteData {
   layerIdx?: number;
   /** 全局时间轴下的滚动距离（不含图层流速）。仅供负流速下的距离窗排序使用。 */
   globalDist?: number;
-  /**
-   * 该音符**所在图层**时间轴下的滚动距离（已含图层流速/自身变速的积分）。
-   * z 公式统一为 `JUDGE_Z − (scrollDist − S_layer(curTime))·unit`，
-   * 判定时刻（t = timeSec）恒为 0，不受流速影响。
-   *
-   * @deprecated 倍率已并入上者，不再单独乘用。保留字段仅为兼容旧运行期数据。
-   */
-  layerSpeedMul?: number;
 }
 
 /** Runtime-resolved event with absolute time in seconds */

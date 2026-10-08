@@ -114,13 +114,13 @@
       var _n = game.notes[_ni];
       var _li = noteLayerIdx(game.layerTree, _n);
       _n.layerIdx = _li;
-      _n.globalDist = prefixDistanceAt(game.speedPrefix, _n.timeSec, _sp);
+      _n.globalDist = prefixDistanceAt(game.speedPrefix, _n.timeSec);
       var _nd = layerDistAt(_li, _n.timeSec);
       _n.scrollDist = _nd;
       if (_n.resolvedNodes) {
         for (var _ci = 0; _ci < _n.resolvedNodes.length; _ci++) {
           var _cn = _n.resolvedNodes[_ci];
-          _cn.globalDist = prefixDistanceAt(game.speedPrefix, _cn.timeSec, _sp);
+          _cn.globalDist = prefixDistanceAt(game.speedPrefix, _cn.timeSec);
           _cn.scrollDist = layerDistAt(_li, _cn.timeSec);
           var _ds = _cn.scrollDist - _nd;
           if (_ds < 0) _ds = -_ds;
@@ -564,6 +564,12 @@
     return JUDGE_Z - (nd - cd) * baseSpeed;
   }
 
+  /* 该音符**所属图层**在当前时刻的滚动距离（slide 子节点沿用头节点图层）。
+   * 无图层树时 layerCurDist 为空数组 → 取到 undefined，由 noteZPos 回退全局距离。 */
+  function layerCurDistOf(note) {
+    return game.layerCurDist[note.layerIdx];
+  }
+
   /* —— 图层（Layer）运行时（与完整版 GameCanvas 同构；ES5）—— */
   var ZERO_OFF_LITE = { x: 0, y: 0 };
   /* shared/layers.ts 禁止运行时 import，beat→秒 / easing / 斜坡步进都要在这注入
@@ -586,14 +592,14 @@
   /** 全局（默认根图层基底）在时刻 t 的累计滚动距离（前缀表 → O(log N)）。 */
   function globalDistAt(t) {
     return game.speedPrefix
-      ? prefixDistanceAt(game.speedPrefix, t, game.speedPoints)
+      ? prefixDistanceAt(game.speedPrefix, t)
       : getScrollDistance(t, game.speedPoints);
   }
   /* 图层 li 在时刻 t 的滚动距离：有自身变速事件时走该层的时间轴，否则「全局 × 常数倍率」。 */
   function layerDistAt(li, t) {
     var ld = game.layerDist ? game.layerDist[li] : null;
     if (ld && ld.points) {
-      return ld.prefix ? prefixDistanceAt(ld.prefix, t, ld.points) : getScrollDistance(t, ld.points);
+      return ld.prefix ? prefixDistanceAt(ld.prefix, t) : getScrollDistance(t, ld.points);
     }
     /* 只有默认根图层以顶层 events 为基底；其余图层基底 = 常数 1（距离 = t）。 */
     var base = (ld && ld.globalBase) ? globalDistAt(t) : t;
@@ -699,7 +705,7 @@
           var nodeA = allNodes[pi];
           var nodeB = allNodes[pi + 1];
           /* 图层滚动距离：slide 子节点沿用头节点图层。 */
-          var slideCD = game.layerCurDist ? game.layerCurDist[note.layerIdx || 0] : undefined;
+          var slideCD = layerCurDistOf(note);
           var zA = noteZPos(nodeA.timeSec, curTime, baseSpeed, nodeA.scrollDist, slideCD);
           var zB = noteZPos(nodeB.timeSec, curTime, baseSpeed, nodeB.scrollDist, slideCD);
           var keyA = note.id + '#' + pi;
@@ -734,8 +740,8 @@
            * the real scroll-distance profile so the pipe length / playhead honour
            * the speed change (mirrors GameCanvas's zAt). Otherwise cheap linear. */
           /* 用该音符**所属图层**的时间轴采样（含图层自身的 speed_change）。 */
-          var nli2 = note.layerIdx || 0;
-          var ld2 = game.layerDist ? game.layerDist[nli2] : null;
+          var nli2 = note.layerIdx;
+          var ld2 = game.layerDist[nli2];
           var spArr = (ld2 && ld2.points) ? ld2.points : game.speedPoints;
           var midSpeed = false;
           for (var si = 0; si < spArr.length; si++) {
@@ -870,7 +876,7 @@
         for (var nj = 0; nj < allNodes.length; nj++) {
           var slideNodeKey = note.id + '#' + nj;
           if (game.judged[slideNodeKey]) continue;
-          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist, game.layerCurDist ? game.layerCurDist[note.layerIdx || 0] : undefined);
+          var nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist, layerCurDistOf(note));
           var np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
           if (np) toDrawNotes.push({ p: np, kind: 'slide', color: nc, isHead: nj === 0, noteId: note.id, nodeIdx: nj, angle: allNodes[nj].angle });
           /* Projection guide for slide head only (children inherit head's path).
@@ -881,7 +887,7 @@
         /* tap / touch */
         var tkey = note.id;
         if (game.judged[tkey]) continue;
-        var tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist, game.layerCurDist ? game.layerCurDist[note.layerIdx || 0] : undefined);
+        var tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist, layerCurDistOf(note));
         var tOff = offOfLite(note);
         var tp = project(note.x + tOff.x, note.y + tOff.y, tz, spawnLimit);
         if (tp) {

@@ -31,7 +31,7 @@
  * 同一谱面重复进入（重试）零成本；**不做任何持久化**。谱面对象变化（切歌 / 编辑器
  * 改动生成新对象）自然失效。
  */
-import type { ChartData, ResolvedNote } from '../types/game';
+import type { ChartData, ResolvedNote, ResolvedSlideNode } from '../types/game';
 import {
   buildSpeedPrefix,
   extractSpeedPoints,
@@ -50,6 +50,33 @@ import {
   layerMinRelSpeed,
   noteLayerIdx,
 } from './layers';
+
+/**
+ * 预处理后的 slide 子节点：`scrollDist` / `globalDist` 由 `buildChartRuntime`
+ * 无条件写入，故收紧为必填（`layerIdx` 仍可选 —— 子节点沿用头节点的图层）。
+ */
+export type PreparedSlideNode = Omit<ResolvedSlideNode, 'scrollDist' | 'globalDist'> & {
+  scrollDist: number;
+  globalDist: number;
+};
+
+/**
+ * 预处理后的音符，即 `ChartRuntime.notes` 的元素类型。
+ *
+ * 解析层产出的 `ResolvedNote` 把三个距离字段声明为可选，而 `buildChartRuntime`
+ * 的预计算循环对每个音符都**无条件**写入它们。这里用窄化类型把该不变式固化
+ * 下来，下游即可直接读取，无需 `?? 0` / `?? scrollDist` 之类的兜底。
+ */
+export type PreparedNote = Omit<
+  ResolvedNote,
+  'scrollDist' | 'globalDist' | 'layerIdx' | 'resolvedNodes'
+> & {
+  scrollDist: number;
+  globalDist: number;
+  layerIdx: number;
+  /** 仅 slide 头节点携带（子节点已转为 `PreparedSlideNode`）。 */
+  resolvedNodes?: PreparedSlideNode[];
+};
 
 /**
  * 单个图层的**滚动距离时间轴**。
@@ -71,13 +98,13 @@ export interface LayerDist {
   globalBase: boolean;
   /** 合并后的变速时间轴；null = 纯静态倍率。 */
   points: SpeedPoint[] | null;
-  /** 由 `points` 建立的前缀表（仅当 points 可用且排序正常时非空）。 */
+  /** 由 `points` 建立的前缀表（仅当 points 非空时存在；升序由构造点保证）。 */
   prefix: SpeedPrefix | null;
 }
 
 export interface ChartRuntime {
-  /** 解析后的音符（按 timeSec 升序）。 */
-  notes: ResolvedNote[];
+  /** 解析并预处理后的音符（按 timeSec 升序；距离字段已必填）。 */
+  notes: PreparedNote[];
   events: ReturnType<typeof resolveEvents>;
   speedPoints: SpeedPoint[];
   prefix: SpeedPrefix;
@@ -118,11 +145,11 @@ export interface ChartRuntime {
 /**
  * 求时刻 `timeSec` 的累计滚动距离。
  *
- * 与 `getScrollDistance(timeSec, rt.speedPoints)` 等价；排序谱面下走二分 + O(1)
- * 插值，避免每帧对 speedPoints 做线性扫描。
+ * 与 `getScrollDistance(timeSec, rt.speedPoints)` 等价（前缀表由升序变速点建立）；
+ * 走二分 + O(1) 插值，避免每帧对 speedPoints 做线性扫描。
  */
 export function scrollDistanceAt(rt: ChartRuntime, timeSec: number): number {
-  return prefixDistanceAt(rt.prefix, timeSec, rt.speedPoints);
+  return prefixDistanceAt(rt.prefix, timeSec);
 }
 
 /**
@@ -130,12 +157,12 @@ export function scrollDistanceAt(rt: ChartRuntime, timeSec: number): number {
  *
  * 与调用方原先每帧的线性扫描完全等价：
  *   `for (const p of speedPoints) { if (p.timeSec <= t) s = p.speed; else break; }`
- * 升序谱面且 `t >= 0` 时走二分 O(log N)（变速点常达数百，SV 谱面收益显著）；
- * 退化情况（非升序 / 负 t）回退线性扫描，保证与旧行为逐位一致。
+ * `t >= 0` 时走二分 O(log N)（变速点常达数百，SV 谱面收益显著）；
+ * `t < 0`（谱面 offset 为负）回退线性扫描，保证与旧行为逐位一致。
  */
 export function speedAt(rt: ChartRuntime, timeSec: number): number {
   const sp = rt.speedPoints;
-  if (rt.prefix.sorted && timeSec >= 0) {
+  if (timeSec >= 0) {
     // 首个 timeSec > t 的下标（严格小于等于才计入，与原扫描的 `else break` 一致）。
     let lo = 0;
     let hi = sp.length;
@@ -156,7 +183,9 @@ export function speedAt(rt: ChartRuntime, timeSec: number): number {
 
 /** 构建谱面运行时数据（一次性，成本随谱面规模线性增长）。 */
 export function buildChartRuntime(chart: ChartData): ChartRuntime {
-  const notes = resolveChart(chart);
+  // 下方预计算循环对每个音符（及其 slide 子节点）无条件写入
+  // scrollDist / globalDist / layerIdx，故此处一次性窄化为 PreparedNote。
+  const notes = resolveChart(chart) as unknown as PreparedNote[];
   const events = resolveEvents(chart);
   // 传已解析的 events，避免 extractSpeedPoints 内部再解析一遍全谱事件。
   const speedPoints = extractSpeedPoints(events);
@@ -185,11 +214,10 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
     if (rel > 0 && rel < minLayerSpeed) minLayerSpeed = rel;
   }
 
-  /** 图层 li 在时刻 t 的滚动距离。 */
+  /** 图层 li 在时刻 t 的滚动距离。`layerDist` 与图层树一一对应，下标恒有效。 */
   const distAt = (li: number, t: number): number => {
     const ld = layerDist[li];
-    if (!ld) return getScrollDistance(t, speedPoints);
-    if (ld.prefix) return prefixDistanceAt(ld.prefix, t, ld.points as SpeedPoint[]);
+    if (ld.prefix) return prefixDistanceAt(ld.prefix, t);
     const base = ld.globalBase ? getScrollDistance(t, speedPoints) : t;
     return ld.mul === 1 ? base : ld.mul * base;
   };
@@ -212,14 +240,12 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
     n.layerIdx = li;
     n.globalDist = getScrollDistance(n.timeSec, speedPoints);
     n.scrollDist = distAt(li, n.timeSec);
-    n.layerSpeedMul = undefined;
     const children = n.resolvedNodes;
     if (children) {
       for (let j = 0; j < children.length; j++) {
         // slide 子节点不带 layerId，沿用头节点的图层。
         children[j].globalDist = getScrollDistance(children[j].timeSec, speedPoints);
         children[j].scrollDist = distAt(li, children[j].timeSec);
-        children[j].layerSpeedMul = undefined;
       }
     }
   }
@@ -229,15 +255,15 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
   const distCount = notes.length;
   const notesByDist = new Int32Array(distCount);
   for (let i = 0; i < distCount; i++) notesByDist[i] = i;
-  notesByDist.sort((a, b) => (notes[a].globalDist ?? 0) - (notes[b].globalDist ?? 0));
+  notesByDist.sort((a, b) => notes[a].globalDist - notes[b].globalDist);
   let maxSlideScrollSpan = 0;
   for (let i = 0; i < distCount; i++) {
     const n = notes[i];
     const children = n.resolvedNodes;
     if (!children) continue;
-    const headDist = n.scrollDist ?? 0;
+    const headDist = n.scrollDist;
     for (let j = 0; j < children.length; j++) {
-      const d = Math.abs((children[j].scrollDist ?? 0) - headDist);
+      const d = Math.abs(children[j].scrollDist - headDist);
       if (d > maxSlideScrollSpan) maxSlideScrollSpan = d;
     }
   }
@@ -308,7 +334,7 @@ export function scrollDistWindow(
   const dLo = curScrollDist + lo;
   const dHi = curScrollDist + hi;
   // 排序键是 **globalDist**（各图层距离尺度不同，只有全局轴是可比的单调序）。
-  const keyOf = (i: number): number => notes[i].globalDist ?? notes[i].scrollDist ?? 0;
+  const keyOf = (i: number): number => notes[i].globalDist;
   let a = 0;
   let b = order.length;
   while (a < b) {
@@ -335,10 +361,10 @@ export function scrollDistWindow(
 export function updateLayerCurDist(rt: ChartRuntime, curTime: number): Float64Array {
   const out = rt.layerCurDist;
   const lds = rt.layerDist;
-  const globalNow = prefixDistanceAt(rt.prefix, curTime, rt.speedPoints);
-  for (let i = 0; i < lds.length && i < out.length; i++) {
+  const globalNow = prefixDistanceAt(rt.prefix, curTime);
+  for (let i = 0; i < lds.length; i++) {
     const ld = lds[i];
-    if (ld.prefix) out[i] = prefixDistanceAt(ld.prefix, curTime, ld.points as SpeedPoint[]);
+    if (ld.prefix) out[i] = prefixDistanceAt(ld.prefix, curTime);
     else {
       // 只有默认根图层以顶层 events 为基底；其余图层基底 = 常数 1（距离 = t）。
       const base = ld.globalBase ? globalNow : curTime;
@@ -351,9 +377,8 @@ export function updateLayerCurDist(rt: ChartRuntime, curTime: number): Float64Ar
 /** 图层 li 在时刻 t 的滚动距离（slide 管道采样等「任意时刻」场景用）。 */
 export function layerDistAt(rt: ChartRuntime, li: number, timeSec: number): number {
   const ld = rt.layerDist[li];
-  if (!ld) return prefixDistanceAt(rt.prefix, timeSec, rt.speedPoints);
-  if (ld.prefix) return prefixDistanceAt(ld.prefix, timeSec, ld.points as SpeedPoint[]);
-  const base = ld.globalBase ? prefixDistanceAt(rt.prefix, timeSec, rt.speedPoints) : timeSec;
+  if (ld.prefix) return prefixDistanceAt(ld.prefix, timeSec);
+  const base = ld.globalBase ? prefixDistanceAt(rt.prefix, timeSec) : timeSec;
   return ld.mul === 1 ? base : ld.mul * base;
 }
 

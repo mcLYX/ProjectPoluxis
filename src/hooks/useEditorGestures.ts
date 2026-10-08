@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import type { HitRegion, JudgementType, ResolvedNote } from '../types/game';
+import type { HitRegion, JudgementType } from '../types/game';
+import type { PreparedNote } from '../utils/chartRuntime';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { isWithinBox } from '../systems/judge';
 import { evaluateJudgement } from '../utils/scoring';
@@ -9,7 +10,7 @@ import { HIT_WINDOW_MS, TAP_HIT_HALF } from '../gameplayConstants';
 import type { JudgeSystemContext } from './judgeContext';
 
 /** commitJudgement 的函数签名（与 useJudgeSystem 返回值一致）。 */
-export type CommitJudgementFn = (note: ResolvedNote, j: JudgementType, dtMs: number) => void;
+export type CommitJudgementFn = (note: PreparedNote, j: JudgementType, dtMs: number) => void;
 
 /**
  * 迁出 GameCanvas 的 `handlePointerInteraction`：编辑器模式下的放置/选择，以及玩法模式下的 tap 命中判定。
@@ -94,7 +95,7 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     // one closest to the touch point (tie-break by id) and consume it; then merge
     // the consumed tap's own box into every other hittable tap the point overlapped,
     // so subsequent presses on the overlap can still reach them.
-    const overlapSet: ResolvedNote[] = [];
+    const overlapSet: PreparedNote[] = [];
     for (const n of notes) {
       if (ctx.judgedNotesRef.current.has(n.id) || n.type !== 'tap' || n.fake) continue;
       const dt = Math.abs((curTime - n.timeSec) * 1000);
@@ -106,7 +107,7 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
       );
       if (inOwn || inExtra) overlapSet.push(n);
     }
-    let best: ResolvedNote | null = null;
+    let best: PreparedNote | null = null;
     let bestDist = Infinity;
     // Selection rule (fixes late-tap swallow bug): when the touch point lands
     // inside the hitbox of taps at DIFFERENT times (neighbouring close taps with

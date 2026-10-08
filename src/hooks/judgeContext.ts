@@ -6,10 +6,10 @@ import type {
   JudgementFeedback,
   JudgementType,
   NoteType,
-  ResolvedNote,
 } from '../types/game';
 import type { SceneGroups } from '../scenes/sceneGroups';
 import type { RingPt } from '../systems/geometry';
+import type { PreparedNote } from '../utils/chartRuntime';
 // SlideRt 在 GameCanvas 中定义（与 slide 运行态绑定），此处仅作类型引用。
 import type { SlideRt } from '../components/GameCanvas';
 
@@ -19,7 +19,7 @@ import type { SlideRt } from '../components/GameCanvas';
  * 未注入 = 不支持触发器（2D / Lite 若不实现则自动降级为无触发）。
  * 幂等由 `judgedNotesRef` 保证：一个音符只会被判定一次 → 只触发一次。
  */
-export type DispatchNoteTrigger = (note: ResolvedNote, judgement: JudgementType) => void;
+export type DispatchNoteTrigger = (note: PreparedNote, judgement: JudgementType) => void;
 
 /** 指针运行态（与 GameCanvas 内联类型保持一致）。 */
 export interface PointerState {
@@ -86,7 +86,7 @@ export interface JudgeSystemContext {
   autoPlayRef: MutableRefObject<boolean>;
 
   // —— 数据 / 编辑器 ——
-  resolvedRef: MutableRefObject<ResolvedNote[]>;
+  resolvedRef: MutableRefObject<PreparedNote[]>;
   isPlayingRef: MutableRefObject<boolean>;
   isPausedRef: MutableRefObject<boolean>;
   gameTimeRef: MutableRefObject<number>;
@@ -96,7 +96,7 @@ export interface JudgeSystemContext {
   isDraggingRef: MutableRefObject<boolean>;
 
   // —— 模块级 helper（值引用）——
-  getAllNodes: (note: ResolvedNote) => Array<{
+  getAllNodes: (note: PreparedNote) => Array<{
     x: number;
     y: number;
     timeSec: number;
@@ -107,7 +107,7 @@ export interface JudgeSystemContext {
    * 图层（Layer）偏移后的音符位置。未提供 = 无图层概念，按原坐标判定（旧行为，
    * 2D / Lite 目前不提供）。slide 子节点由调用方按头节点图层换算。
    */
-  getEffectivePos?: (note: ResolvedNote) => { x: number; y: number };
+  getEffectivePos?: (note: PreparedNote) => { x: number; y: number };
   /** 音符触发器（§3.4）：分发该音符在此判定下触发的事件。可选，未注入则不触发。 */
   dispatchNoteTrigger?: DispatchNoteTrigger;
   /**
@@ -115,12 +115,12 @@ export interface JudgeSystemContext {
    * 打击特效与判定反馈钉在落位（不随播放中的整列平移跑动）；slide 子节点经
    * `childIdx`（1-based，与 id 后缀一致）取各自坐标。未提供时退回 getEffectivePos。
    */
-  getLandingPos?: (note: ResolvedNote, childIdx?: number) => { x: number; y: number };
+  getLandingPos?: (note: PreparedNote, childIdx?: number) => { x: number; y: number };
   /**
    * 音符的**有效音符色**：note.color → 图层色（就近继承 / 图层内 note_color_change 事件）
    * → 全局 noteColor。未提供时退回旧的全局单值链。
    */
-  getNoteColor?: (note: ResolvedNote) => string;
+  getNoteColor?: (note: PreparedNote) => string;
   /**
    * 该指针是否被故事板拦截（§3.7 v3 `api.input.setPointerFilter`）——true = **不参与
    * 任何判定**（tap / touch / slide 全部屏蔽）。

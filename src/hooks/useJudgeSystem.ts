@@ -1,4 +1,5 @@
-import type { JudgementType, NoteType, ResolvedNote } from '../types/game';
+import type { JudgementType, NoteType } from '../types/game';
+import type { PreparedNote } from '../utils/chartRuntime';
 import { noteHitZ } from '../systems/judge';
 import { calculateNoteScore } from '../utils/scoring';
 import { countPlayableNotes } from '../utils/beatTime';
@@ -50,7 +51,7 @@ export type SpawnBurstFn = (
  * 依赖经 ctx 注入；spawnBurst 由 useNoteEffects 提供。
  */
 export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn) => {
-  const commitJudgement = (note: ResolvedNote, j: JudgementType, dtMs: number): void => {
+  const commitJudgement = (note: PreparedNote, j: JudgementType, dtMs: number): void => {
     if (ctx.isEditorModeRef.current) return;
     if (ctx.judgedNotesRef.current.has(note.id)) return;
     if (note.fake) return; // 假音符：完全不参与判定（防御；命中检测层已跳过）
@@ -84,7 +85,7 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
   };
 
   const commitSlideNode = (
-    slide: ResolvedNote,
+    slide: PreparedNote,
     idx: number,
     nx: number,
     ny: number,
@@ -147,7 +148,7 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
    * `Set<number>` 绑定）转成核心的中立入参，并把核心的提交回调接到本端的
    * 计分 / 音效 / 特效 / onJudgement 上。
    */
-  const processSlide = (note: ResolvedNote, curTime: number): void => {
+  const processSlide = (note: PreparedNote, curTime: number): void => {
     // Cached: avoids rebuilding [head, ...resolvedNodes] every frame.
     if (note.fake) return; // 假音符：整条 slide 链不判定（含漏掉也不打断连击）
     const allNodes = ctx.getAllNodes(note);
