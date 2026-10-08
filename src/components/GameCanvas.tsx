@@ -6,8 +6,8 @@ import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, JudgementTyp
 import type { JudgeProjector, StoryboardPointerBridge, StoryboardRawPointer } from '../types/storyboard';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
-import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt } from '../utils/chartRuntime';
-import { buildLayerTree, layerOffsetAt, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
+import { getChartRuntime, scrollDistanceAt, speedAt, scrollDistWindow, updateLayerCurDist, layerDistAt } from '../utils/chartRuntime';
+import { buildLayerTree, layerOffsetAt, layerOffsetAtInto, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
 import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/triggers';
 import { createFrameGate } from '../utils/frameLimiter';
 import { qualityStore } from '../qualityStore';
@@ -169,6 +169,16 @@ const _vTubeEnd = new THREE.Vector3();
 // array on every frame (GC churn is amplified ~2.4x at 144Hz displays).
 const _slideZs: number[] = [];
 
+/** 量化到 3 / 4 位小数（等价于原 `toFixed(3)` / `toFixed(4)` 的数值比较）。 */
+function q3(v: number): number { return Math.round(v * 1000); }
+function q4(v: number): number { return Math.round(v * 10000); }
+/** slide 管线几何签名 scratch（复用；仅在几何变化时才 slice 保存）。 */
+const _geoSig: number[] = [];
+
+/** 图层偏移复用缓冲（写入式求值，消除每帧每音符的 {x,y} 分配）。 */
+const _landingOff = { x: 0, y: 0 };
+const _layerOffTmp = { x: 0, y: 0 };
+
 /**
  * Ultra 动态光源池的「最小 |z| 前 N 名」选择槽位。
  *
@@ -184,6 +194,49 @@ const _lightZ: number[] = [];
 const _lightX: number[] = [];
 const _lightY: number[] = [];
 const _lightC: (THREE.Color | null)[] = [];
+
+/**
+ * 每帧「当前可见」的网格集合：由窗口遍历在置 `visible = true` 时登记，
+ * 供 ultra 灯光池只遍历可见项（原实现遍历**本局累计**的全部网格 = O(累计音符)，
+ * 随歌进行越来越慢）。单线程顺序消费 —— 复用安全。
+ */
+const _visNoteMeshes: Array<{ group: THREE.Group; projectionGroup: THREE.Group }> = [];
+const _visSlideNodes: SlideMeshSet['nodes'] = [];
+const _visSlidePipes: SlideMeshSet['pipes'] = [];
+
+/** 灯光池槽位状态（模块级，取代原先每帧新建的 `consider` 闭包）。 */
+let _lightCap = 0;
+let _lightCnt = 0;
+/** 把候选 (z,x,y,color) 插入「|z| 最小前 _lightCap 名」固定槽位（零分配）。 */
+function considerLight(z: number, x: number, y: number, color: THREE.Color): void {
+  const az = Math.abs(z);
+  const cap = _lightCap;
+  if (_lightCnt < cap) {
+    let k = _lightCnt;
+    while (k > 0 && _lightAZ[k - 1] > az) {
+      _lightAZ[k] = _lightAZ[k - 1];
+      _lightZ[k] = _lightZ[k - 1];
+      _lightX[k] = _lightX[k - 1];
+      _lightY[k] = _lightY[k - 1];
+      _lightC[k] = _lightC[k - 1];
+      k--;
+    }
+    _lightAZ[k] = az; _lightZ[k] = z; _lightX[k] = x; _lightY[k] = y; _lightC[k] = color;
+    _lightCnt++;
+    return;
+  }
+  if (az >= _lightAZ[cap - 1]) return; // 不够近，丢弃（等价于 sort 后被截断）
+  let k = cap - 1;
+  while (k > 0 && _lightAZ[k - 1] > az) {
+    _lightAZ[k] = _lightAZ[k - 1];
+    _lightZ[k] = _lightZ[k - 1];
+    _lightX[k] = _lightX[k - 1];
+    _lightY[k] = _lightY[k - 1];
+    _lightC[k] = _lightC[k - 1];
+    k--;
+  }
+  _lightAZ[k] = az; _lightZ[k] = z; _lightX[k] = x; _lightY[k] = y; _lightC[k] = color;
+}
 
 /**
  * 颜色字符串 → THREE.Color 缓存。
@@ -586,6 +639,8 @@ export interface SlideRt {
 interface SlideMeshSet {
   nodes: Array<{
     group: THREE.Group;
+    /** 预计算的判定 key = `${noteId}#${idx}`（避免每帧每节点拼字符串）。 */
+    key: string;
     /** Only the slide head keeps a border: inner (note color, Line) + outer (custom, soft texture). */
     innerWire?: THREE.LineBasicMaterial;
     outerWire?: THREE.MeshBasicMaterial;
@@ -605,8 +660,10 @@ interface SlideMeshSet {
      *  farPlane hides z < spawnLimit (beyond the far render plane, editor only). */
     judgePlane: THREE.Plane;
     farPlane: THREE.Plane;
-    /** Geometry cache key; rebuilt only when the segment shape actually changes. */
-    geoKey: string | null;
+    /** 几何签名（数值化，替代每帧拼 geoKey 字符串）；null = 尚未构建。 */
+    gSig: number[] | null;
+    /** 签名中的 easing 分量（字符串，单独比较）。 */
+    gEasing: string | null;
     /** World-space midpoint, reused by the ultra light pool. */
     mid: THREE.Vector3;
   }>;
@@ -969,7 +1026,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     velocities: Float32Array;
     startMs: number;
     duration: number;
-    color: THREE.Color;
   }>>([]);
 
   const noteMeshesRef = useRef<Map<string, { group: THREE.Group; projectionGroup: THREE.Group }>>(new Map());
@@ -1048,11 +1104,16 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (!tree) return ZERO_OFF;
     return layerOffsetAt(tree, idx, t);
   };
-  /** 判定落点处的图层偏移（按音符自己的 timeSec 求值）。
-   *  投影引导（落点提示）必须钉在**最终落位**，不随播放中的整列平移跑动。 */
-  const landingOffOf = (n: object): { x: number; y: number } => {
+  /** 指定图层合成偏移，**写入 out**（零分配）——热路径（每可见音符每帧）专用。 */
+  const layerOffAtIdxInto = (idx: number, t: number, out: { x: number; y: number }): void => {
+    const tree = layerTreeRef.current;
+    if (!tree) { out.x = 0; out.y = 0; return; }
+    layerOffsetAtInto(tree, idx, t, out);
+  };
+  /** 判定落点图层偏移，**写入 out**（零分配）。 */
+  const landingOffOfInto = (n: object, out: { x: number; y: number }): void => {
     const t = (n as { timeSec?: number }).timeSec;
-    return layerOffAtIdx(layerIdxOf(n), typeof t === 'number' ? t : 0);
+    layerOffAtIdxInto(layerIdxOf(n), typeof t === 'number' ? t : 0, out);
   };
 
   const resolvedEvents = chartRuntime.events;
@@ -2079,11 +2140,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const isTouchLike = pointerType === 'touch' || pointerType === 'pen';
       const active = isTouchLike ? down : true;
       // §3.7 v3 故事板**判定拦截**：被 blockedIds 列出的指针不参与任何判定。
-      // 故事板仍然要观测它（要画触点光斑/污染反馈），所以照常写快照，
-      // 只是把 down 语义降级为"仅观测"—— 不进判定、不绑 slide、不拖拽。
-      //
-      // ⚠️ 这一环缺了的话，故事板侧再怎么标记污染都无效：拦截结果只写进
-      //    bridge.blockedIds，游戏侧不查就等于没拦（实测"挡不住判定"）。
+      // 把 down 语义降级为"仅观测"—— 不进判定、不绑 slide、不拖拽。
       const blocked = !!storyboardBridge && down && storyboardBridge.blockedIds.has(pointerId);
       pointersRef.current.set(pointerId, { x: hit.x, y: hit.y, down: down && !blocked, active, type: pointerType });
       if (down && !blocked && dragPointerIdRef.current === null) {
@@ -2378,7 +2435,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         proj.visible = false;
         groupsRef.current?.gameplay.add(proj);
       }
-      nodes.push({ group, innerWire, outerWire, fill, proj, projMat });
+      nodes.push({ group, key: `${note.id}#${i}`, innerWire, outerWire, fill, proj, projMat });
     }
     const pipes: SlideMeshSet['pipes'] = [];
     for (let i = 0; i < count - 1; i++) {
@@ -2412,7 +2469,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         lastUpdateMs: performance.now(),
         judgePlane,
         farPlane,
-        geoKey: null,
+        gSig: null,
+        gEasing: null,
         mid: new THREE.Vector3(),
       });
     }
@@ -2479,9 +2537,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const layerOffs = layerOffsRef.current;
     if (layerTree && layerOffs.length === layerTree.nodes.length) {
       for (let li = 0; li < layerTree.nodes.length; li++) {
-        const o = layerOffsetAt(layerTree, li, curTime);
-        layerOffs[li].x = o.x;
-        layerOffs[li].y = o.y;
+        layerOffsetAtInto(layerTree, li, curTime, _layerOffTmp);
+        layerOffs[li].x = _layerOffTmp.x;
+        layerOffs[li].y = _layerOffTmp.y;
       }
     }
 
@@ -2835,6 +2893,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       lwNow.notes = notes;
     }
 
+    // 收集本帧可见网格（供 ultra 灯光池只遍历可见项，避免 O(累计网格)）。
+    _visNoteMeshes.length = 0;
+    _visSlideNodes.length = 0;
+    _visSlidePipes.length = 0;
     const iterTotal = unionList === null ? lastIdx - firstIdx : unionList.length;
     for (let q = 0; q < iterTotal; q++) {
       const noteIdx = unionList === null ? firstIdx + q : unionList[q];
@@ -2869,7 +2931,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const nodeScrollDist = nd !== undefined ? nd : layerDistAt(runtimeRef.current, nli, allNodes[i].timeSec);
           const z = JUDGE_Z - (nodeScrollDist - layerCurDist[nli]) * unitPerSecond;
           _slideZs.push(z);
-          const key = `${note.id}#${i}`;
+          const key = sm.nodes[i].key; // 预存，避免每帧拼字符串
           const judged = judgedNotesRef.current.has(key);
           const nodeRt = rt?.nodes[i];
           const isRed = !!nodeRt && nodeRt.missLocked && !judged;
@@ -2886,6 +2948,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const nm = sm.nodes[i];
           nm.group.visible = vis;
           if (vis) {
+            _visSlideNodes.push(nm);
             nm.group.position.set(allNodes[i].x, allNodes[i].y, z);
             nm.group.scale.set(vScale, vScale, 1);
             // Rotate the node visual (note + cross-section) around its center by
@@ -2942,7 +3005,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         // clip engage immediately; leaving the cross-section releases it smoothly.
         const pipeFrameNow = performance.now();
         for (let i = 0; i < sm.pipes.length; i++) {
-          const nextKey = `${note.id}#${i + 1}`;
+          const nextKey = sm.nodes[i + 1].key; // 预存（下一节点），避免每帧拼字符串
           const nextJudged = judgedNotesRef.current.has(nextKey);
           const naturalA = _vNaturalA.set(allNodes[i].x, allNodes[i].y, _slideZs[i]);
           const naturalB = _vNaturalB.set(allNodes[i + 1].x, allNodes[i + 1].y, _slideZs[i + 1]);
@@ -3122,21 +3185,24 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           const angleEnd = allNodes[i + 1].angle ?? 0;
           const easing = allNodes[i + 1].easing ?? 'linear';
           const endX = bx - ax, endY = by - ay, endZ = bz - az;
-          let geoKey =
-            `${angleStart.toFixed(4)}|${angleEnd.toFixed(4)}|${easing}|` +
-            `${endX.toFixed(3)}|${endY.toFixed(3)}|${endZ.toFixed(3)}|${SLIDE_PIPE_HALF * vScale}`;
+          // 形状签名（数值化，零字符串分配）：分量与原 geoKey 的 toFixed 精度一致。
+          const sig = _geoSig;
+          sig.length = 0;
+          sig.push(q4(angleStart), q4(angleEnd), q3(endX), q3(endY), q3(endZ), SLIDE_PIPE_HALF * vScale);
           if (midSpeed) {
-            // Signature of the interior Z profile so different speed curves in the
-            // segment get distinct cached geometries (4 interior samples suffice).
-            const prof: string[] = [];
+            // 段内速度剖面签名（4 个内部采样；不同速度曲线 → 不同缓存几何）。
             for (let s = 1; s <= 4; s++) {
-              prof.push(
-                ((scrollDistA - layerDistAt(lrt, nli2, tA + (s / 5) * segDur)) * unitPerSecond).toFixed(3),
-              );
+              sig.push(q3((scrollDistA - layerDistAt(lrt, nli2, tA + (s / 5) * segDur)) * unitPerSecond));
             }
-            geoKey += `|P:${prof.join(',')}`;
           }
-          if (pipe.geoKey !== geoKey) {
+          let geoChanged = pipe.gEasing !== easing || pipe.gSig === null || pipe.gSig.length !== sig.length;
+          if (!geoChanged) {
+            const g = pipe.gSig!;
+            for (let si = 0; si < sig.length; si++) {
+              if (g[si] !== sig[si]) { geoChanged = true; break; }
+            }
+          }
+          if (geoChanged) {
             if (pipe.geo) pipe.geo.dispose();
             pipe.geo = buildSlideTubeGeometry({
               end: _vTubeEnd.set(endX, endY, endZ),
@@ -3147,12 +3213,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
               zAt,
             });
             pipe.mesh.geometry = pipe.geo;
-            pipe.geoKey = geoKey;
+            pipe.gSig = sig.slice(); // 复制（sig 为复用 scratch）；仅在变化时分配
+            pipe.gEasing = easing;
           }
           pipe.mesh.position.set(ax, ay, az);
           pipe.mesh.scale.set(1, 1, 1);
           pipe.mesh.quaternion.identity();
           pipe.mesh.visible = true;
+          _visSlidePipes.push(pipe);
           // Cache world midpoint for the ultra light pool.
           pipe.mid.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
 
@@ -3194,7 +3262,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       if (vis) {
         if (!entry) {
           const ng = note.type === 'tap' ? mkTap(noteEffectiveColor) : mkTouch(noteEffectiveColor);
-          const pg = mkProj(note.type, noteEffectiveColor); pg.position.set(note.x + landingOffOf(note).x, note.y + landingOffOf(note).y, JUDGE_Z + 0.01);
+          const pg = mkProj(note.type, noteEffectiveColor); landingOffOfInto(note, _landingOff); pg.position.set(note.x + _landingOff.x, note.y + _landingOff.y, JUDGE_Z + 0.01);
           groupsRef.current?.gameplay.add(ng); groupsRef.current?.gameplay.add(pg);
           entry = { group: ng, projectionGroup: pg }; noteMeshesRef.current.set(note.id, entry);
           // (Ultra note-light handled by ultraLightPoolRef — see render loop)
@@ -3203,6 +3271,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         entry.group.scale.set(vScale, vScale, 1);
         entry.group.rotation.z = -(note.angle ?? 0);
         entry.group.visible = true;
+        _visNoteMeshes.push(entry);
 
         // Smooth fade-in animation as note enters the render distance
         const fadeZone = 12;
@@ -3245,7 +3314,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           ? 0
           : THREE.MathUtils.clamp(1 - timeToHitMs / leadMs, 0, 0.95);
         entry.projectionGroup.visible = po > 0;
-        entry.projectionGroup.position.set(note.x + landingOffOf(note).x, note.y + landingOffOf(note).y, JUDGE_Z + 0.01);
+        // 原先同一行调了两次 landingOffOf(note)（各分配一个 {x,y}）—— 改为一次写入式。
+        landingOffOfInto(note, _landingOff);
+        entry.projectionGroup.position.set(note.x + _landingOff.x, note.y + _landingOff.y, JUDGE_Z + 0.01);
         entry.projectionGroup.scale.set(vScale, vScale, 1);
         entry.projectionGroup.rotation.z = -(note.angle ?? 0);
         entry.projectionGroup.children.forEach((c) => {
@@ -3297,102 +3368,64 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const now = performance.now();
 
     // Ultra mode: drive the PointLight pool from the closest-to-judge-plane
-    // visible notes. We reuse the noteMeshesRef map — entries that are
-    // visible=true with group.visible === true are currently on screen.
-    // Pick the 8 smallest |z| (closest to judge plane) and assign one
-    // pool light each; park the rest far away with intensity 0.
+    // visible notes/slides. `_visNoteMeshes/_visSlideNodes/_visSlidePipes` were
+    // filled during the window loop above (only **currently visible** meshes),
+    // so this is O(visible) rather than O(all meshes created this round).
+    // Pick the 8 smallest |z| (closest to judge plane) and assign one pool light
+    // each; park the rest far away with intensity 0.
     const pool = ultraLightPoolRef.current;
     if (pool.length > 0) {
-      // Collect candidates into the fixed slots (no per-candidate allocation).
-      const cap = pool.length;
-      let cnt = 0;
-      const consider = (z: number, x: number, y: number, color: THREE.Color): void => {
-        const az = Math.abs(z);
-        if (cnt < cap) {
-          let k = cnt;
-          while (k > 0 && _lightAZ[k - 1] > az) {
-            _lightAZ[k] = _lightAZ[k - 1];
-            _lightZ[k] = _lightZ[k - 1];
-            _lightX[k] = _lightX[k - 1];
-            _lightY[k] = _lightY[k - 1];
-            _lightC[k] = _lightC[k - 1];
-            k--;
-          }
-          _lightAZ[k] = az; _lightZ[k] = z; _lightX[k] = x; _lightY[k] = y; _lightC[k] = color;
-          cnt++;
-          return;
-        }
-        if (az >= _lightAZ[cap - 1]) return; // 不够近，丢弃（等价于 sort 后被截断）
-        let k = cap - 1;
-        while (k > 0 && _lightAZ[k - 1] > az) {
-          _lightAZ[k] = _lightAZ[k - 1];
-          _lightZ[k] = _lightZ[k - 1];
-          _lightX[k] = _lightX[k - 1];
-          _lightY[k] = _lightY[k - 1];
-          _lightC[k] = _lightC[k - 1];
-          k--;
-        }
-        _lightAZ[k] = az; _lightZ[k] = z; _lightX[k] = x; _lightY[k] = y; _lightC[k] = color;
-      };
-      noteMeshesRef.current.forEach((entry) => {
-        if (!entry.group.visible) return;
-        // Read current world position (group.position is local; group has no parent transform).
+      _lightCap = pool.length;
+      _lightCnt = 0;
+      for (let i = 0; i < _visNoteMeshes.length; i++) {
+        const entry = _visNoteMeshes[i];
+        if (!entry.group.visible) continue;
         const p = entry.group.position;
-        // Read the note's own color. The FIRST Mesh child is now the OUTER border
-        // (soft-texture ring) whose color is the customizable `defaultSkinOuterColor`
-        // — using it would light the walls with the outer-border color instead of
-        // the note color. Prefer the INNER border (color always tracks the note
-        // color every frame), then fall back to the fill mesh / skin texture.
+        // Prefer the INNER border (color always tracks the note color every frame),
+        // then fall back to the fill mesh / skin texture — skip the outer border
+        // (its color is the customizable `defaultSkinOuterColor`, not the note color).
         let color: THREE.Color | null = null;
-        for (const c of entry.group.children) {
+        const children = entry.group.children;
+        for (let ci = 0; ci < children.length; ci++) {
+          const c = children[ci];
           if (c.userData.isBorder === 'inner') {
-            if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) {
-              color = c.material.color;
-              break;
-            }
-            if (c instanceof THREE.Line && c.material instanceof THREE.LineBasicMaterial) {
-              color = c.material.color;
-              break;
-            }
+            if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) { color = c.material.color; break; }
+            if (c instanceof THREE.Line && c.material instanceof THREE.LineBasicMaterial) { color = c.material.color; break; }
           }
         }
         if (!color) {
-          entry.group.children.forEach((c) => {
-            if (color) return;
-            if (c.userData.isBorder === 'outer') return;
-            if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) {
-              color = c.material.color;
-            }
-          });
+          for (let ci = 0; ci < children.length; ci++) {
+            const c = children[ci];
+            if (c.userData.isBorder === 'outer') continue;
+            if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial) { color = c.material.color; break; }
+          }
         }
-        if (color) consider(p.z, p.x, p.y, color);
-      });
-      // Slide nodes also contribute — iterate slideMeshesRef.
-      slideMeshesRef.current.forEach((sm) => {
-        sm.nodes.forEach((nd) => {
-          if (!nd.group.visible) return;
-          const p = nd.group.position;
-          consider(p.z, p.x, p.y, nd.fill.color);
-        });
-        // Slide PIPES also contribute light candidates — a long arc segment
-        // is itself a colored body and should illuminate the walls along its
-        // length. Use the pipe's midpoint (position + quat * (0, len/2, 0)).
-        sm.pipes.forEach((pp) => {
-          if (!pp.mesh.visible) return;
-          _vLightMid.copy(pp.mid);
-          const mat = pp.mat as THREE.MeshBasicMaterial;
-          consider(_vLightMid.z, _vLightMid.x, _vLightMid.y, mat.color);
-        });
-      });
+        if (color) considerLight(p.z, p.x, p.y, color);
+      }
+      // Slide nodes contribute too.
+      for (let i = 0; i < _visSlideNodes.length; i++) {
+        const nd = _visSlideNodes[i];
+        if (!nd.group.visible) continue;
+        const p = nd.group.position;
+        considerLight(p.z, p.x, p.y, nd.fill.color);
+      }
+      // Slide PIPES also contribute — a long arc is a colored body lighting the walls
+      // along its length (use the pipe midpoint cached in `pp.mid`).
+      for (let i = 0; i < _visSlidePipes.length; i++) {
+        const pp = _visSlidePipes[i];
+        if (!pp.mesh.visible) continue;
+        _vLightMid.copy(pp.mid);
+        const mat = pp.mat as THREE.MeshBasicMaterial;
+        considerLight(_vLightMid.z, _vLightMid.x, _vLightMid.y, mat.color);
+      }
       // Assign pool lights — 槽位已按 |z| 升序排好（closest to judge plane first）。
-      for (let i = 0; i < cap; i++) {
+      for (let i = 0; i < _lightCap; i++) {
         const pl = pool[i];
-        if (i < cnt) {
+        if (i < _lightCnt) {
           const cz = _lightZ[i];
           const cc = _lightC[i];
           pl.position.set(_lightX[i], _lightY[i], cz);
           if (cc) pl.color.copy(cc);
-          // Brighter when closer to judge plane.
           pl.intensity = Math.max(0, 4.5 - Math.abs(cz) * 0.18);
         } else {
           pl.position.set(0, 0, -1000);
@@ -3433,12 +3466,10 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       const vel = particleVelRef.current;
       const posAttr = field.geometry.getAttribute('position') as THREE.BufferAttribute;
       const posArr = posAttr.array as Float32Array;
-      // Compute instantaneous chart speed at current time
-      let chartSpeed = 1;
-      for (const p of speedPointsRef.current) {
-        if (p.timeSec <= curTime) chartSpeed = p.speed;
-        else break;
-      }
+      // Compute instantaneous chart speed at current time.
+      // 原为每帧线性扫描 speedPoints（SV 谱面可达数百点）；改用 speedAt 的二分（等价语义）。
+      const rtNow = runtimeRef.current;
+      const chartSpeed = rtNow ? speedAt(rtNow, curTime) : 1;
       const zAdvance = audioDt * 36 * globalSpeed * chartSpeed; // exact match to note z-flow
       const wrapFar = -(renderDistRef.current); // recycle to far end
       const tunnelLen = 5 - wrapFar; // total wrappable span

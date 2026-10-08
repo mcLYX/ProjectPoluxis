@@ -487,7 +487,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       ctx.moveTo(fl, judgeY);
       ctx.lineTo(fl + fw, judgeY);
       ctx.stroke();
-      // glow
       ctx.fillStyle = 'rgba(0,240,255,0.10)';
       ctx.fillRect(fl, judgeY - 8, fw, 16);
 
@@ -522,7 +521,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
           ctx.fillRect(-NOTE_R * 0.85, -NOTE_R * 0.85, NOTE_R * 1.7, NOTE_R * 1.7);
           ctx.strokeRect(-NOTE_R * 0.85, -NOTE_R * 0.85, NOTE_R * 1.7, NOTE_R * 1.7);
         } else {
-          // tap = square
           ctx.fillRect(-NOTE_R, -NOTE_R, NOTE_R * 2, NOTE_R * 2);
           ctx.strokeRect(-NOTE_R, -NOTE_R, NOTE_R * 2, NOTE_R * 2);
         }
@@ -805,7 +803,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         ctx.restore();
       }
 
-      // close field clip
       ctx.restore();
       ctx.restore();
       raf = requestAnimationFrame(draw);

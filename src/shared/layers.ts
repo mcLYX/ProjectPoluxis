@@ -128,21 +128,20 @@ function isNum(v: any): boolean {
   return typeof v === 'number' && isFinite(v);
 }
 
-/** 求某一段在时刻 t 的插值结果。t 超出段范围时按端点钳取。 */
-function stepValueAt(
+/** 求某一段在时刻 t 的插值结果，**写入 out**（零分配）。t 超出段范围时按端点钳取。 */
+function stepValueAtInto(
   tree: LayerTree,
   step: OffsetStep,
-  t: number
-): { x: number; y: number } {
-  if (step.duration <= 0) return { x: step.toX, y: step.toY };
+  t: number,
+  out: { x: number; y: number }
+): void {
+  if (step.duration <= 0) { out.x = step.toX; out.y = step.toY; return; }
   var p = (t - step.timeSec) / step.duration;
   if (p < 0) p = 0;
   if (p > 1) p = 1;
   var e = tree.ease(step.easing, p);
-  return {
-    x: step.fromX + (step.toX - step.fromX) * e,
-    y: step.fromY + (step.toY - step.fromY) * e,
-  };
+  out.x = step.fromX + (step.toX - step.fromX) * e;
+  out.y = step.fromY + (step.toY - step.fromY) * e;
 }
 
 /**
@@ -177,9 +176,9 @@ function buildSteps(
     var fromX = baseX;
     var fromY = baseY;
     if (prev) {
-      var v = stepValueAt(tree, prev, list[s].t);
-      fromX = v.x;
-      fromY = v.y;
+      stepValueAtInto(tree, prev, list[s].t, _layerOwnScratch);
+      fromX = _layerOwnScratch.x;
+      fromY = _layerOwnScratch.y;
     }
     // 只给出一个轴时，另一轴保持当前值不变。
     var toX = isNum(list[s].ev.offsetX) ? list[s].ev.offsetX : fromX;
@@ -386,11 +385,11 @@ export function noteLayerIdx(tree: LayerTree, note: any): number {
   return typeof idx === 'number' ? idx : 0;
 }
 
-/** 单个图层**自身**在时刻 t 的偏移（不含祖先）。 */
-export function ownOffsetAt(tree: LayerTree, idx: number, t: number): { x: number; y: number } {
+/** 单个图层**自身**在时刻 t 的偏移（不含祖先），**写入 out**（零分配）。 */
+export function ownOffsetAtInto(tree: LayerTree, idx: number, t: number, out: { x: number; y: number }): void {
   var node = tree.nodes[idx];
   var steps = node.steps;
-  if (!steps || steps.length === 0) return { x: node.staticOffsetX, y: node.staticOffsetY };
+  if (!steps || steps.length === 0) { out.x = node.staticOffsetX; out.y = node.staticOffsetY; return; }
   // 最后一个 timeSec <= t 的段。
   var lo = 0;
   var hi = steps.length;
@@ -399,21 +398,43 @@ export function ownOffsetAt(tree: LayerTree, idx: number, t: number): { x: numbe
     if (steps[mid].timeSec <= t) lo = mid + 1;
     else hi = mid;
   }
-  if (lo === 0) return { x: node.staticOffsetX, y: node.staticOffsetY };
-  return stepValueAt(tree, steps[lo - 1], t);
+  if (lo === 0) { out.x = node.staticOffsetX; out.y = node.staticOffsetY; return; }
+  stepValueAtInto(tree, steps[lo - 1], t, out);
 }
 
-/** 图层**合成后**（自身 + Σ 所有祖先）在时刻 t 的偏移。 */
-export function layerOffsetAt(tree: LayerTree, idx: number, t: number): { x: number; y: number } {
+/** 单个图层**自身**在时刻 t 的偏移（不含祖先）。 */
+export function ownOffsetAt(tree: LayerTree, idx: number, t: number): { x: number; y: number } {
+  var o = { x: 0, y: 0 };
+  ownOffsetAtInto(tree, idx, t, o);
+  return o;
+}
+
+/**
+ * 合成偏移链上的复用 scratch。
+ * `layerOffsetAtInto` 是同步、不可重入的（一次调用内只用于累积链上各段），故可共享。
+ * ES5 风格：本文件被 scripts/build-lite.mjs 原样内联进 Lite 的单一 IIFE。
+ */
+var _layerOwnScratch = { x: 0, y: 0 };
+
+/** 图层**合成后**（自身 + Σ 所有祖先）在时刻 t 的偏移，**写入 out**（零分配）。 */
+export function layerOffsetAtInto(tree: LayerTree, idx: number, t: number, out: { x: number; y: number }): void {
   var chain = tree.nodes[idx].chain;
   var x = 0;
   var y = 0;
   for (var i = 0; i < chain.length; i++) {
-    var o = ownOffsetAt(tree, chain[i], t);
-    x += o.x;
-    y += o.y;
+    ownOffsetAtInto(tree, chain[i], t, _layerOwnScratch);
+    x += _layerOwnScratch.x;
+    y += _layerOwnScratch.y;
   }
-  return { x: x, y: y };
+  out.x = x;
+  out.y = y;
+}
+
+/** 图层**合成后**（自身 + Σ 所有祖先）在时刻 t 的偏移。 */
+export function layerOffsetAt(tree: LayerTree, idx: number, t: number): { x: number; y: number } {
+  var o = { x: 0, y: 0 };
+  layerOffsetAtInto(tree, idx, t, o);
+  return o;
 }
 
 /**

@@ -196,38 +196,6 @@ export async function deleteSong(albumId: string, songId: string): Promise<void>
   );
 }
 
-export async function addDifficulty(
-  albumId: string,
-  songId: string,
-  diff: DifficultyEntry,
-): Promise<void> {
-  await mutateLibrary((al) =>
-    mapAlbumTree(al, albumId, (a) => ({
-      ...a,
-      songs: a.songs.map((s) =>
-        s.type === 'song' && s.id === songId ? { ...s, difficulties: [...s.difficulties, diff] } : s,
-      ),
-    })) as AlbumItem[],
-  );
-}
-
-export async function updateDifficulty(
-  albumId: string,
-  songId: string,
-  index: number,
-  patch: Partial<DifficultyEntry>,
-): Promise<void> {
-  await mutateLibrary((al) =>
-    mapAlbumTree(al, albumId, (a) => ({
-      ...a,
-      songs: a.songs.map((s) =>
-        s.type === 'song' && s.id === songId
-          ? { ...s, difficulties: s.difficulties.map((d, i) => (i === index ? { ...d, ...patch } : d)) }
-          : s,
-      ),
-    })) as AlbumItem[],
-  );
-}
 
 export async function deleteDifficulty(albumId: string, songId: string, index: number): Promise<void> {
   const albums = await getLibrary();

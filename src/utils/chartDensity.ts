@@ -84,14 +84,4 @@ export function buildChartDensity(
 
 /** 全谱三类音符计数（图例占比用；O(n)，仅在谱面变化时调用）。
  *  头节点 + 各自全部子节点（tap / touch / slide 链一致）。 */
-export function countNoteTypes(chart: ChartData): Record<NoteType, number> {
-  const counts: Record<NoteType, number> = { tap: 0, touch: 0, slide: 0 };
-  const notes = chart.notes ?? [];
-  for (let i = 0; i < notes.length; i++) {
-    const note = notes[i];
-    const type: NoteType =
-      note.type === 'touch' ? 'touch' : note.type === 'slide' ? 'slide' : 'tap';
-    counts[type] += 1 + (note.nodes?.length ?? 0);
-  }
-  return counts;
-}
+

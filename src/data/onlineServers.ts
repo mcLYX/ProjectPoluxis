@@ -106,10 +106,6 @@ export function getServers(): OnlineServer[] {
   return [makeCurrentServer(), ...readUserServers()];
 }
 
-export function getServer(id: string): OnlineServer | null {
-  return getServers().find((s) => s.id === id) ?? null;
-}
-
 export function addServer(label: string, baseUrl: string): OnlineServer {
   const cleanUrl = normalizeBaseUrl(baseUrl);
   let host = cleanUrl;

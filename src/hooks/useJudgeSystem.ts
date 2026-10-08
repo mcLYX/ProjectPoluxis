@@ -13,6 +13,22 @@ import {
   type SlideJudgeState,
 } from '../systems/slideJudge';
 
+/* ---------------------------------------------------------------------------
+ * slide 判定入参的复用缓冲。
+ * 调用点是「每个活跃 slide 每帧」，原实现每次新建 pointers 数组 + 每指一个对象。
+ * processSlideCore 同步消费、从不保留入参，且各 slide 顺序处理——故可安全复用
+ * （模块级单例；同一时刻只有一个游戏实例在跑）。
+ * ------------------------------------------------------------------------- */
+const _slidePtrs: SlideJudgePointer<number>[] = [];
+const _slidePtrPool: SlideJudgePointer<number>[] = [];
+function pushSlidePtr(id: number, x: number, y: number, down: boolean): void {
+  const i = _slidePtrs.length;
+  let o = _slidePtrPool[i];
+  if (o) { o.id = id; o.x = x; o.y = y; o.down = down; }
+  else { o = { id, x, y, down }; _slidePtrPool[i] = o; }
+  _slidePtrs.push(o);
+}
+
 /** spawnBurst 的函数签名（与 useNoteEffects 返回值一致）。 */
 export type SpawnBurstFn = (
   x: number,
@@ -137,22 +153,22 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
     const allNodes = ctx.getAllNodes(note);
     const rt = getSlideRt(note.id, allNodes.length);
 
-    const pointers: SlideJudgePointer<number>[] = [];
     /* 故事板判定拦截（§3.7 v3）：被拦截的指针不参与 slide 判定 —— 既不能绑新节点，
        也不会被判为命中。与 tap 入口（useEditorGestures）读同一个判定源，
        三处（tap / slide 指针表 / 绑定脱手）因此不会出现行为分叉。
        未注入 isPointerBlocked = 不拦截（旧行为逐字不变）。 */
+    _slidePtrs.length = 0;
     const blocked = ctx.isPointerBlocked;
     for (const [pid, p] of ctx.pointersRef.current) {
       if (blocked && blocked(pid)) continue;
-      pointers.push({ id: pid, x: p.x, y: p.y, down: p.down });
+      pushSlidePtr(pid, p.x, p.y, p.down);
     }
 
     processSlideCore<number>({
       nodes: allNodes,
       rt: rt as unknown as SlideJudgeState<number>,
       bound: setBinding(rt.boundPointerIds),
-      pointers,
+      pointers: _slidePtrs,
       curTime,
       autoPlay: ctx.autoPlayRef.current,
       playStartTime: ctx.playStartTimeRef.current,

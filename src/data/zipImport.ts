@@ -341,19 +341,6 @@ export interface ChartMetaLite {
 }
 
 /** Parse a chart file (already a File/Blob) to extract difficulty name/level. */
-export async function readChartMeta(file: File): Promise<ChartMetaLite | null> {
-  try {
-    const text = await file.text();
-    const obj = JSON.parse(text);
-    const meta = obj.metadata || {};
-    const notes = Array.isArray(obj.notes) ? obj.notes.length : obj.noteCount ?? 0;
-    const d = resolveDifficulty(meta.difficulty);
-    return { difficulty: d.name, level: d.level, noteCount: notes };
-  } catch {
-    return null;
-  }
-}
-
 /**
  * 约定缺省（扁平条目形态）：除 info.json / 谱面外的直属 .json。
  * zip 内manifest 分支拿不到 GroupedSong（无 folder 前缀概念），故按列表处理。

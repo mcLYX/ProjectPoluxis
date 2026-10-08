@@ -35,19 +35,37 @@
   }
   window.addEventListener('resize', resize);
 
-  /* Project world (nx,ny,nz) → screen {x,y,scale,alpha} or null if culled.
+  /* 复用 P2 缓冲（projectInto 的写入口，消除每帧数百个临时投影对象）。
+   * 与完整版 GameCanvas2D 的 _p2a/_p2b 同构；本渲染器内部即用即弃，顺序消费 —— 复用安全。 */
+  function _mkP2() { return { x: 0, y: 0, scale: 0, alpha: 0 }; }
+  var _p2a = _mkP2();
+  var _p2b = _mkP2();
+  var _planePts = [_mkP2(), _mkP2(), _mkP2(), _mkP2()];
+  /* 隧道四角世界坐标（常量，避免每帧重建嵌套数组）。 */
+  var _tunnelCorners = [
+    [-PLANE_HALF_X, -PLANE_HALF_Y], [ PLANE_HALF_X, -PLANE_HALF_Y],
+    [ PLANE_HALF_X,  PLANE_HALF_Y], [-PLANE_HALF_X,  PLANE_HALF_Y]
+  ];
+
+  /* Project world (nx,ny,nz) → 写入 out；被剔除（近/远裁剪）时返回 false。
    * Mirrors the full version's PerspectiveCamera math exactly. */
-  function project(nx, ny, nz, spawnLimit) {
-    if (nz < spawnLimit) return null;
+  function projectInto(out, nx, ny, nz, spawnLimit) {
+    if (nz < spawnLimit) return false;
     var depth = view.cd - nz;
-    if (depth <= 0.1) return null; /* at/behind camera */
+    if (depth <= 0.1) return false; /* at/behind camera */
     var ndcX = nx / (TAN_HALF_FOV * view.aspect * depth);
     var ndcY = (ny - CAMERA_AXIS_Y) / (TAN_HALF_FOV * depth);
-    var sx = view.w * 0.5 * (1 + ndcX);
-    var sy = view.h * 0.5 * (1 - ndcY);
-    var scale = view.cd / depth;
-    var alpha = Math.max(0, Math.min(1, (nz - spawnLimit) / FADE_ZONE));
-    return { x: sx, y: sy, scale: scale, alpha: alpha };
+    out.x = view.w * 0.5 * (1 + ndcX);
+    out.y = view.h * 0.5 * (1 - ndcY);
+    out.scale = view.cd / depth;
+    out.alpha = Math.max(0, Math.min(1, (nz - spawnLimit) / FADE_ZONE));
+    return true;
+  }
+
+  /* 兼容包装：仅剩少量「需要返回对象」的非每帧调用点使用（热路径一律走 projectInto）。 */
+  function project(nx, ny, nz, spawnLimit) {
+    var o = { x: 0, y: 0, scale: 0, alpha: 0 };
+    return projectInto(o, nx, ny, nz, spawnLimit) ? o : null;
   }
 
   /* Draw a tap note (square outline + 0.94 filled plane). Mirrors mkTap. */
@@ -87,7 +105,7 @@
     ctx.stroke();
     ctx.restore();
   }
-  /* Draw a slide node (45° diamond). Mirrors mkSlide diamondPts. */
+  /* Draw a slide node (45° diamond)：与完整版 slide 菱形节点同形。 */
   function drawSlideNode(p, color, vScale, isHead, angle) {
     var half = SLIDE_HALF * view.pxPerUnit * p.scale * vScale;
     if (half < 1) return;
@@ -109,75 +127,6 @@
      * nodes need a thin outline to read as connected (3D is a solid mesh and
      * needs none). */
     ctx.lineWidth = isHead ? 2 : 1;
-    ctx.stroke();
-    ctx.restore();
-  }
-  /* Draw a slide pipe segment between two projected points as a tapered ribbon.
-   * Width at each end follows perspective scale → narrower where farther, wider
-   * where nearer — this creates a 3D "pipe in perspective" look that a flat
-   * constant-width line cannot. Edges are outlined for definition.
-   * `brightness` scales fill/stroke opacity: 1.0=normal, ~2.3=held (brighter).
-   * Mirrors the full version's placeDiamondPipe diamond cross-section + holding
-   * opacity boost (GameCanvas.tsx L1226-1230).
-   *
-   * PER-END ALPHA (fixes "pipe vanishes when next node is off-screen"):
-   *   alphaA/alphaB are independent. When the next node is beyond the far render
-   *   plane it is clamped to spawnLimit → alphaB becomes 0. Using a single min()
-   *   alpha made the whole pipe invisible in that case. Instead we build a
-   *   linear gradient from pA→pB so the pipe stays visible at the in-view end
-   *   and fades smoothly toward the clamped (far-plane) end — matching how the
-   *   full version's per-vertex alpha behaves on the 3D mesh. */
-  function drawPipe(pA, pB, color, alphaA, alphaB, maxScale, brightness, vScale) {
-    if (!pA || !pB) return;
-    brightness = brightness || 1.0;
-    var dx = pB.x - pA.x, dy = pB.y - pA.y;
-    var len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 0.5) return;
-    /* Perpendicular unit vector (screen space) */
-    var nx = -dy / len, ny = dx / len;
-    /* Half-width at each end, perspective-scaled (narrower when farther). */
-    var hwA = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pA.scale * vScale);
-    var hwB = Math.max(1.5, SLIDE_PIPE_HALF * view.pxPerUnit * pB.scale * vScale);
-    /* Parse #rrggbb → rgb components for gradient color stops. All slide pipe
-     * colors in this build are 7-char hex (SLIDE_RED + chart noteColor). */
-    var cr = parseInt(color.substr(1, 2), 16);
-    var cg = parseInt(color.substr(3, 2), 16);
-    var cb = parseInt(color.substr(5, 2), 16);
-    /* Opacity bands (per user spec "整体透明程度调低一些/更不透明"):
-     *   fill 0.22 → 0.45 (ribbon body), stroke 0.55 → 0.6 (edge definition).
-     *   brightness still scales these (held ≈2.3× → capped at 1.0 by Math.min). */
-    var fillA = Math.min(1, alphaA * 0.45 * brightness);
-    var fillB = Math.min(1, alphaB * 0.45 * brightness);
-    var strA = Math.min(1, alphaA * 0.6 * brightness);
-    var strB = Math.min(1, alphaB * 0.6 * brightness);
-    ctx.save();
-    /* Filled ribbon (semi-transparent, gives body) — gradient fill so the
-     * ribbon fades independently at each end. */
-    var fillGrad = ctx.createLinearGradient(pA.x, pA.y, pB.x, pB.y);
-    fillGrad.addColorStop(0, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + fillA + ')');
-    fillGrad.addColorStop(1, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + fillB + ')');
-    ctx.fillStyle = fillGrad;
-    ctx.beginPath();
-    ctx.moveTo(pA.x + nx * hwA, pA.y + ny * hwA);
-    ctx.lineTo(pB.x + nx * hwB, pB.y + ny * hwB);
-    ctx.lineTo(pB.x - nx * hwB, pB.y - ny * hwB);
-    ctx.lineTo(pA.x - nx * hwA, pA.y - ny * hwA);
-    ctx.closePath();
-    ctx.fill();
-    /* Edge outlines (define the pipe shape, brighter) — separate gradient so
-     * the stroke can use a higher opacity band than the fill. */
-    var strGrad = ctx.createLinearGradient(pA.x, pA.y, pB.x, pB.y);
-    strGrad.addColorStop(0, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + strA + ')');
-    strGrad.addColorStop(1, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + strB + ')');
-    ctx.strokeStyle = strGrad;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(pA.x + nx * hwA, pA.y + ny * hwA);
-    ctx.lineTo(pB.x + nx * hwB, pB.y + ny * hwB);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(pA.x - nx * hwA, pA.y - ny * hwA);
-    ctx.lineTo(pB.x - nx * hwB, pB.y - ny * hwB);
     ctx.stroke();
     ctx.restore();
   }
@@ -278,20 +227,18 @@
   }
   /* Judge plane border (white rectangle at z=0). */
   function drawJudgePlane() {
-    var corners = [
-      project(-PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000),
-      project( PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000),
-      project( PLANE_HALF_X,  PLANE_HALF_Y, 0, -1000),
-      project(-PLANE_HALF_X,  PLANE_HALF_Y, 0, -1000)
-    ];
-    if (!corners[0]) return;
+    var ok = projectInto(_planePts[0], -PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000);
+    projectInto(_planePts[1],  PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000);
+    projectInto(_planePts[2],  PLANE_HALF_X,  PLANE_HALF_Y, 0, -1000);
+    projectInto(_planePts[3], -PLANE_HALF_X,  PLANE_HALF_Y, 0, -1000);
+    if (!ok) return;
     ctx.save();
     ctx.globalAlpha = 0.4;
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(corners[0].x, corners[0].y);
-    for (var i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
+    ctx.moveTo(_planePts[0].x, _planePts[0].y);
+    for (var i = 1; i < 4; i++) ctx.lineTo(_planePts[i].x, _planePts[i].y);
     ctx.closePath();
     ctx.stroke();
     ctx.restore();
@@ -299,21 +246,17 @@
   /* Tunnel: 4 perspective lines from far (z=-spawnLimit) converging to plane corners. */
   function drawTunnel(spawnLimit) {
     var farZ = spawnLimit;
-    var corners = [
-      [-PLANE_HALF_X, -PLANE_HALF_Y], [ PLANE_HALF_X, -PLANE_HALF_Y],
-      [ PLANE_HALF_X,  PLANE_HALF_Y], [-PLANE_HALF_X,  PLANE_HALF_Y]
-    ];
     ctx.save();
     ctx.globalAlpha = 0.18;
-    ctx.strokeStyle = Theme.accent(); /* mirrors gridColor in GameCanvas L671 */
+    ctx.strokeStyle = Theme.accent(); /* 与完整版隧道线同色（accentColor） */
     ctx.lineWidth = 1;
     for (var i = 0; i < 4; i++) {
-      var near = project(corners[i][0], corners[i][1], 0, -1000);
-      var far = project(corners[i][0], corners[i][1], farZ, -100000);
-      if (!near || !far) continue;
+      var okN = projectInto(_p2a, _tunnelCorners[i][0], _tunnelCorners[i][1], 0, -1000);
+      var okF = projectInto(_p2b, _tunnelCorners[i][0], _tunnelCorners[i][1], farZ, -100000);
+      if (!okN || !okF) continue;
       ctx.beginPath();
-      ctx.moveTo(far.x, far.y);
-      ctx.lineTo(near.x, near.y);
+      ctx.moveTo(_p2b.x, _p2b.y);
+      ctx.lineTo(_p2a.x, _p2a.y);
       ctx.stroke();
     }
     ctx.restore();

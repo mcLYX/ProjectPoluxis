@@ -28,10 +28,6 @@ export function isAvatarRef(v: string | null | undefined): v is string {
 }
 
 /** 是否为可直接用于 <img src> 的远端地址（由平台账号提供）。 */
-export function isRemoteAvatar(v: string | null | undefined): v is string {
-  return typeof v === 'string' && /^https?:\/\//i.test(v);
-}
-
 function loadBitmap(file: File): Promise<ImageBitmap | HTMLImageElement> {
   if (typeof createImageBitmap === 'function') return createImageBitmap(file);
   return new Promise((resolve, reject) => {

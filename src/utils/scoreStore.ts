@@ -146,11 +146,6 @@ export function getAllHighScores(): HighScoreMap {
   return loadFromStorage();
 }
 
-/** 清除所有最高分记录（慎用）。 */
-export function clearAllHighScores() {
-  safeStorage.removeItem(STORAGE_KEY);
-}
-
 /**
  * 把云端最高分合并回本地（跨设备进度同步）。仅取更高分数 / 更好徽章，不降级本地成绩。
  * 用于支持云存储的构建从云端拉回进度后写回本地。cloud 非法时直接忽略。

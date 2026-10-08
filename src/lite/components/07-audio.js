@@ -100,8 +100,7 @@
   /* Load packaged OGG sounds (tap/touch/slide/ui) when available, upgrading the
    * synthesized fallback. Any file that is missing (e.g. ui.ogg not shipped yet)
    * simply keeps its synthesized version — a 404 never breaks the others.
-   * Skipped on IE11 (no fetch/decodeAudioData): synthesized sounds are the
-   * degrade path there, per requirement. */
+   * IE11 上跳过（无 fetch / decodeAudioData）：那里直接用合成音作为降级路径。 */
   LiteAudio.prototype.loadBuiltinSounds = function () {
     if (this.useHtml5 || !this.ctx) return;
     this.preRenderHitSounds(); /* guarantee a fallback is ready immediately */

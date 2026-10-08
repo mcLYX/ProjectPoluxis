@@ -585,18 +585,15 @@
     var rank = calculateRank(g.score);
     var acc = g.judgedCount > 0
       ? ((g.counts['S-Perfect'] + g.counts['Perfect'] + g.counts['Good'] * 0.5) / g.judgedCount) * 100 : 0;
-    /* Song metadata — mirrors ResultModal.tsx L55-60:
-     *   title, artist // difficulty. (BPM badge removed per user spec.) */
+    /* 结算卡元信息：title / artist // difficulty（不显示 BPM）。 */
     var meta = g.chart ? g.chart.metadata : null;
     var metaHtml = '';
     if (meta) {
       metaHtml = '<h2 class="result-title">' + (meta.title || 'Unknown') + '</h2>' +
         '<p class="result-meta">' + (meta.artist || '') + ' // ' + (meta.difficulty || '') + '</p>';
     }
-    /* S-Perfect is merged into Perfect per user spec: display the combined
-     * count, with an orange "(+N)" suffix showing how many were S-Perfect.
-     * Example: 21 S-Perfect + 17 Perfect → "Perfect: 38(+21)".
-     * Mirrors ResultModal.tsx L21-23 (perfectTotal / sPerfectExtra). */
+    /* S-Perfect 并入 Perfect 显示：展示合并后的数量，并用橙色 "(+N)" 后缀标出其中 S-Perfect 的数量。
+     * Example: 21 S-Perfect + 17 Perfect → "Perfect: 38(+21)". */
     var totalPerfect = g.counts['S-Perfect'] + g.counts['Perfect'];
     var sPerfectHtml = g.counts['S-Perfect'] > 0
       ? '<span class="s-perfect-indicator">(+' + g.counts['S-Perfect'] + ')</span>'
@@ -747,8 +744,7 @@
         if (!isAlbum) activeStartBtn = el.querySelector('.card-start');
       }
     }
-    /* 注意：这里不再调用 ensureCardVisible —— 选中卡片后**不**把轮播滚动到完整可见，
-     * 卡片原地展开（用户要求去掉“超出屏幕就瞬移”的行为）。 */
+    /* 选中卡片后不做滚动对齐：卡片原地展开，不把轮播滚到“完整可见”位置。 */
   }
 
   /* `dir` selects the list-transition direction (1 = drilled in, -1 = back). */

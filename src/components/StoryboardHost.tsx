@@ -72,8 +72,6 @@ const SEEK_JUMP_SEC = 0.75;
 export const GAME_STYLE_RESET = { opacity: '1', filter: '', transform: '' } as const;
 
 /** HUD 受控样式的复位值（与画布同一套白名单，故复位值也相同）。 */
-export const HUD_STYLE_RESET = GAME_STYLE_RESET;
-
 /**
  * 把受控样式补丁写进一个元素（game / hud 共用）。
  * 纯函数之外的最小封装：调用方保证元素非空。
@@ -1175,7 +1173,7 @@ function StoryboardHostImpl(
           try {
             inst.dispose?.();
           } catch {
-            /* 忽略 */
+            /* 已取消：实例随即丢弃，dispose 失败无需处理 */
           }
           return;
         }
@@ -1268,7 +1266,7 @@ function StoryboardHostImpl(
             try {
               inst.dispose?.();
             } catch {
-              /* 忽略 */
+              /* dispose 失败也要继续：下面仍要作废 canvas 的 WebGL 上下文，不能中断拆除 */
             }
             for (let i = 0; i < canvases.length; i++) loseWebglContext(canvases[i]);
             instanceRef.current = null;

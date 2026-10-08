@@ -33,11 +33,14 @@
  */
 import type { ChartData, ResolvedNote } from '../types/game';
 import {
+  buildSpeedPrefix,
   extractSpeedPoints,
   getScrollDistance,
+  prefixDistanceAt,
   resolveChart,
   resolveEvents,
   type SpeedPoint,
+  type SpeedPrefix,
 } from './beatTime';
 import {
   buildLayerTree,
@@ -47,21 +50,6 @@ import {
   layerMinRelSpeed,
   noteLayerIdx,
 } from './layers';
-
-/** 变速点前缀表：用于 O(log N) 求任意时刻的滚动距离。 */
-export interface SpeedPrefix {
-  /**
-   * 是否可用二分 + 前缀和。false 时 `scrollDistanceAt` 回退到原
-   * `getScrollDistance`（保证与旧行为逐位一致）。
-   */
-  sorted: boolean;
-  /** timeSec > 0 的变速点时刻（升序）。长度 m。 */
-  times: Float64Array;
-  /** 累计滚动距离，长度 m+1：`cum[k]` = 走完前 k 段的距离。 */
-  cum: Float64Array;
-  /** 分段速度，长度 m+1：`segSpeed[k]` = 第 k 段（times[k-1] → times[k]）所用速度。 */
-  segSpeed: Float64Array;
-}
 
 /**
  * 单个图层的**滚动距离时间轴**。
@@ -128,53 +116,6 @@ export interface ChartRuntime {
 }
 
 /**
- * 依据 speedPoints 建立前缀表。
- *
- * 复刻 `getScrollDistance` 的语义：
- *  - `timeSec <= 0` 的点只设定「起始速度」（取最后一个），不产生距离；
- *  - 其余点按数组顺序推进：区间 [上一点, 本点) 用**进入该点之前**的速度。
- */
-function buildSpeedPrefix(sp: SpeedPoint[]): SpeedPrefix {
-  const times: number[] = [];
-  const pointSpeeds: number[] = [];
-  let speed0 = 1;
-  let sorted = true;
-  let seenPositive = false;
-  let prevT = -Infinity;
-
-  for (let i = 0; i < sp.length; i++) {
-    const p = sp[i];
-    if (p.timeSec <= 0) {
-      // 原始实现里这类点只改速度；若出现在正时间点之后，前缀模型不再等价 → 回退。
-      if (seenPositive) sorted = false;
-      speed0 = p.speed;
-      continue;
-    }
-    if (!Number.isFinite(p.timeSec)) {
-      sorted = false;
-      continue;
-    }
-    if (p.timeSec < prevT) sorted = false;
-    prevT = p.timeSec;
-    seenPositive = true;
-    times.push(p.timeSec);
-    pointSpeeds.push(p.speed);
-  }
-
-  const m = times.length;
-  const cum = new Float64Array(m + 1);
-  const segSpeed = new Float64Array(m + 1);
-  segSpeed[0] = speed0;
-  for (let k = 0; k < m; k++) {
-    segSpeed[k + 1] = pointSpeeds[k];
-    const baseT = k > 0 ? times[k - 1] : 0;
-    cum[k + 1] = cum[k] + (times[k] - baseT) * segSpeed[k];
-  }
-
-  return { sorted, times: Float64Array.from(times), cum, segSpeed };
-}
-
-/**
  * 求时刻 `timeSec` 的累计滚动距离。
  *
  * 与 `getScrollDistance(timeSec, rt.speedPoints)` 等价；排序谱面下走二分 + O(1)
@@ -184,25 +125,33 @@ export function scrollDistanceAt(rt: ChartRuntime, timeSec: number): number {
   return prefixDistanceAt(rt.prefix, timeSec, rt.speedPoints);
 }
 
-/** 在指定前缀表上求累计滚动距离；前缀不可用时回退原函数（逐位一致）。 */
-export function prefixDistanceAt(
-  prefix: SpeedPrefix,
-  timeSec: number,
-  fallbackPoints: SpeedPoint[]
-): number {
-  if (!prefix.sorted) return getScrollDistance(timeSec, fallbackPoints);
-  const times = prefix.times;
-  const m = times.length;
-  // lower_bound：第一个 >= timeSec 的下标（严格小于才计入，与原函数的 `>=` break 一致）。
-  let lo = 0;
-  let hi = m;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (times[mid] < timeSec) lo = mid + 1;
-    else hi = mid;
+/**
+ * 时刻 `timeSec` 的**瞬时**变速倍率 = 最后一个 `timeSec <= t` 的变速点的 `speed`（无则 1）。
+ *
+ * 与调用方原先每帧的线性扫描完全等价：
+ *   `for (const p of speedPoints) { if (p.timeSec <= t) s = p.speed; else break; }`
+ * 升序谱面且 `t >= 0` 时走二分 O(log N)（变速点常达数百，SV 谱面收益显著）；
+ * 退化情况（非升序 / 负 t）回退线性扫描，保证与旧行为逐位一致。
+ */
+export function speedAt(rt: ChartRuntime, timeSec: number): number {
+  const sp = rt.speedPoints;
+  if (rt.prefix.sorted && timeSec >= 0) {
+    // 首个 timeSec > t 的下标（严格小于等于才计入，与原扫描的 `else break` 一致）。
+    let lo = 0;
+    let hi = sp.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sp[mid].timeSec <= timeSec) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo === 0 ? 1 : sp[lo - 1].speed;
   }
-  const baseT = lo > 0 ? times[lo - 1] : 0;
-  return prefix.cum[lo] + (timeSec - baseT) * prefix.segSpeed[lo];
+  let s = 1;
+  for (let i = 0; i < sp.length; i++) {
+    if (sp[i].timeSec <= timeSec) s = sp[i].speed;
+    else break;
+  }
+  return s;
 }
 
 /** 构建谱面运行时数据（一次性，成本随谱面规模线性增长）。 */

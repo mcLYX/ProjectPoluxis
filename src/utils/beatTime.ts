@@ -23,12 +23,15 @@ export {
   getBpmAtBeat,
   SPEED_RAMP_STEPS,
   getScrollDistance,
+  buildSpeedPrefix,
+  prefixDistanceAt,
   resolveEvents,
   getMaxBeat,
   getFirstNoteTime,
   getChartDuration,
   countPlayableNotes,
   type SpeedPoint,
+  type SpeedPrefix,
 } from '../shared/beatTime';
 
 /**

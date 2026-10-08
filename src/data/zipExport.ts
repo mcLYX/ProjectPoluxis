@@ -227,11 +227,6 @@ export async function buildSongZip(spec: SongZipSpec): Promise<BuiltZip> {
 }
 
 /** 歌曲字段 → 导出描述；`chartOverride` 用于编辑器里导出"当前未保存的谱面"。 */
-export interface SongZipSource extends SongItem {
-  /** 覆盖某个难度的谱面内容（编辑器场景：导出未保存的改动）。 */
-  chartOverride?: Record<number, string>;
-}
-
 /** 读取引用（idb://… 或 http(s) URL）对应的 Blob；非本地引用或失败返回 null。 */
 async function blobOfRef(ref: string | undefined): Promise<Blob | null> {
   if (!ref) return null;

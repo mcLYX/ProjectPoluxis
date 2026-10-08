@@ -45,7 +45,6 @@ export interface ShatterEntry {
   velocities: Float32Array;
   startMs: number;
   duration: number;
-  color: THREE.Color;
 }
 
 /**

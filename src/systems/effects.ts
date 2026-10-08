@@ -57,18 +57,27 @@ export interface ShatterResult {
   duration: number;
 }
 
+/** 碎裂粒子数量（固定）。调用方可据此预分配复用缓冲（见 deriveShatterParticles 的 outPos/outVel）。 */
+export const SHATTER_PARTICLE_COUNT = 90;
+
 /**
  * 由音符形状 + 角度 + 速度推导碎裂粒子的初始位置/速度分布。
  * 严格等价原 spawnBurst 中 `if (allowHitEffects && j !== 'Miss')` 内的粒子生成逻辑：
  * - 初始位置采样自音符自身形状（tap 方形 / touch 圆形 / slide 菱形），再按角度旋转。
  * - 速度 = 从中心缓慢外漂 + 基础 z 速度（≈9 + noteSpeed*0.1，含 6% 随机散布）。
  */
-export function deriveShatterParticles(params: ShatterParams): ShatterResult {
+export function deriveShatterParticles(
+  params: ShatterParams,
+  outPos?: Float32Array,
+  outVel?: Float32Array,
+): ShatterResult {
   const { nt, angle, x, y, z, visualScale, speed, noteColorHex } = params;
   const rng = params.rng ?? Math.random;
-  const PCOUNT = 90;
-  const pos = new Float32Array(PCOUNT * 3);
-  const vel = new Float32Array(PCOUNT * 3);
+  const PCOUNT = SHATTER_PARTICLE_COUNT;
+  // 允许调用方传入**复用缓冲**（零分配）；长度不足时回退新分配。所有元素都会被重写。
+  const need = PCOUNT * 3;
+  const pos = outPos && outPos.length >= need ? outPos : new Float32Array(need);
+  const vel = outVel && outVel.length >= need ? outVel : new Float32Array(need);
   const vScale = visualScale;
   const baseHalf = (nt === 'touch' ? TOUCH_SIZE / 2 : TAP_SIZE / 2) * vScale;
   const slideHalf = SLIDE_HALF * vScale;

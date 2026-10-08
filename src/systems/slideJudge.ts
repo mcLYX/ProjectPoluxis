@@ -35,6 +35,12 @@ export interface SlideBinding<TId> {
   size(): number;
   /** 当前绑定 id 的快照（迭代期间可安全增删）。 */
   ids(): TId[];
+  /**
+   * 无分配枚举入口：把当前绑定 id 写入 `out`（实现须先清空 `out`）。
+   * 可选——核心在缺失时退回 `ids()`（会分配一个快照数组）。用于消除
+   * 「每个活跃 slide 每帧」的快照分配。
+   */
+  idsInto?(out: TId[]): void;
 }
 
 /**
@@ -92,6 +98,42 @@ export function createSlideJudgeNodes<TId>(nodeCount: number): SlideJudgeNodeRt<
   }));
 }
 
+/* ---------------------------------------------------------------------------
+ * 每帧复用的 scratch。
+ * processSlideCore 是**同步、不可重入**的：一次调用会在返回前用完这些数组，
+ * 且从不把它们交给调用方保留（调用方也按顺序逐条处理 slide）——因此可安全共享，
+ * 用来消除「每个活跃 slide 每帧」的临时数组 / Map / 闭包分配（密集 slide 的主要 GC 源）。
+ * ------------------------------------------------------------------------- */
+const _allDown: unknown[] = [];
+const _onNode: unknown[] = [];
+const _boundOffNode: unknown[] = [];
+const _boundIds: unknown[] = [];
+/** 空 id 列表（避免 `[]` 字面量每次分配）。 */
+const _EMPTY_IDS: readonly never[] = [];
+
+/** 指针 id 是否处于按下态（线性扫描——指针数量极少，省去每帧新建 Map）。 */
+function pointerDown<TId>(pointers: readonly SlideJudgePointer<TId>[], id: TId): boolean {
+  for (let i = 0; i < pointers.length; i++) {
+    if (pointers[i].id === id) return pointers[i].down;
+  }
+  return false;
+}
+
+/** 提交某节点的判定（取代原先内联的 `judge` 闭包，避免每帧新建闭包）。 */
+function applyJudge<TId>(
+  bound: SlideBinding<TId>,
+  ns: SlideJudgeNodeRt<TId>,
+  idx: number,
+  j: JudgementType,
+  dt: number,
+  bindPids: readonly TId[],
+  commit: (idx: number, judgement: JudgementType, dtMs: number) => void,
+): void {
+  ns.judged = true;
+  for (let i = 0; i < bindPids.length; i++) bound.add(bindPids[i]);
+  commit(idx, j, dt);
+}
+
 /**
  * 逐帧推进一条 slide 的判定。语义（与抽出前逐字等价）：
  * - 节点像 Touch 但需要「按住」；
@@ -141,7 +183,8 @@ export function processSlideCore<TId>(input: SlideJudgeInput<TId>): void {
     if (headNs.judged && headSpecialActive) {
       const hx = allNodes[0].x;
       const hy = allNodes[0].y;
-      for (const p of pointers) {
+      for (let pi = 0; pi < pointers.length; pi++) {
+        const p = pointers[pi];
         if (!p.down) continue;
         if (isWithinBox(p.x, p.y, hx, hy, SLIDE_HIT_HALF)) bound.add(p.id);
       }
@@ -149,7 +192,11 @@ export function processSlideCore<TId>(input: SlideJudgeInput<TId>): void {
   }
 
   /* --- 活跃节点：逐帧扫描 + 判定 --- */
-  const nextIdx = rt.nodes.findIndex((n) => !n.judged);
+  // 找下一个未判定节点：原为 rt.nodes.findIndex(闭包)（每帧每 slide 新建闭包），改为就地循环。
+  let nextIdx = -1;
+  for (let i = 0; i < rt.nodes.length; i++) {
+    if (!rt.nodes[i].judged) { nextIdx = i; break; }
+  }
   if (nextIdx < 0) return;
   const ns = rt.nodes[nextIdx];
   const nd = allNodes[nextIdx];
@@ -167,26 +214,24 @@ export function processSlideCore<TId>(input: SlideJudgeInput<TId>): void {
 
   if (ns.missLocked) return;
 
-  const byId = new Map<TId, SlideJudgePointer<TId>>();
-  for (const p of pointers) byId.set(p.id, p);
-  const isDown = (id: TId): boolean => {
-    const p = byId.get(id);
-    return !!p && p.down;
-  };
-
   // 单遍扫描：维护绑定并对每根手指分类。
   //   hadBinding : 帧首链上已有绑定（门控「松手→红锁」规则）
   //   anyDown    : 是否有手指按住（尾节点自由绑定用）
   //   allDown    : 所有按住的手指 id（尾节点自由绑定用）
   //   onNode     : 落在当前节点判定盒内的手指
   //                （已有绑定 → 仅已绑手指；无绑定 → 任意手指）
+  // 这三个数组改用模块级 scratch（见文件顶部），消除每帧每 slide 的数组分配。
+  const allDown = _allDown as TId[];
+  const onNode = _onNode as TId[];
+  const boundOffNode = _boundOffNode as TId[];
+  allDown.length = 0;
+  onNode.length = 0;
+  boundOffNode.length = 0;
   const hadBinding = bound.size() > 0;
   let anyDown = false;
-  const allDown: TId[] = [];
-  const onNode: TId[] = [];
   let boundOnNode = 0;
-  const boundOffNode: TId[] = [];
-  for (const p of pointers) {
+  for (let pi = 0; pi < pointers.length; pi++) {
+    const p = pointers[pi];
     if (bound.has(p.id) && !p.down) { bound.delete(p.id); continue; }
     if (!p.down) continue;
     anyDown = true;
@@ -198,11 +243,17 @@ export function processSlideCore<TId>(input: SlideJudgeInput<TId>): void {
   }
   // 移除已抬起的手指：部分运行时会把抬起的手指从指针集合中整个删掉，
   // 上面的扫描看不到它们，这里补删以便检测到「全部松手」（→ 红锁 / Miss）。
-  for (const pid of bound.ids()) {
-    if (!isDown(pid)) bound.delete(pid);
+  // 优先用无分配的 idsInto；适配器未实现时退回 ids()。
+  const boundIds = _boundIds as TId[];
+  boundIds.length = 0;
+  if (bound.idsInto) bound.idsInto(boundIds);
+  else { const tmp = bound.ids(); for (let i = 0; i < tmp.length; i++) boundIds.push(tmp[i]); }
+  for (let i = 0; i < boundIds.length; i++) {
+    const pid = boundIds[i];
+    if (!pointerDown(pointers, pid)) bound.delete(pid);
   }
   // 仅在「另有已绑手指已在当前节点上」时才剪枝离开节点的手指。
-  if (boundOnNode > 0) for (const pid of boundOffNode) bound.delete(pid);
+  if (boundOnNode > 0) for (let i = 0; i < boundOffNode.length; i++) bound.delete(boundOffNode[i]);
   const allReleased = bound.size() === 0;
 
   // 尾节点放宽：窗口内有绑定手指按住、或（自由链）任意手指按住即锁 S-Perfect。
@@ -238,14 +289,13 @@ export function processSlideCore<TId>(input: SlideJudgeInput<TId>): void {
   //   - 子节点：仅已绑手指（onNode 已体现）。
   if (!ns.judged && !ns.earlySPLocked && dt < 0 && dt >= -HIT_WINDOW_MS && onNode.length > 0) {
     ns.earlySPLocked = true;
-    if (isHead) for (const pid of onNode) if (!ns.earlyTouchIds.includes(pid)) ns.earlyTouchIds.push(pid);
+    if (isHead) {
+      for (let i = 0; i < onNode.length; i++) {
+        const pid = onNode[i];
+        if (!ns.earlyTouchIds.includes(pid)) ns.earlyTouchIds.push(pid);
+      }
+    }
   }
-
-  const judge = (j: JudgementType, bindPids: TId[]): void => {
-    ns.judged = true;
-    for (const pid of bindPids) bound.add(pid);
-    commit(nextIdx, j, dt);
-  };
 
   if (dt >= 0 && !ns.judged) {
     let sPerfect = false;
@@ -257,48 +307,74 @@ export function processSlideCore<TId>(input: SlideJudgeInput<TId>): void {
         // 两种分支都保留 misslock（绑定到某指后该指抬起 → 强制 miss）。
         if (onNode.length > 0) {
           sPerfect = true;
-          judge('S-Perfect', onNode.slice());
+          applyJudge(bound, ns, nextIdx, 'S-Perfect', dt, onNode, commit);
         } else {
-          const earlyAnyDown = ns.earlyTouchIds.some(isDown);
-          if (earlyAnyDown) { sPerfect = true; judge('S-Perfect', ns.earlyTouchIds.slice()); }
+          let earlyAnyDown = false;
+          for (let i = 0; i < ns.earlyTouchIds.length; i++) {
+            if (pointerDown(pointers, ns.earlyTouchIds[i])) { earlyAnyDown = true; break; }
+          }
+          if (earlyAnyDown) { sPerfect = true; applyJudge(bound, ns, nextIdx, 'S-Perfect', dt, ns.earlyTouchIds, commit); }
           else { ns.earlySPLocked = false; ns.earlyTouchIds = []; }
         }
       } else {
-        sPerfect = true; judge('S-Perfect', []);
+        sPerfect = true; applyJudge(bound, ns, nextIdx, 'S-Perfect', dt, _EMPTY_IDS, commit);
       }
     }
     if (!ns.judged && !sPerfect) {
       if (isTail && ns.tailLockedSPerfect) {
-        judge('S-Perfect', bound.size() > 0 ? [] : allDown.slice());
+        applyJudge(bound, ns, nextIdx, 'S-Perfect', dt, bound.size() > 0 ? _EMPTY_IDS : allDown, commit);
       } else if (!ns.arrivalChecked) {
         ns.arrivalChecked = true;
-        if (onNode.length > 0) judge('S-Perfect', onNode.slice());
+        if (onNode.length > 0) applyJudge(bound, ns, nextIdx, 'S-Perfect', dt, onNode, commit);
       } else if (onNode.length > 0 && dt <= HIT_WINDOW_MS) {
         const j = evaluateJudgement(dt);
-        if (j) judge(j, onNode.slice());
+        if (j) applyJudge(bound, ns, nextIdx, j, dt, onNode, commit);
       }
     }
   }
 }
 
+/* 适配器按容器缓存（WeakMap）：原实现每次调用都新建适配器对象 + 5 个闭包，
+ * 而调用点是「每个活跃 slide 每帧」——是主要 GC 源之一。同一容器复用同一适配器。 */
+
+const _setAdapters = new WeakMap<object, SlideBinding<unknown>>();
+
 /** `Set<T>` 的绑定适配器（3D 端用）。 */
 export function setBinding<T>(set: Set<T>): SlideBinding<T> {
-  return {
-    has: (id) => set.has(id),
-    add: (id) => { set.add(id); },
-    delete: (id) => { set.delete(id); },
-    size: () => set.size,
-    ids: () => [...set],
-  };
+  const key = set as unknown as object;
+  let b = _setAdapters.get(key) as SlideBinding<T> | undefined;
+  if (!b) {
+    b = {
+      has: (id) => set.has(id),
+      add: (id) => { set.add(id); },
+      delete: (id) => { set.delete(id); },
+      size: () => set.size,
+      ids: () => [...set],
+      idsInto: (out) => { out.length = 0; for (const v of set) out.push(v); },
+    };
+    _setAdapters.set(key, b as unknown as SlideBinding<unknown>);
+  }
+  return b;
 }
+
+const _recAdapters = new WeakMap<Record<string, boolean>, SlideBinding<string>>();
 
 /** `Record<string, boolean>` 的绑定适配器（2D / Lite 端用）。 */
 export function recordBinding(rec: Record<string, boolean>): SlideBinding<string> {
-  return {
-    has: (id) => !!rec[id],
-    add: (id) => { rec[id] = true; },
-    delete: (id) => { delete rec[id]; },
-    size: () => Object.keys(rec).length,
-    ids: () => Object.keys(rec),
-  };
+  let b = _recAdapters.get(rec);
+  if (!b) {
+    b = {
+      has: (id) => !!rec[id],
+      add: (id) => { rec[id] = true; },
+      delete: (id) => { delete rec[id]; },
+      size: () => Object.keys(rec).length,
+      ids: () => Object.keys(rec),
+      idsInto: (out) => {
+        out.length = 0;
+        for (const k in rec) if (Object.prototype.hasOwnProperty.call(rec, k)) out.push(k);
+      },
+    };
+    _recAdapters.set(rec, b);
+  }
+  return b;
 }

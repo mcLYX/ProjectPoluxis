@@ -363,7 +363,7 @@
       -ms-transform: scale(1.04); -webkit-transform: scale(1.04); transform: scale(1.04);
     }
 
-    /* HUD — layout mirrors full version App.tsx L506-534:
+    /* HUD — 布局与完整版 App.tsx 的 HUD 对齐：
      *   top-left:  chart info (title/difficulty/BPM)
      *   top-right: Score (large) + ACC/RANK below
      *   bottom-left: Pause button
@@ -394,8 +394,7 @@
       -webkit-background-clip: text; background-clip: text;
       -webkit-text-fill-color: transparent;
     }
-    /* Score: bumped from 24px/400 → 36px/800 per user spec "略微改粗改大".
-     * Still smaller than the 56px rank so the rank stays the visual anchor. */
+    /* Score 用 36px/800：刻意小于 56px 的 rank，让 rank 保持视觉锚点。 */
     .result-score { font-size: 36px; font-weight: 800; color: #fff; margin: 0 0 16px 0; letter-spacing: 1px; }
     .result-row { display: -ms-flexbox; display: flex; -ms-flex-pack: justify; justify-content: space-between; font-size: 13px; color: #cbd5e1; margin: 4px 0; }
     .result-row .p { color: #ffd700; }
@@ -444,30 +443,33 @@
       transition: background 160ms ease, border-color 160ms ease;
     }
     .modal-close:hover { background: rgba(6, 182, 212, 0.22); border-color: rgba(6, 182, 212, 0.7); }
-    /* 设置弹窗：固定顶栏（标题 + 关闭），**不**随内容上下滑动；内容在 .modal-body 内独立
-     * 滚动。仅作用于 #settings-modal，编辑器弹窗保持原 overflow 行为不变。 */
-    #settings-modal .modal-card {
-      padding: 0;
-      display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column;
-      overflow: hidden;
-    }
+    /* 设置弹窗：顶栏（标题 + 关闭）用 position:sticky 钉住；滚动**仍由 .modal-card 统一承担**
+     * —— 即恢复 `.modal-card { max-height:88%; overflow-y:auto }` 的原始滚动方式。
+     *
+     * ⚠️ 这里**不能**用 flex 做「固定顶栏 + 内容独立滚动」：IE9 完全没有 flexbox，
+     * IE10/11 的 flex item 不写 `min-height:0` 也不会收缩到内容高度以下。这两种情况下
+     * `.modal-body` 都会被内容撑高，再被 `.modal-card` 的 `overflow:hidden` 裁掉 →
+     * **整个弹窗无法上下滚动**（IE 实测 bug）。
+     *
+     * sticky 在 IE9/10/11 均不受支持，会被忽略并退化为普通流（顶栏随内容滚走），
+     * 但**滚动本身在任何浏览器都可用**。仅作用于 #settings-modal，编辑器弹窗行为不变。 */
+    #settings-modal .modal-card { padding: 0; }
     #settings-modal .modal-head {
-      -ms-flex: 0 0 auto; flex: 0 0 auto;
+      position: -webkit-sticky; position: sticky; top: 0; z-index: 2;
       display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center;
       -ms-flex-pack: justify; justify-content: space-between;
       padding: 18px 22px 12px;
-      background: rgba(14, 27, 56, 0.99);
+      /* 必须不透明：滚过的设置行不能从顶栏后面透出来。 */
+      background: #0e1b38;
       border-bottom: 1px solid rgba(6, 182, 212, 0.18);
       border-radius: 18px 18px 0 0;
     }
-    #settings-modal .modal-body {
-      -ms-flex: 1 1 auto; flex: 1 1 auto; overflow-y: auto;
-      padding: 8px 22px 22px; box-sizing: border-box;
-    }
-    #settings-modal .modal-title { margin: 0; padding-right: 0; }
-    #settings-modal .modal-close {
-      position: static; -ms-flex: 0 0 auto; flex: 0 0 auto;
-    }
+    #settings-modal .modal-body { padding: 8px 22px 22px; box-sizing: border-box; }
+    /* 顶栏里的标题只去掉默认下边距；`padding-right: 40px`（base）保留，避免与右上关闭按钮重叠。 */
+    #settings-modal .modal-title { margin: 0; }
+    /* 关闭按钮钉在顶栏右上（head 为 sticky 时同时充当绝对定位参照）。
+     * 顶栏高 = 18 + 22 + 12 = 52px，按钮 30px → top 11px 即垂直居中；right 对齐顶栏 22px 内边距。 */
+    #settings-modal .modal-close { position: absolute; top: 11px; right: 22px; }
     /* Explanatory line under a settings row (e.g. the frame-rate cap tradeoff). */
     .modal-hint { font-size: 11px; color: #94a3b8; line-height: 1.5; margin: -2px 0 10px 0; }
     .modal-row { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; -ms-flex-pack: justify; justify-content: space-between; margin: 10px 0; font-size: 13px; color: #cbd5e1; }

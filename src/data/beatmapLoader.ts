@@ -188,15 +188,6 @@ export function buildBuiltinAlbum(): AlbumItem {
   };
 }
 
-export async function loadAudioForSong(item: SongItem, audioManager: any): Promise<void> {
-  if (!item.audio) return;
-  try {
-    await audioManager.loadAudioURL(resolveBeatmapUrl(item.audio));
-  } catch (e) {
-    console.error('加载音频失败', e);
-  }
-}
-
 /**
  * 解析歌曲的背景媒体为可直接加载的地址（开局传给渲染器）。
  * - idb:// → 读库生成 blob URL；相对路径 → 按索引根重写；http(s)/blob 原样。

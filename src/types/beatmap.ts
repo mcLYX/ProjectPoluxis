@@ -87,10 +87,6 @@ export interface AlbumItem {
 export type BeatmapItem = AlbumItem | SongItem;
 
 /** 类型守卫：在混合树中筛选/收窄到歌曲节点。 */
-export function isSongItem(item: BeatmapItem): item is SongItem {
-  return item.type === 'song';
-}
-
 export interface BeatmapsManifest {
   version: number;
   items: BeatmapItem[];

@@ -139,6 +139,90 @@ export function getScrollDistance(timeSec: number, speedPoints: SpeedPoint[]): n
   return dist;
 }
 
+/** 变速点前缀表：用于 O(log N) 求任意时刻的累计滚动距离。 */
+export interface SpeedPrefix {
+  /**
+   * 是否可用二分 + 前缀和。false 时调用方回退 `getScrollDistance`
+   * （非升序 / 含非法时刻的退化谱面 → 保证与旧行为逐位一致）。
+   */
+  sorted: boolean;
+  /** timeSec > 0 的变速点时刻（升序）。长度 m。 */
+  times: number[];
+  /** 累计滚动距离，长度 m+1：`cum[k]` = 走完前 k 段的距离。 */
+  cum: number[];
+  /** 分段速度，长度 m+1：`segSpeed[k]` = 第 k 段（times[k-1] → times[k]）所用速度。 */
+  segSpeed: number[];
+}
+
+/**
+ * 依据 `speedPoints` 建立前缀表（复刻 `getScrollDistance` 的语义）：
+ *  - `timeSec <= 0` 的点只设定「起始速度」（取最后一个），不产生距离；
+ *  - 其余点按数组顺序推进：区间 [上一点, 本点) 用**进入该点之前**的速度。
+ * 非升序 / 非法时刻 → `sorted = false`（调用方回退线性扫描，逐位一致）。
+ *
+ * ES5 风格：本文件被 scripts/build-lite.mjs 原样内联进 Lite 的单一 IIFE，
+ * 故**不使用任何 ES2015+ 内建**。特别是这里用普通数组而非 `Float64Array` ——
+ * **IE9 没有 TypedArray**（IE10 才引入），而 Lite 的目标就是 IE9；前缀表很小，
+ * 与 TypedArray 的性能差异可忽略。
+ */
+export function buildSpeedPrefix(sp: SpeedPoint[]): SpeedPrefix {
+  var times: number[] = [];
+  var pointSpeeds: number[] = [];
+  var speed0 = 1;
+  var sorted = true;
+  var seenPositive = false;
+  var prevT = -Infinity;
+  var i: number;
+  for (i = 0; i < sp.length; i++) {
+    var p = sp[i];
+    if (p.timeSec <= 0) {
+      // 原始实现里这类点只改速度；若出现在正时间点之后，前缀模型不再等价 → 回退。
+      if (seenPositive) sorted = false;
+      speed0 = p.speed;
+      continue;
+    }
+    if (!(typeof p.timeSec === 'number' && isFinite(p.timeSec))) {
+      sorted = false;
+      continue;
+    }
+    if (p.timeSec < prevT) sorted = false;
+    prevT = p.timeSec;
+    seenPositive = true;
+    times.push(p.timeSec);
+    pointSpeeds.push(p.speed);
+  }
+
+  var m = times.length;
+  var timesArr = times;            // 本地新建、无别名，直接复用（无需拷贝）
+  /* ⚠️ cum[0] 必须显式置 0：普通数组不像 TypedArray 那样零初始化，
+   * 而 `prefixDistanceAt` 在 lo === 0 时会读 `cum[0]`（否则得到 NaN）。 */
+  var cum = [0];
+  var segSpeed = [speed0];
+  for (var k = 0; k < m; k++) {
+    var baseT = k > 0 ? times[k - 1] : 0;
+    cum.push(cum[k] + (times[k] - baseT) * segSpeed[k]);
+    segSpeed.push(pointSpeeds[k]);
+  }
+  return { sorted: sorted, times: timesArr, cum: cum, segSpeed: segSpeed };
+}
+
+/** 在指定前缀表上求时刻 `timeSec` 的累计滚动距离；前缀不可用时回退 `getScrollDistance`。 */
+export function prefixDistanceAt(prefix: SpeedPrefix, timeSec: number, fallbackPoints: SpeedPoint[]): number {
+  if (!prefix.sorted) return getScrollDistance(timeSec, fallbackPoints);
+  var times = prefix.times;
+  var m = times.length;
+  // lower_bound：第一个 >= timeSec 的下标（严格小于才计入，与 getScrollDistance 的 `>=` break 一致）。
+  var lo = 0;
+  var hi = m;
+  while (lo < hi) {
+    var mid = (lo + hi) >> 1;
+    if (times[mid] < timeSec) lo = mid + 1;
+    else hi = mid;
+  }
+  var baseT = lo > 0 ? times[lo - 1] : 0;
+  return prefix.cum[lo] + (timeSec - baseT) * prefix.segSpeed[lo];
+}
+
 /** Convert a beat number to absolute seconds with constant BPM. */
 export function beatToSeconds(beat: number, bpm: number, offset: number): number {
   return offset + (beat * 60) / bpm;

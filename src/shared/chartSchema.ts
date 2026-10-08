@@ -13,8 +13,6 @@
  * them directly, so no per-version i18n layer is needed.
  */
 
-/** Note types valid in a chart. Mirrors NoteType in src/types/game.ts. */
-export var CHART_NOTE_TYPES = ['tap', 'touch', 'slide'];
 /** Easing identifiers valid in chart `easing` fields.
  *  SINGLE SOURCE OF TRUTH — src/utils/easing.ts and the Lite build both read
  *  this (the Lite build inlines it via scripts/build-lite.mjs). Do NOT redefine

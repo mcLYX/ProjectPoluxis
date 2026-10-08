@@ -539,7 +539,6 @@ function assignProp(
     }
     ctx.easing = str;
   } else {
-    // color
     ctx.color = str;
   }
 }

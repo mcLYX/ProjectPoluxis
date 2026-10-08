@@ -42,7 +42,7 @@ import {
   type SlideJudgePointer,
   type SlideJudgeState,
 } from '../systems/slideJudge';
-import { buildLayerTree, layerOffsetAt, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
+import { buildLayerTree, layerOffsetAt, layerOffsetAtInto, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
 import { EASING_FNS } from '../shared/easing';
 import { JUDGE_COLORS, JUDGE_SCALE } from '../shared/gameplaySpec';
 import {
@@ -82,6 +82,21 @@ const SLIDE_RED = '#ff0000';
 const JUDGE_Z = 0;
 const WORLD_UNITS_PER_SECOND = 36;
 
+/* ------------------------------------------------------------------
+ * slide 判定入参复用缓冲：调用点是「每个活跃 slide 每帧」，原实现每次
+ * 新建 pointers 数组 + 每指一个对象（外加 Object.keys 快照）。processSlideCore
+ * 同步消费、从不保留入参，各 slide 顺序处理 —— 故可安全复用。
+ * ------------------------------------------------------------------ */
+const _slidePtrs: SlideJudgePointer<string>[] = [];
+const _slidePtrPool: SlideJudgePointer<string>[] = [];
+function pushSlidePtrStr(id: string, x: number, y: number, down: boolean): void {
+  const i = _slidePtrs.length;
+  let o = _slidePtrPool[i];
+  if (o) { o.id = id; o.x = x; o.y = y; o.down = down; }
+  else { o = { id, x, y, down }; _slidePtrPool[i] = o; }
+  _slidePtrs.push(o);
+}
+
 /** 屏幕空间投影点 */
 interface P2 {
   x: number;
@@ -89,6 +104,62 @@ interface P2 {
   scale: number;
   alpha: number;
 }
+
+/* ------------------------------------------------------------------
+ * 每帧复用的渲染缓冲（消除 2D 主循环里的临时对象分配）。
+ * projectInto 写入式投影 + 复用 P2；toDraw / samples 用池化的条目对象。
+ * 单渲染器、单帧顺序消费 —— 复用安全。
+ * ------------------------------------------------------------------ */
+function _mkP2(): P2 { return { x: 0, y: 0, scale: 0, alpha: 0 }; }
+/** 判定面四角（drawJudgePlane）。 */
+const _planePts: P2[] = [_mkP2(), _mkP2(), _mkP2(), _mkP2()];
+/** 通用两个 scratch 投影点（即用即弃的调用点）。 */
+const _p2a: P2 = _mkP2();
+const _p2b: P2 = _mkP2();
+/** 隧道四角的世界坐标（常量，避免每帧重建嵌套数组）。 */
+const _TUNNEL_CORNERS: [number, number][] = [
+  [-PLANE_HALF_X, -PLANE_HALF_Y],
+  [PLANE_HALF_X, -PLANE_HALF_Y],
+  [PLANE_HALF_X, PLANE_HALF_Y],
+  [-PLANE_HALF_X, PLANE_HALF_Y],
+];
+
+/** toDraw 条目：每个音符一个（池化，避免每帧对象字面量）。 */
+interface ToDrawEntry {
+  p: P2;
+  kind: NoteType;
+  color: string;
+  id: string;
+  noteId: string;
+  nodeIdx: number;
+  isHead: boolean;
+  angle: number;
+}
+const _toDraw: ToDrawEntry[] = [];
+const _toDrawPool: ToDrawEntry[] = [];
+/** 取第 i 个池化 toDraw 条目（不 push；投影成功后再 push）。 */
+function toDrawAt(i: number): ToDrawEntry {
+  let e = _toDrawPool[i];
+  if (!e) {
+    e = { p: _mkP2(), kind: 'tap', color: '', id: '', noteId: '', nodeIdx: 0, isHead: false, angle: 0 };
+    _toDrawPool[i] = e;
+  }
+  return e;
+}
+
+/** slide 管道采样点池（每根管线重置；drawPipeCurve 即时消费）。 */
+const _samples: P2[] = [];
+const _samplePool: P2[] = [];
+function sampleAt(i: number): P2 {
+  let o = _samplePool[i];
+  if (!o) { o = _mkP2(); _samplePool[i] = o; }
+  return o;
+}
+
+/** drawProjection 用的 slide 头合成参数（复用对象）。 */
+const _projArg: { type: NoteType; timeSec: number; x: number; y: number; angle?: number; layerId?: string } = {
+  type: 'tap', timeSec: 0, x: 0, y: 0, angle: 0,
+};
 
 /** 打击特效 */
 interface Burst {
@@ -274,18 +345,18 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       ro.observe(canvas);
     }
 
-    /** 世界坐标 (nx,ny,nz) → 屏幕 {x,y,scale,alpha}；超出近/远裁剪返回 null。 */
-    function project(nx: number, ny: number, nz: number, spawnLimit: number): P2 | null {
-      if (nz < spawnLimit) return null;
+    /** 世界坐标 (nx,ny,nz) → 写入 `out`（复用缓冲，避免每帧分配）；超出近/远裁剪返回 false。 */
+    function projectInto(out: P2, nx: number, ny: number, nz: number, spawnLimit: number): boolean {
+      if (nz < spawnLimit) return false;
       const depth = view.cd - nz;
-      if (depth <= 0.1) return null;
+      if (depth <= 0.1) return false;
       const ndcX = nx / (TAN_HALF_FOV * view.aspect * depth);
       const ndcY = (ny - CAMERA_AXIS_Y) / (TAN_HALF_FOV * depth);
-      const sx = view.w * 0.5 * (1 + ndcX);
-      const sy = view.h * 0.5 * (1 - ndcY);
-      const scale = view.cd / depth;
-      const alpha = Math.max(0, Math.min(1, (nz - spawnLimit) / FADE_ZONE));
-      return { x: sx, y: sy, scale, alpha };
+      out.x = view.w * 0.5 * (1 + ndcX);
+      out.y = view.h * 0.5 * (1 - ndcY);
+      out.scale = view.cd / depth;
+      out.alpha = Math.max(0, Math.min(1, (nz - spawnLimit) / FADE_ZONE));
+      return true;
     }
 
     const now = (): number => performance.now();
@@ -373,7 +444,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return s.projSlide ?? s.projection;
     }
 
-    /* ---------------- 形状绘制（镜像 GameCanvas mkTap/mkTouch/mkSlide） ---------------- */
+    /* ---------------- 形状绘制（与 GameCanvas 的 tap/touch/slide 形状同口径） ---------------- */
     function drawTap(p: P2, color: string, vScale: number, angle: number, fade: number): void {
       const scale = view.pxPerUnit * p.scale * vScale;
       const tex = skin.images?.tap;
@@ -618,20 +689,18 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     }
 
     function drawJudgePlane(): void {
-      const corners = [
-        project(-PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000),
-        project(PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000),
-        project(PLANE_HALF_X, PLANE_HALF_Y, 0, -1000),
-        project(-PLANE_HALF_X, PLANE_HALF_Y, 0, -1000),
-      ];
-      if (!corners[0]) return;
+      const ok = projectInto(_planePts[0], -PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000);
+      projectInto(_planePts[1], PLANE_HALF_X, -PLANE_HALF_Y, 0, -1000);
+      projectInto(_planePts[2], PLANE_HALF_X, PLANE_HALF_Y, 0, -1000);
+      projectInto(_planePts[3], -PLANE_HALF_X, PLANE_HALF_Y, 0, -1000);
+      if (!ok) return;
       ctx!.save();
       ctx!.globalAlpha = 0.4;
       ctx!.strokeStyle = '#ffffff';
       ctx!.lineWidth = 2;
       ctx!.beginPath();
-      ctx!.moveTo(corners[0]!.x, corners[0]!.y);
-      for (let i = 1; i < 4; i++) ctx!.lineTo(corners[i]!.x, corners[i]!.y);
+      ctx!.moveTo(_planePts[0].x, _planePts[0].y);
+      for (let i = 1; i < 4; i++) ctx!.lineTo(_planePts[i].x, _planePts[i].y);
       ctx!.closePath();
       ctx!.stroke();
       ctx!.restore();
@@ -639,23 +708,18 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     function drawTunnel(spawnLimit: number): void {
       const farZ = spawnLimit;
-      const corners: [number, number][] = [
-        [-PLANE_HALF_X, -PLANE_HALF_Y],
-        [PLANE_HALF_X, -PLANE_HALF_Y],
-        [PLANE_HALF_X, PLANE_HALF_Y],
-        [-PLANE_HALF_X, PLANE_HALF_Y],
-      ];
       ctx!.save();
       ctx!.globalAlpha = 0.18;
       ctx!.strokeStyle = game.accent;
       ctx!.lineWidth = 1;
       for (let i = 0; i < 4; i++) {
-        const near = project(corners[i][0], corners[i][1], 0, -1000);
-        const far = project(corners[i][0], corners[i][1], farZ, -100000);
-        if (!near || !far) continue;
+        const c = _TUNNEL_CORNERS[i];
+        const okN = projectInto(_p2a, c[0], c[1], 0, -1000);
+        const okF = projectInto(_p2b, c[0], c[1], farZ, -100000);
+        if (!okN || !okF) continue;
         ctx!.beginPath();
-        ctx!.moveTo(far.x, far.y);
-        ctx!.lineTo(near.x, near.y);
+        ctx!.moveTo(_p2b.x, _p2b.y);
+        ctx!.lineTo(_p2a.x, _p2a.y);
         ctx!.stroke();
       }
       ctx!.restore();
@@ -860,14 +924,23 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const t = typeof n.timeSec === 'number' ? n.timeSec : 0;
       return layerOffAtIdx2D(layerIdxOf2D(n), t);
     }
+    /* 写入式落位偏移的复用缓冲（热路径：每可见音符每帧）。
+     * 各调用点用**各自的** scratch，避免被中途调用（如 commitJudge）串改。 */
+    const _projOff2DScratch = { x: 0, y: 0 };
+    const _touchOff2DScratch = { x: 0, y: 0 };
+    /** 判定落位偏移 — **写入 out**（零分配）。编辑器恒 0。 */
+    function landingOffOf2DInto(n: { timeSec?: number }, out: { x: number; y: number }): void {
+      if (propsRef.current.isEditorMode || !layerTree) { out.x = 0; out.y = 0; return; }
+      const t = typeof n.timeSec === 'number' ? n.timeSec : 0;
+      layerOffsetAtInto(layerTree, layerIdxOf2D(n), t, out);
+    }
 
     /* ---------------- 打击特效 ---------------- */
     /* burst 对象池：drawBursts 回收失效特效至此，spawnBurst 复用，降低每命中 new 对象
      * 与 GC 抖动（弱机多指连打时尤为明显）。 */
     const burstPool: Burst[] = [];
     function spawnBurst(wx: number, wy: number, j: JudgementType, nt: NoteType, angle: number): void {
-      const p = project(wx, wy, 0, -1000);
-      if (!p) return;
+      if (!projectInto(_p2a, wx, wy, 0, -1000)) return;
       const vs = game.sizeScale;
       /* 镜像 3D：特效平面 = projSize(nt) 见方；默认环线宽 = defaultSkinJudgeWidth。
        * z=0 处 p.scale 恒为 1。 */
@@ -877,11 +950,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
        * 特效比音符小 0.707 倍。touch 不受影响：TOUCH_SIZE 在音符侧是直径、在特效
        * 侧是边长，数值恰好相同。落点指示（下面 drawProjection）保持 SLIDE_SIZE 不变。 */
       const sizeWorld = nt === 'touch' ? TOUCH_SIZE : nt === 'slide' ? SLIDE_HALF * 2 : TAP_SIZE;
-      const sizePx = sizeWorld * view.pxPerUnit * p.scale * vs;
-      const lineWidthPx = Math.max(1, skin.judgeWidth * view.pxPerUnit * p.scale * vs);
+      const sizePx = sizeWorld * view.pxPerUnit * _p2a.scale * vs;
+      const lineWidthPx = Math.max(1, skin.judgeWidth * view.pxPerUnit * _p2a.scale * vs);
       /* 复用池对象（字段全部重写，无需担心残留）。 */
       const b: Burst = burstPool.pop() ?? { x: 0, y: 0, start: 0, dur: 0, color: '', kind: 'tap', sizePx: 0, lineWidthPx: 0, scaleTarget: 1, angle: 0 };
-      b.x = p.x; b.y = p.y; b.start = now(); b.dur = 300;
+      b.x = _p2a.x; b.y = _p2a.y; b.start = now(); b.dur = 300;
       b.color = JUDGE_COLORS[j]; b.kind = nt; b.sizePx = sizePx; b.lineWidthPx = lineWidthPx;
       b.scaleTarget = JUDGE_SCALE[j] || 1.0; b.angle = typeof angle === 'number' ? angle : 0;
       game.bursts.push(b);
@@ -889,8 +962,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     function drawBursts(): void {
       const t = now();
-      const kept: Burst[] = [];
-      for (const b of game.bursts) {
+      /* 原地压缩（代替每帧 new kept 数组）——无 burst 时也零分配。 */
+      const bursts = game.bursts;
+      let write = 0;
+      for (let bi = 0; bi < bursts.length; bi++) {
+        const b = bursts[bi];
         const prog = (t - b.start) / b.dur;
         if (prog >= 1) { burstPool.push(b); continue; }
         const multiplier = 1 + (b.scaleTarget - 1) * Math.sin(prog * Math.PI * 0.5);
@@ -926,9 +1002,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           }
           ctx!.restore();
         }
-        kept.push(b);
+        bursts[write++] = b;
       }
-      game.bursts = kept;
+      bursts.length = write;
     }
 
     /* ---------------- 音符触发器（§3.4）---------------- */
@@ -1247,17 +1323,19 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const allNodes = getAllSlideNodes(note);
       const rt = getSlideRt(note.id, allNodes.length);
 
-      const pointers: SlideJudgePointer<string>[] = [];
-      for (const pid of Object.keys(game.pointers)) {
+      /* 复用缓冲：去掉每帧新建数组 + 每指对象 + Object.keys 快照。 */
+      _slidePtrs.length = 0;
+      for (const pid in game.pointers) {
+        if (!Object.prototype.hasOwnProperty.call(game.pointers, pid)) continue;
         const p = game.pointers[pid];
-        pointers.push({ id: pid, x: p.x, y: p.y, down: p.down });
+        pushSlidePtrStr(pid, p.x, p.y, p.down);
       }
 
       processSlideCore<string>({
         nodes: allNodes,
         rt: rt as unknown as SlideJudgeState<string>,
         bound: recordBinding(rt.boundPointerIds),
-        pointers,
+        pointers: _slidePtrs,
         curTime,
         autoPlay: game.autoPlay,
         commit: (idx, j, dtMs) => {
@@ -1278,7 +1356,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     /* ---------------- touch 判定（悬停触发） ---------------- */
     function isAnyPointerInside(x: number, y: number, half: number): boolean {
-      for (const pid of Object.keys(game.pointers)) {
+      for (const pid in game.pointers) {
+        if (!Object.prototype.hasOwnProperty.call(game.pointers, pid)) continue;
         const p = game.pointers[pid];
         if (!p.active) continue;
         if (Math.abs(p.x - x) < half && Math.abs(p.y - y) < half) return true;
@@ -1289,7 +1368,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     function processTouchNote(note: ResolvedNote, curTime: number): void {
       if (note.fake) return; /* 假音符：完全不参与判定 */
       const off = offOf2D(note);
-      const lo = landingOffOf2D(note);
+      landingOffOf2DInto(note, _touchOff2DScratch);
+      const lo = _touchOff2DScratch; // 复用缓冲（本函数私有）
       const dt = (curTime - note.timeSec) * 1000;
       const inside = isAnyPointerInside(note.x + off.x, note.y + off.y, TOUCH_HIT_HALF);
       let track = game.touchStates[note.id];
@@ -1373,37 +1453,37 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       if (toggles.projection === false) return;
       /* 投影引导 = 落点提示，钉在「最终落位」（base + 音符自己 timeSec 的图层偏移），
        * 不随播放中的整列平移跑动（与 3D 行为一致）。 */
-      const loff = landingOffOf2D(note);
+      landingOffOf2DInto(note, _projOff2DScratch);
+      const loff = _projOff2DScratch; // 复用缓冲（零分配）
       const leadMs = propsRef.current.projectionLeadMs;
       if (leadMs <= 0) return;
       const timeToHitMs = (note.timeSec - curTime) * 1000;
       if (timeToHitMs < 0 || timeToHitMs > leadMs) return;
       const po = Math.max(0, Math.min(0.95, 1 - timeToHitMs / leadMs));
       if (po <= 0.01) return;
-      const p = project(note.x + loff.x, note.y + loff.y, 0, -1000);
-      if (!p) return;
+      if (!projectInto(_p2a, note.x + loff.x, note.y + loff.y, 0, -1000)) return;
       const projTex = pickProjImage(note.type);
       if (projTex) {
         const szWorld = note.type === 'tap' ? TAP_SIZE : note.type === 'touch' ? TOUCH_SIZE : SLIDE_SIZE;
-        drawSkinImage(projTex, p.x, p.y, szWorld * view.pxPerUnit * p.scale * vScale, color, po, note.angle ?? 0);
+        drawSkinImage(projTex, _p2a.x, _p2a.y, szWorld * view.pxPerUnit * _p2a.scale * vScale, color, po, note.angle ?? 0);
         return;
       }
       ctx!.save();
       ctx!.globalAlpha = po;
       ctx!.strokeStyle = color;
-      ctx!.lineWidth = Math.max(1, skin.judgeWidth * view.pxPerUnit * p.scale * vScale);
-      ctx!.translate(p.x, p.y);
+      ctx!.lineWidth = Math.max(1, skin.judgeWidth * view.pxPerUnit * _p2a.scale * vScale);
+      ctx!.translate(_p2a.x, _p2a.y);
       if (note.angle) ctx!.rotate(note.angle);
       if (note.type === 'tap') {
-        const sz = TAP_SIZE * view.pxPerUnit * p.scale * vScale;
+        const sz = TAP_SIZE * view.pxPerUnit * _p2a.scale * vScale;
         ctx!.strokeRect(-sz / 2, -sz / 2, sz, sz);
       } else if (note.type === 'touch') {
-        const r = (TOUCH_SIZE / 2) * view.pxPerUnit * p.scale * vScale;
+        const r = (TOUCH_SIZE / 2) * view.pxPerUnit * _p2a.scale * vScale;
         ctx!.beginPath();
         ctx!.arc(0, 0, r * 0.92, 0, Math.PI * 2);
         ctx!.stroke();
       } else {
-        const half = SLIDE_HALF * view.pxPerUnit * p.scale * vScale;
+        const half = SLIDE_HALF * view.pxPerUnit * _p2a.scale * vScale;
         ctx!.beginPath();
         ctx!.moveTo(0, -half);
         ctx!.lineTo(half, 0);
@@ -1429,9 +1509,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       /* 图层偏移：每帧每图层一次（与 3D 同构）。编辑器模式 offOf2D 恒 0（图层本地视图）。 */
       if (layerTree && layerOffs.length === layerTree.nodes.length) {
         for (let li = 0; li < layerTree.nodes.length; li++) {
-          const o = layerOffsetAt(layerTree, li, curTime);
-          layerOffs[li].x = o.x;
-          layerOffs[li].y = o.y;
+          layerOffsetAtInto(layerTree, li, curTime, layerOffs[li]);
         }
       }
 
@@ -1445,16 +1523,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
       const win = renderWindow(curTime, spawnLimit);
       const winOrder = win.order;
-      const toDraw: {
-        p: P2;
-        kind: NoteType;
-        color: string;
-        id: string;
-        noteId: string;
-        nodeIdx: number;
-        isHead: boolean;
-        angle: number;
-      }[] = [];
+      /* toDraw 使用模块级条目池：每帧清空重填，复用条目对象与其内嵌 P2。 */
+      const toDraw = _toDraw;
+      toDraw.length = 0;
 
       for (let k = win.first; k < win.last; k++) {
         const note = winOrder === null ? game.notes[k] : game.notes[winOrder[k]];
@@ -1535,7 +1606,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             if (visLo >= visHi) continue;
 
             const SEGS = 16;
-            const samples: { x: number; y: number; scale: number; alpha: number }[] = [];
+            /* 采样复用缓冲：每根管线重置（drawPipeCurve 即时消费，可跨管线复用）。 */
+            const samples = _samples;
+            samples.length = 0;
             for (let sk = 0; sk <= SEGS; sk++) {
               const tt = visLo + (visHi - visLo) * (sk / SEGS);
               const wx = nodeA.x + easeFn(tt) * ex;
@@ -1546,11 +1619,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
                * 被 project 拒掉 → 样本数在 16/17 间抖动 → drawPipeCurve 里
                * 按 k/(n-1) 均布的渐变 stops 整体错位 → 整条管道渐变闪烁。
                * 故越界样本夹到平面重投，保持样本数恒定（不 continue）。 */
-              let p = project(wx, wy, wz, spawnLimit);
-              if (!p) p = project(wx, wy, Math.max(spawnLimit, wz), spawnLimit);
-              if (!p) continue;
-              const a = Math.max(0.1, Math.min(1, (wz - spawnLimit) / FADE_ZONE));
-              samples.push({ x: p.x, y: p.y, scale: p.scale, alpha: a });
+              const sp = sampleAt(samples.length);
+              if (!projectInto(sp, wx, wy, wz, spawnLimit)
+                && !projectInto(sp, wx, wy, Math.max(spawnLimit, wz), spawnLimit)) continue;
+              sp.alpha = Math.max(0.1, Math.min(1, (wz - spawnLimit) / FADE_ZONE));
+              samples.push(sp);
             }
             if (samples.length < 2) continue;
 
@@ -1576,7 +1649,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
                   tCross = (ca + cb) / 2;
                 }
               }
-              for (const hbpid of Object.keys(slideRt.boundPointerIds)) {
+              for (const hbpid in slideRt.boundPointerIds) {
+                if (!Object.prototype.hasOwnProperty.call(slideRt.boundPointerIds, hbpid)) continue;
                 hasAnyBound = true;
                 const hbp = game.pointers[hbpid];
                 if (hbp && hbp.down && tCross !== null) {
@@ -1602,58 +1676,56 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             const wzN = zAtTau(visHi);
             const capA0 = Math.max(0, 1 - Math.abs(wz0) / capZ);
             const capAN = Math.max(0, 1 - Math.abs(wzN) / capZ);
-            if (capA0 > 0.01) {
-              const cp0 = project(nodeA.x + easeFn(visLo) * ex, nodeA.y + easeFn(visLo) * ey, wz0, spawnLimit);
-              if (cp0) drawPipeCap(cp0, pipeColor, capA0 * Math.min(1, brightness), cp0.scale, vScale);
+            if (capA0 > 0.01
+              && projectInto(_p2a, nodeA.x + easeFn(visLo) * ex, nodeA.y + easeFn(visLo) * ey, wz0, spawnLimit)) {
+              drawPipeCap(_p2a, pipeColor, capA0 * Math.min(1, brightness), _p2a.scale, vScale);
             }
-            if (capAN > 0.01) {
-              const cpN = project(nodeA.x + easeFn(visHi) * ex, nodeA.y + easeFn(visHi) * ey, wzN, spawnLimit);
-              if (cpN) drawPipeCap(cpN, pipeColor, capAN * Math.min(1, brightness), cpN.scale, vScale);
+            if (capAN > 0.01
+              && projectInto(_p2b, nodeA.x + easeFn(visHi) * ex, nodeA.y + easeFn(visHi) * ey, wzN, spawnLimit)) {
+              drawPipeCap(_p2b, pipeColor, capAN * Math.min(1, brightness), _p2b.scale, vScale);
             }
           }
           /* slide 节点 + 落地投影引导 */
           for (let nj = 0; nj < allNodes.length; nj++) {
             if (game.judged[note.id + '#' + nj]) continue;
             const nz = noteZPos(allNodes[nj].timeSec, curTime, baseSpeed, allNodes[nj].scrollDist, layerCurDist ? layerCurDist[note.layerIdx ?? 0] : undefined);
-            const np = project(allNodes[nj].x, allNodes[nj].y, nz, spawnLimit);
-            if (np) {
-              toDraw.push({
-                p: np,
-                kind: 'slide',
-                color: nc,
-                id: nj === 0 ? note.id : note.id + '#' + nj,
-                noteId: note.id,
-                nodeIdx: nj,
-                isHead: nj === 0,
-                angle: allNodes[nj].angle,
-              });
+            const ent = toDrawAt(toDraw.length);
+            if (projectInto(ent.p, allNodes[nj].x, allNodes[nj].y, nz, spawnLimit)) {
+              ent.kind = 'slide';
+              ent.color = nc;
+              ent.id = nj === 0 ? note.id : note.id + '#' + nj;
+              ent.noteId = note.id;
+              ent.nodeIdx = nj;
+              ent.isHead = nj === 0;
+              ent.angle = allNodes[nj].angle;
+              toDraw.push(ent);
             }
             if (nj === 0) {
-              drawProjection(
-                /* 传头节点原始 base（allNodes 已嵌入 curTime 偏移），由 drawProjection 内部钉落位 */
-                { type: 'slide', timeSec: note.timeSec, x: note.x, y: note.y, angle: note.angle, layerId: note.layerId },
-                nc,
-                vScale,
-                curTime,
-              );
+              /* 传头节点原始 base（allNodes 已嵌入 curTime 偏移），由 drawProjection 内部钉落位。
+                 复用 _projArg 合成参数，避免每 slide 每帧一个对象字面量。 */
+              _projArg.type = 'slide';
+              _projArg.timeSec = note.timeSec;
+              _projArg.x = note.x;
+              _projArg.y = note.y;
+              _projArg.angle = note.angle;
+              _projArg.layerId = note.layerId;
+              drawProjection(_projArg, nc, vScale, curTime);
             }
           }
         } else {
           if (game.judged[note.id]) continue;
           const tz = noteZPos(note.timeSec, curTime, baseSpeed, note.scrollDist, layerCurDist ? layerCurDist[note.layerIdx ?? 0] : undefined);
           const off = offOf2D(note);
-          const tp = project(note.x + off.x, note.y + off.y, tz, spawnLimit);
-          if (tp) {
-            toDraw.push({
-              p: tp,
-              kind: note.type,
-              color: nc,
-              id: note.id,
-              noteId: note.id,
-              nodeIdx: 0,
-              isHead: true,
-              angle: note.angle ?? 0,
-            });
+          const ent = toDrawAt(toDraw.length);
+          if (projectInto(ent.p, note.x + off.x, note.y + off.y, tz, spawnLimit)) {
+            ent.kind = note.type;
+            ent.color = nc;
+            ent.id = note.id;
+            ent.noteId = note.id;
+            ent.nodeIdx = 0;
+            ent.isHead = true;
+            ent.angle = note.angle ?? 0;
+            toDraw.push(ent);
             drawProjection(note, nc, vScale, curTime);
           }
         }
