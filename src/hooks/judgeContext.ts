@@ -122,6 +122,13 @@ export interface JudgeSystemContext {
    * → 全局 noteColor。未提供时退回旧的全局单值链。
    */
   getNoteColor?: (note: ResolvedNote) => string;
+  /**
+   * 该指针是否被故事板拦截（§3.7 v3 `api.input.setPointerFilter`）——true = **不参与
+   * 任何判定**（tap / touch / slide 全部屏蔽）。
+   * 由渲染器（唯一持有指针桥的组件）注入；未提供 = 不拦截，旧行为逐字不变
+   * （2D / Lite 无故事板概念，走的就是这条路径）。
+   */
+  isPointerBlocked?: (pointerId: number) => boolean;
   makeRingMesh: (
     outer: RingPt[],
     thickness: number,

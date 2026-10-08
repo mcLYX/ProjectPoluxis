@@ -257,6 +257,21 @@ function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
     };
   };
 
+  /**
+   * 故事板外部资源（"约定之外"的文件）：`相对路径 → 可 fetch 地址`。
+   * 值同样过 `abs`（本地/在线补成绝对地址；zip 导入的 `idb://` 原样保留）。
+   * 之前这里整个字段被丢弃，导致 info.json 显式声明的 assets 到不了运行时。
+   */
+  const normAssets = (v: unknown): Record<string, string> | undefined => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    const out: Record<string, string> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const p = abs(val);
+      if (p) out[k] = p;
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
+
   const normSong = (o: Record<string, unknown>): SongItem | null => {
     const id = asStr(o.id);
     if (!id) return null; // 缺少 id 的脏数据直接丢弃
@@ -272,6 +287,7 @@ function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
       bgImage: abs(o.bgImage) || undefined,
       bgVideo: abs(o.bgVideo) || undefined,
       storyboard: abs(o.storyboard) || undefined,
+      assets: normAssets(o.assets),
       basePath: asStr(o.basePath),
       difficulties: Array.isArray(o.difficulties) ? o.difficulties.map(normDifficulty) : [],
     };

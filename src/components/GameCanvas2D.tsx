@@ -2202,10 +2202,17 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
        */
       let needRender = false;
       let timeSource: number;
+      /* 与 3D 同口径：音频时钟**真正在走**才算在播。开局 App 会先把 gameState 置为
+       * 'playing'、等首帧与（故事板）预热完成才 play()，这段等待期 getCurrentTime()
+       * 返回陈旧的 0 —— 若按 isPlaying 直接用会在 t=0 闪帧上跑判定（0 拍前的音符掉、
+       * autoplay 打掉这一帧）。此时改用宿主 gameTime（App 置为 -leadIn 的预滚动位）。 */
+      const running = globalAudio.isRunning();
       if (p.isEditorMode) {
-        timeSource = p.isPlaying ? globalAudio.getCurrentTime() : (p.gameTime ?? 0);
+        timeSource = p.isPlaying && running ? globalAudio.getCurrentTime() : (p.gameTime ?? 0);
       } else {
-        timeSource = p.isPlaying ? globalAudio.getCurrentTime() : game.curTime;
+        timeSource = p.isPlaying
+          ? (running ? globalAudio.getCurrentTime() : (p.gameTime ?? 0))
+          : game.curTime;
       }
 
       if (p.isPlaying) {

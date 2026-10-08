@@ -14,6 +14,9 @@ const SettingsModal = lazy(() => import('./components/SettingsModal').then(m => 
 import type { EditorTool, BatchSelection, QuickCreateDelta, MarqueeMode } from './components/VisualChartEditor';
 // 故事板宿主（§3.7）：轻量组件（无 three.js），静态导入即可。
 import { StoryboardHost, type StoryboardHostHandle } from './components/StoryboardHost';
+// 故事板 v3：指针桥工厂（身份需稳定）+ 歌曲目录相对资源解析。
+import { createPointerBridge } from './utils/storyboardPointerBridge';
+import { dirOfUrl, isFetchableAssetBase, resolveAssetPath } from './utils/storyboardAssets';
 import { SongSelect, SongSelectNavState, ResultInfo } from './components/SongSelect';
 import { OrientationHint } from './components/OrientationHint';
 import { TimingBar, type TimingBarHandle } from './components/TimingBar';
@@ -21,6 +24,7 @@ import { DEMO_CHARTS } from './data/demoCharts';
 import { storeFile, storeFileDedup, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
 import { resolveBeatmapUrl, parseDifficultyMeta, resolveStoryboardUrl, resolveCoverUrl } from './data/beatmapLoader';
+import { specFromChart, downloadSongZip, audioExtOf } from './data/zipExport';
 import type { QualityMode, SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { editorTimeStore } from './editorTimeStore';
@@ -200,8 +204,29 @@ export function App() {
   const storyBgRef = useRef<HTMLDivElement | null>(null);
   const storyOverlayRef = useRef<HTMLDivElement | null>(null);
   const gameViewportRef = useRef<HTMLDivElement | null>(null);
+  /** HUD / UI 层容器（`api.hud.style` 的作用目标；overlay 层恒在其之下，z-10）。 */
+  const hudLayerRef = useRef<HTMLDivElement | null>(null);
   /** 判定面→屏幕投影（GameCanvas 挂载时写入；StoryboardHost 经 api.toScreen 消费）。 */
   const gameProjectorRef = useRef<((x: number, y: number) => { sx: number; sy: number }) | null>(null);
+  /**
+   * 游戏画布（GameCanvas 挂载时回写；`api.scene` 抓画面用）。
+   * ⚠️ 必须显式回写而不能靠 `querySelector('canvas')` 猜 —— 渲染器重建时容器里
+   * 可能残留旧画布，猜错会把故事板自己的画布抓回来 → 逐帧自我反馈累积。
+   */
+  const gameCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  /**
+   * 指针桥（§3.7 v3）：3D 画布写入指针/投影，故事板宿主读并回写 `blockedIds`。
+   * 身份必须稳定 —— 用惰性 state（而非 useRef 每次新建），否则两端会拿到不同的桥。
+   */
+  const [storyboardPointerBridge] = useState(createPointerBridge);
+  /**
+   * 当前局歌曲目录的**绝对**地址前缀（供故事板 `api.assets` 解析相对资源）。
+   * 由开局时该难度的 `chartFile`（清单规范化阶段已重写成绝对地址）反推目录得到；
+   * zip 导入的本地库歌曲没有可用基址 → 留空，`api.assets` 会以明确原因 reject。
+   */
+  const [songAssetBase, setSongAssetBase] = useState('');
+  /** 当前歌曲的外部资源映射（相对路径 → idb:// 或 URL）；zip/离线导入时非空。 */
+  const [songAssets, setSongAssets] = useState<Record<string, string> | undefined>(undefined);
   const storyboardHostRef = useRef<StoryboardHostHandle | null>(null);
   /**
    * 编辑器内挂载的歌曲媒体（bg.jpg / bga.mp4 / story.js 的 idb 引用，§3.7）。
@@ -212,11 +237,17 @@ export function App() {
   /** 由卡片发起谱面编辑/新建时的上下文；为 null 表示自由编辑器（保存至 Editor 专辑）。 */
   const [editorTarget, setEditorTarget] = useState<EditorLaunchInfo | null>(null);
   const [appToast, setAppToast] = useState<string | null>(null);
+  const appToastTimer = useRef<number | null>(null);
   const showAppToast = useCallback((msg: string) => {
     setAppToast(msg);
-    window.setTimeout(() => setAppToast(null), 2600);
+    // 必须先清掉上一个定时器：否则连续两次toast 时，先前那个仍会按时把状态置空，
+    // 导致后一条消息**只显示了很短时间就消失**（SongSelect 侧一直有做，这里漏了）。
+    if (appToastTimer.current) window.clearTimeout(appToastTimer.current);
+    appToastTimer.current = window.setTimeout(() => setAppToast(null), 2600);
   }, []);
   const [gameState, setGameState] = useState<'menu' | 'playing' | 'paused' | 'editor'>('menu');
+  const gameStateRef = useRef(gameState);
+  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   const [gameTime, setGameTime] = useState(0);
   /** 故事板回退时间源（秒）：镜像 `gameTime`，与 GameCanvas 的 gameTimeRef 同语义。
    *  音频时钟未运行（暂停 / 编辑器未预览 / 曲终）时 `globalAudio.getCurrentTime()`
@@ -650,6 +681,10 @@ export function App() {
    * 5s 兜底：画布万一异常未上报，也要保证游戏能开局。 */
   const pendingAudioStartRef = useRef<{ startSec: number; leadIn: number } | null>(null);
   const audioStartFallbackRef = useRef<number | null>(null);
+  /** 本局画布是否已上报首帧（playSession 变化时复位）。 */
+  const firstFrameRef = useRef(false);
+  /** 本局故事板是否已完成重型初始化（api.markReady）；无故事板时立即为 true。 */
+  const storyboardReadyRef = useRef(true);
   const clearPendingAudioStart = useCallback(() => {
     pendingAudioStartRef.current = null;
     if (audioStartFallbackRef.current) {
@@ -663,8 +698,49 @@ export function App() {
     clearPendingAudioStart();
     globalAudio.play(p.startSec, p.leadIn);
   }, [clearPendingAudioStart]);
+  /**
+   * 音频时钟的启动有两个前置条件：① 画布渲染出首帧；② 故事板重型初始化完成
+   * （弱机上故事板初始化会阻塞主线程 ~10s，若不等它，音频时钟会在阻塞期间照走，
+   * 解码一结束谱面就从中段开始）。两者满足（或兜底超时）才真正 play()。
+   */
+  const maybeStartAudio = useCallback(() => {
+    if (firstFrameRef.current && storyboardReadyRef.current) startPendingAudio();
+  }, [startPendingAudio]);
+  const handleFirstFrame = useCallback(() => {
+    firstFrameRef.current = true;
+    maybeStartAudio();
+  }, [maybeStartAudio]);
+  const handleStoryboardReady = useCallback(() => {
+    storyboardReadyRef.current = true;
+    maybeStartAudio();
+  }, [maybeStartAudio]);
 
-  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string, bgMedia?: { image?: string; video?: string }, storyboardUrl?: string) => {
+  /**
+   * 故事板歌曲目录相对资源解析（§3.7 v3 `api.assets`）。
+   * 只接受 http(s)/blob 基址：`idb://`（zip 导入的本地库歌曲）不可 fetch，
+   * 那类歌曲打包时也不会收录约定外的额外文件，故以明确原因 reject 让故事板降级。
+   */
+  const resolveStoryboardAsset = useCallback(async (relPath: string): Promise<string> => {
+    // 基址来源有优先级：
+    //   ① `songAssetBase` —— 由所选难度的 chartFile反推（在线/自建部署）。
+    //   ② **story.js 自身 URL 的目录** —— 这才是"相对路径"的正确锚点：
+    //      story.js 在 `http://localhost:61616/beatmaps/From_Phigros/Verrückt/story.js`，
+    //      就应当去读**同目录**的 noise-domains.json。chartFile 为空/无斜杠时
+    //      ① 会给出空串（实测症状：base="" → 判据直接拒绝），此时靠 ② 兜住。
+    //      dev / build / 任意静态托管下都成立，且与部署方的目录结构无关。
+    //   ③ blob:（zip 导入）—— story.js 是 blob URL，其"目录"无意义，
+    //      这类歌曲应由宿主从 idb 取文件（见 StoryboardHost.assetsHandle）。
+    const fromStory = dirOfUrl(storyUrl);
+    const base = songAssetBase || fromStory;
+    if (!isFetchableAssetBase(base)) {
+      throw new Error(
+        '[storyboard.assets] 当前歌曲没有可用的目录基址（zip 导入的本地库歌曲需从 idb 读取）',
+      );
+    }
+    return resolveAssetPath(relPath, base);
+  }, [songAssetBase, storyUrl]);
+
+  const handleStartGame = useCallback((chartData: ChartData = currentChart, useCustomAudio = hasCustomAudio, songId?: string, scoreKey?: string, diffName?: string, bgMedia?: { image?: string; video?: string }, storyboardUrl?: string, assetBase?: string, assets?: Record<string, string>) => {
     // Reset the end-of-song lock BEFORE the fade-out timer starts, so the
     // player can pause during the lead-in of the *next* song if they want.
     songEndedRef.current = false;
@@ -677,6 +753,9 @@ export function App() {
     setBgMedia(bgMedia);
     // 故事板脚本（约定命名 story.js，§3.7；仅 3D 渲染器；重开局未传时清空）。
     setStoryUrl(storyboardUrl);
+    // 歌曲目录绝对基址（故事板 api.assets 解析相对资源用；重开局未传时清空）。
+    setSongAssetBase(assetBase ?? '');
+    setSongAssets(assets);
     /* 并行预热（与 200ms 淡出重叠进行）：渲染器代码块（首局需下载+解析 three /
      * 2D 渲染器）+ 皮肤资产。预热完成前不启动音频时钟 —— 否则弱机/慢网下画布
      * 尚未挂载、黑屏期间谱面时间已在走，玩家会白丢开头的判定窗口。 */
@@ -704,10 +783,14 @@ export function App() {
       // offset is not part of it (AudioManager applies the offset internally).
       const firstNoteTime = getFirstNoteTime(chartData);
       const leadIn = Math.max(0, 2 - firstNoteTime);
-      // 时钟不在这里启动：挂起为 pending，等画布渲染出第一帧（onFirstFrame）再
-      // play()。等待期间画布以 t=0 渲染场景（resetClock 保证回退值为 0），
-      // 挂载/初始化/首帧的耗时全部落在时钟启动之前。
+      // 时钟不在这里启动：挂起为 pending，等「画布首帧 + 故事板预热完成」再 play()
+      // （见 maybeStartAudio）。resetClock 让等待期的 getCurrentTime() 回退到 0；
+      // 画布据此以 gameTime 渲染——下面把 gameTime 置为 -leadIn（预滚动位），于是
+      // 等待期画面停在 lead-in 起点、且完全不做判定（不再闪一帧被judge 的 t=0 帧）。
       globalAudio.resetClock();
+      firstFrameRef.current = false;
+      // 无故事板、或 lite 渲染器（不挂载故事板宿主）→ 没有预热，立即可启动。
+      storyboardReadyRef.current = !storyboardUrl || lite;
       pendingAudioStartRef.current = { startSec: 0, leadIn };
       audioStartFallbackRef.current = window.setTimeout(startPendingAudio, 5000);
 
@@ -726,7 +809,9 @@ export function App() {
       } else {
         setCurrentSongInfo(null);
       }
-      setGameTime(0);
+      // 预滚动位（lead-in 起点）：等待期画布以它渲染；音频一旦启动 getCurrentTime()
+      // 也正好从这里（-leadIn）开始 —— 两者无缝衔接，不再闪一帧 t=0 的帧。
+      setGameTime(-leadIn);
       setPlaySession((s) => s + 1);
       setGameState('playing');
       setTransitionPhase('fade-in');
@@ -1051,6 +1136,53 @@ export function App() {
       await updateSongById(sid, kind === 'bgImage' ? { bgImage: ref } : kind === 'bgVideo' ? { bgVideo: ref } : { storyboard: ref });
     }
   }, [editorTarget]);
+
+  /**
+   * 编辑器「导出 zip」：导出**我眼前这份**。
+   *
+   * 两个要点（都来自实际踩坑）：
+   * 1. 谱面取`chartJson`（编辑器实时、未保存的内容），绝不从 idb 读旧版本；
+   * 2. **不要求绑定歌曲** —— 自由编辑器/新建谱面照样能导出，只是包里只有谱面。
+   *    绑定了本地歌曲才会带上音频/封面/背景/故事板/外部资源，并导出全部难度。
+   *
+   * 难度定位用 `editorTarget.selectedDiffIndex`（编辑器打开的是哪一档就覆盖哪一档），
+   * 不能假定是第 0 档 —— 多难度歌曲上那会覆盖错档。
+   */
+  const handleExportEditorZip = useCallback(
+    async (chartJson: string) => {
+      const target = editorTarget;
+      const chart = currentChart;
+      // 难度名/等级：优先用编辑目标携带的（与库一致），否则从谱面 metadata 解析。
+      const dmeta = parseDifficultyMeta(chart?.metadata?.difficulty || target?.diffName || 'Custom');
+      const song = target?.songId ? await findSongById(target.songId) : null;
+      // 音频：编辑器「导入音频」只落在内存（customAudioFileRef）+ idb
+      // （currentAudioRefRef），**不会**写回 song.audio —— 不显式覆盖就会把旧音频打进包。
+      const liveAudio =
+        customAudioFileRef.current ??
+        (currentAudioRefRef.current ? await getFile(currentAudioRefRef.current.replace(/^idb:\/\//, '')) : null);
+      const spec = await specFromChart({
+        chartJson,
+        title: target?.songTitle || chart?.metadata?.title || 'Untitled',
+        artist: target?.songArtist || chart?.metadata?.artist || '',
+        bpm: chart?.metadata?.bpm || target?.bpm || 120,
+        accentColor: target?.accentColor,
+        diffName: target?.diffName || dmeta.name,
+        diffLevel: dmeta.level,
+        song,
+        diffIndex: target?.selectedDiffIndex ?? -1,
+        audioOverride: liveAudio,
+        audioExtHint: liveAudio ? audioExtOf(liveAudio) : undefined,
+      });
+      const built = await downloadSongZip(spec, spec.dir);
+      // 用 showAppToast（自带定时清除）—— 直接 setAppToast 不会自动消失。
+      showAppToast(
+        built.skipped.length
+          ? t('editor.exportZipPartial', { name: spec.dir })
+          : t('editor.exportZipDone', { name: spec.dir, n: built.fileCount }),
+      );
+    },
+    [editorTarget, currentChart, t, showAppToast],
+  );
 
   // 卸载已挂载的歌曲媒体（编辑器「导入与导出」✕ 按钮）：实时预览同步清除 + 写回库。
   const handleDetachEditorMedia = useCallback((kind: 'bgImage' | 'bgVideo' | 'storyboard') => {
@@ -1398,31 +1530,43 @@ export function App() {
     judgementFlushRafRef.current = requestAnimationFrame(tick);
   }, [applyJudgement]);
 
+  // Pause-only, idempotent. Used both by the manual pause button and the
+  // auto-pause-on-blur/visibilitychange handler. Never resumes — so a second
+  // focus-loss event (e.g. visibilitychange + blur firing together) can't
+  // accidentally kick off the resume countdown.
+  const pauseGame = useCallback(() => {
+    // Only meaningful while actively playing: ignore if already paused, in the
+    // menu, in the editor, or after the song has ended (fade-out / clear-banner
+    // phase where pausing would break the menu transition).
+    if (gameStateRef.current !== 'playing' || songEndedRef.current) return;
+    // 暂停浮层会显示当前成绩：先把节流缓冲里的判定应用掉，避免显示滞后。
+    flushJudgements();
+    // flushJudgements 只更新 statsRef；HUD rAF 在暂停时会停，这里补写一次 DOM。
+    writeHudFromStats();
+    globalAudio.pause();
+    // 玩家在首帧等待窗口内暂停：接管时钟控制，丢弃挂起的自动启动。
+    clearPendingAudioStart();
+    if (countdownTimerRef.current) {
+      window.clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    setCountdownVal(null);
+    // Capture live position so resume (globalAudio.play(gameTime)) is exact.
+    // Gameplay no longer updates gameTime every frame, so snapshot it here.
+    const liveT = globalAudio.getCurrentTime();
+    setGameTime(liveT);
+    setProgressScale(progressRef.current, liveT / (chartDurationRef.current || 1));
+    setGameState('paused');
+  }, [flushJudgements, writeHudFromStats]);
+
   // Pause / Resume with 3s countdown
   const handleTogglePause = () => {
     // Never allow pausing after the song has ended — the game is already in
     // the fade-out / clear-banner phase and about to transition to menu.
     if (songEndedRef.current) return;
-    // 暂停浮层会显示当前成绩：先把节流缓冲里的判定应用掉，避免显示滞后。
-    flushJudgements();
-    // flushJudgements 只更新 statsRef；HUD rAF 在暂停时会停，这里补写一次 DOM。
-    writeHudFromStats();
     // If playing, pause instantly and cancel any existing countdowns
     if (gameState === 'playing') {
-      globalAudio.pause();
-      // 玩家在首帧等待窗口内暂停：接管时钟控制，丢弃挂起的自动启动。
-      clearPendingAudioStart();
-      if (countdownTimerRef.current) {
-        window.clearInterval(countdownTimerRef.current);
-        countdownTimerRef.current = null;
-      }
-      setCountdownVal(null);
-      // Capture live position so resume (globalAudio.play(gameTime)) is exact.
-      // Gameplay no longer updates gameTime every frame, so snapshot it here.
-      const liveT = globalAudio.getCurrentTime();
-      setGameTime(liveT);
-      setProgressScale(progressRef.current, liveT / (chartDurationRef.current || 1));
-      setGameState('paused');
+      pauseGame();
     }
     // If paused, we can toggle countdown resume
     else if (gameState === 'paused') {
@@ -1456,6 +1600,21 @@ export function App() {
       }
     }
   };
+
+  // 网页失焦 / 切到后台时自动暂停游戏。仅当游戏进行中（gameState==='playing'）
+  // 生效：暂停浮层已显示、在菜单、编辑器或曲终阶段都不会触发。pauseGame 本身
+  // 幂等，visibilitychange 与 blur 同时触发时第二次调用直接返回，不会误开恢复倒计时。
+  // 注意这里刻意**只暂停不恢复**——回到前台需玩家手动点"继续"（与常规游戏手感一致）。
+  useEffect(() => {
+    const onVisibility = () => { if (document.hidden) pauseGame(); };
+    const onBlur = () => pauseGame();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [pauseGame]);
 
   const handleEditorTogglePlay = () => {
     if (editorPreviewPlaying) {
@@ -2117,6 +2276,8 @@ export function App() {
           ambientBgRef={ambientBgRef}
           bgMedia={gameState === 'editor' || disableExtraContent ? undefined : bgMedia}
           projectorRef={gameProjectorRef}
+          gameCanvasRef={gameCanvasRef}
+          storyboardBridge={storyboardPointerBridge}
           viewportActive={viewportActive}
           isPlaying={gameState === 'playing' || (gameState === 'editor' && editorPreviewPlaying)}
           isPaused={gameState === 'paused'}
@@ -2141,7 +2302,7 @@ export function App() {
           snapSubdivision={snapSubdivision}
           onJudgement={handleJudgementStable}
           onSongEnd={handleSongEnd}
-          onFirstFrame={startPendingAudio}
+          onFirstFrame={handleFirstFrame}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
           onPlaceEditorNote={(x: number, y: number) => {
@@ -2198,7 +2359,7 @@ export function App() {
           autoPlay={autoPlay}
           onJudgement={handleJudgementStable}
           onSongEnd={handleSongEnd}
-          onFirstFrame={startPendingAudio}
+          onFirstFrame={handleFirstFrame}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
           onPlaceEditorNote={handlePlaceEditorNote}
@@ -2263,10 +2424,17 @@ export function App() {
           bgSlotRef={storyBgRef}
           overlaySlotRef={storyOverlayRef}
           gameViewportRef={gameViewportRef}
+          gameCanvasRef={gameCanvasRef}
+          hudRef={hudLayerRef}
+          pointerBridge={storyboardPointerBridge}
+          resolveAssetUrl={resolveStoryboardAsset}
+          songAssetBase={songAssetBase}
+          songAssets={songAssets}
           projectorRef={gameProjectorRef}
           statsRef={statsRef}
           chartRef={currentChartRef}
           fallbackTimeRef={storyboardFallbackTimeRef}
+          onReady={handleStoryboardReady}
           storyUrl={disableExtraContent || gameState === 'menu' ? undefined : storyUrl}
           playSession={playSession}
           playing={gameState === 'playing'}
@@ -2276,6 +2444,7 @@ export function App() {
 
       {/* ── UI 层：游戏内 / 编辑器 UI 全屏铺满，仅靠 safe-area 避开刘海/灵动岛；不再有 2:1 强行限制 ── */}
       <div
+        ref={hudLayerRef}
         className="absolute inset-0 z-10 pointer-events-none"
         style={{
           paddingTop: 'env(safe-area-inset-top, 0px)',
@@ -2356,6 +2525,7 @@ export function App() {
           onExitEditor={handleReturnToMenu}
           onSaveToLocal={handleSaveChartToLocal}
           onAttachMedia={handleAttachEditorMedia}
+          onExportZip={handleExportEditorZip}
           onDetachMedia={handleDetachEditorMedia}
           onStartPlayTest={handleStartPlayTest}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
@@ -2623,7 +2793,7 @@ export function App() {
             onOpenEditor={handleOpenVisualEditor}
             onLaunchChartEditor={handleLaunchChartEditor}
             onSwitchLite={() => { window.location.href = 'lite/index.html'; }}
-            onStartGame={(chart, hasAudio, songId, scoreKey, diffName, bgMedia, storyboardUrl) => handleStartGame(chart, hasAudio, songId, scoreKey, diffName, bgMedia, storyboardUrl)}
+            onStartGame={(chart, hasAudio, songId, scoreKey, diffName, bgMedia, storyboardUrl, assetBase, songAssets) => handleStartGame(chart, hasAudio, songId, scoreKey, diffName, bgMedia, storyboardUrl, assetBase, songAssets)}
             onStateChange={handleSongSelectStateChange}
           />
         </div>

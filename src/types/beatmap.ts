@@ -50,6 +50,17 @@ export interface SongItem {
   bgVideo?: string;
   /** 故事板脚本（约定 `story.js`，尚未实现；索引先记录占位）。 */
   storyboard?: string;
+  /**
+   * 故事板的**外部资源**：`相对路径 → 可fetch 的地址`（§3.7 v3 `api.assets`）。
+   *
+   * 用途："约定之外"的数据文件。来源优先级：
+   *   1. `info.json` 的 `assets: [...]` 显式声明（推荐，打包方可控）；
+   *   2. 缺省：与 `story.js` 同目录的额外 `.json`（排除 info.json 与谱面）。
+   *
+   * 地址形态随来源而变：在线/静态托管为 URL（相对索引根或绝对），
+   * zip 导入 / 下载到本地为 `idb://` 引用 —— 宿主 `api.assets` 两种都能读。
+   */
+  assets?: Record<string, string>;
   basePath: string;
   difficulties: DifficultyEntry[];
   source?: BeatmapSource;

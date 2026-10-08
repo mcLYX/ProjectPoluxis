@@ -13,6 +13,7 @@ import {
   AudioLines,
   Image as ImageIcon,
   FileJson,
+  FileArchive,
 } from 'lucide-react';
 import type { BeatmapItem } from '../types/beatmap';
 import { useI18n } from '../i18n';
@@ -40,6 +41,10 @@ export interface FloatingActionBarProps {
   onSave: () => void;
   onCancelEdit: () => void;
   onDownload: () => void;
+  /** 导出整首歌曲为 zip；仅本地库歌曲可用（在线曲资源在远端，打包无意义）。 */
+  onExportZip?: () => void;
+  /** 正在打包（菜单项显示转圈并禁用）。 */
+  exportingZip?: boolean;
 }
 
 export default function FloatingActionBar(props: FloatingActionBarProps) {
@@ -59,6 +64,8 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
     onSave,
     onCancelEdit,
     onDownload,
+  onExportZip,
+  exportingZip,
   } = props;
 
   const { t } = useI18n();
@@ -135,6 +142,10 @@ export default function FloatingActionBar(props: FloatingActionBarProps) {
     if (expandedItem && expandedItem.type === 'song') {
       items = [
         { key: 'importChart', label: t('fab.importChart'), icon: <FileJson size={18} />, onClick: () => pick('chart') },
+        // 本地库歌曲才给"导出 zip"：在线曲的资源在远端服务器，打出来的包是空的。
+        ...(onExportZip
+          ? [{ key: 'exportZip', label: exportingZip ? t('fab.exportingZip') : t('songcard.exportZip'), icon: <FileArchive size={18} />, onClick: onExportZip }]
+          : []),
         { key: 'changeAudio', label: t('fab.changeAudio'), icon: <AudioLines size={18} />, onClick: () => pick('audio') },
         { key: 'changeCover', label: t('fab.changeCover'), icon: <ImageIcon size={18} />, onClick: () => pick('cover') },
         { key: 'editChart', label: t('fab.editChart'), icon: <FileJson size={18} />, onClick: onEditChart },

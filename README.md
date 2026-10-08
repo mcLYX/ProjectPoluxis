@@ -371,10 +371,19 @@ export default {
 - `api.notes(fromSec, toSec)` —— 整谱音符切片（开局缓存，不进热路径），用来让演出与谱面「共舞」。
 - `api.toScreen(x, y)` / `api.safeZone(margin)` —— 判定面坐标 → 画布像素；中央判定区留给音符与打击特效，发光元素请排在其外。
 - `api.audio.levels()` —— 实时频谱（⚠️ 非 seek 安全，仅用于非关键调制）。
+- `api.audio.setMasterEffect({ gain, lowpassHz, highpassHz, q })` —— **主输出总效果（写入侧）**：音乐 / 音效 / 打击音统一走这条链，可压低音量做低通（"隔着介质听"）。每帧调用安全（宿主内部脏检查 + 平滑，不会产生 zipper noise）。重开局 / 切歌 / 卸载时宿主自动复位。
 - `api.onJudge` / `api.onSeek` / `api.onPlayState` / `api.onEnd` —— 事件订阅，均返回退订函数。
-- `api.game.style({ opacity, filter, transform })` —— 受限地调整游戏画布本身的视觉（白名单三个键，seek / 重开局时宿主自动复位）。
+- `api.game.style({ opacity, filter, transform })` / `api.hud.style(...)` —— 受限地调整**游戏画布**与 **HUD** 的视觉（同一套白名单三个键）。故事板层恒在 HUD 之下（z-5 vs z-10），想把 HUD 一起卷进画面效果只能走 `api.hud`。
+- `api.input` —— 指针观测与判定拦截：`pointers`（判定面坐标 + 画布像素，每帧原地刷新）、`setPointerFilter(fn)`（返回 false = 该指针不参与任何判定，多个拦截器 AND，回调异常按放行处理）、`releasePointerBindings(id)`（解除该指针在所有 slide 上的绑定 = "立即脱手"）。仅 3D 渲染器有数据。
+- `api.assets.json(path)` / `.fetch(path)` / `.url(path)` —— **歌曲目录相对资源**。故事板在 zip / 本地库场景是以 `blob:` URL 加载的，内部 `fetch('./x.json')` 必然失败，所以相对路径由宿主按歌曲 basePath 解析（在线与本地目录谱面行为一致；zip 导入的歌曲不收录约定外文件，会明确 reject，故事板应自行降级）。
+- `api.scene` —— **游戏画面快照**。宿主每次 `update` 之前把游戏画布按 `scale`（默认 1/6）缩放复制到一张 2D 画布，故事板可 `texImage2D(..., canvas)` 当纹理用。用途：让"域内透出被位移 + 块量化的背景"这类效果**限定在域内**（CSS `filter` 只能作用于整个元素，做不到）。`scene.enabled = false` 即完全零开销。
+- `api.chartData` —— 原始谱面只读引用。⚠️ **不要依赖它承载自定义数据**：`shared/chartSchema` 会逐字段重建 metadata 与顶层结构，未声明的自定义键会被剥离；给故事板传数据请走 `api.assets`。
 
 `api.snapshot` 是**同一对象每帧原地刷新**，读到的永远是最新值，不要持有旧引用。
+
+> 一个现成的例子：`temp/noise-domain-mv/` 是模仿 Phigros「噪域」的故事板 demo（噪域拦截触点并
+> 永久污染、压低音量 + 4kHz 低通、扭曲含 HUD 的后方画面、纯 JSON 驱动多噪域生命周期），
+> 用上面这些接口从零搭起来，可直接 `node temp/noise-domain-mv/scripts/build.mjs` 构建。
 
 ---
 

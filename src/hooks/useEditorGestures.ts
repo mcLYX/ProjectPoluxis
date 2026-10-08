@@ -16,7 +16,12 @@ export type CommitJudgementFn = (note: ResolvedNote, j: JudgementType, dtMs: num
  * 实现逐字搬移，依赖经 ctx 注入；commitJudgement 由 useJudgeSystem 提供。行为零变化。
  */
 export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: CommitJudgementFn) => {
-  const handlePointerInteraction = (px: number, py: number): void => {
+  /**
+   * `pointerId` 为可选：透传后由**玩法分支自己**查 `ctx.isPointerBlocked` 收口
+   * （故事板判定拦截，§3.7 v3）。收口点选在这里而不是调用处的原因：判定入口只有
+   * 这一条，集中在判定层可避免"漏一处就能打出音"；编辑器分支天然不受影响。
+   */
+  const handlePointerInteraction = (px: number, py: number, pointerId?: number): void => {
     if (ctx.isEditorModeRef.current) {
       const tool = ctx.activeToolRef.current;
       if (tool === 'place-tap' || tool === 'place-touch' || tool === 'place-slide') {
@@ -73,6 +78,9 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
 
     // Normal Gameplay: tap hit — earliest note wins when windows overlap
     if (!ctx.isPlayingRef.current || ctx.isPausedRef.current) return;
+    /* 故事板判定拦截（§3.7 v3）：被拦截的指针不产生任何 tap 判定。
+       放在这里（而非调用处）是为了让"判定入口"只有这一处收口。 */
+    if (pointerId !== undefined && ctx.isPointerBlocked?.(pointerId)) return;
     // Read audio time directly from the audio clock. Must NOT use gameTimeRef
     // here because React.memo skips gameTime prop updates during playback →
     // ref stays at initial value → all notes appear outside the hit window →

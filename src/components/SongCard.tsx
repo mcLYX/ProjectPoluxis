@@ -216,7 +216,7 @@ export const SongCard: React.FC<SongCardProps> = ({
   onEditFieldChange,
   onDeleteDifficulty,
   onSave,
-}) => {
+  }) => {
   const { t } = useI18n();
   const [coverError, setCoverError] = useState(false);
   const [showDiffMenu, setShowDiffMenu] = useState(false);

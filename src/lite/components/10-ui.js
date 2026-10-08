@@ -711,31 +711,6 @@
     buildMenu(1); /* different list — a real rebuild is required here */
   }
 
-  /* Selecting a card widens it (120px → 208px, animated), so one picked near the
-   * right edge of the row would otherwise stay half-clipped. Nudge the row once
-   * the width transition has settled — measuring any earlier still reports the
-   * old width. getBoundingClientRect + scrollLeft both work in IE9+. */
-  function ensureCardVisible(el) {
-    window.setTimeout(function () {
-      /* Clicking on to another card within the delay would otherwise scroll the
-       * row towards a card that is no longer expanded. */
-      if (el.className.indexOf('selected') < 0) return;
-      var max = chartListEl.scrollWidth - chartListEl.clientWidth;
-      if (max <= 0) return;
-      var c = el.getBoundingClientRect();
-      var v = chartListEl.getBoundingClientRect();
-      var pad = 12;
-      var delta = 0;
-      if (c.left < v.left + pad) delta = c.left - (v.left + pad);
-      else if (c.right > v.right - pad) delta = c.right - (v.right - pad);
-      if (!delta) return;
-      var next = chartListEl.scrollLeft + delta;
-      if (next < 0) next = 0;
-      else if (next > max) next = max;
-      chartListEl.scrollLeft = next;
-    }, 300);
-  }
-
   /* Apply the current selection to the already-rendered cards. */
   function syncSelection() {
     activeStartBtn = null;
@@ -772,7 +747,8 @@
         if (!isAlbum) activeStartBtn = el.querySelector('.card-start');
       }
     }
-    if (selEl) ensureCardVisible(selEl);
+    /* 注意：这里不再调用 ensureCardVisible —— 选中卡片后**不**把轮播滚动到完整可见，
+     * 卡片原地展开（用户要求去掉“超出屏幕就瞬移”的行为）。 */
   }
 
   /* `dir` selects the list-transition direction (1 = drilled in, -1 = back). */

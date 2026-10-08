@@ -1,6 +1,58 @@
 import { NoteType } from '../types/game';
 import { clamp } from '../utils/math';
 import { readBodyWithProgress } from '../utils/bodyProgress';
+import type { StoryboardMasterEffect } from '../types/storyboard';
+
+/** 主输出总效果的旁路默认值（= "什么都不做"）。 */
+export const MASTER_EFFECT_RESET: Required<StoryboardMasterEffect> = {
+  gain: 1,
+  lowpassHz: 20000,
+  highpassHz: 20,
+  q: 1,
+};
+
+/** 频率下限（20Hz 以下人耳几乎无感，且 biquad 在极低频处数值不稳）。 */
+const MIN_HZ = 20;
+/** 频率上限：20kHz ≈ 无滤波（Nyquist 附近再高也没有可听的差别）。 */
+const MAX_HZ = 20000;
+
+/**
+ * 纯函数（便于单测）：把故事板给的主输出效果裁剪到安全范围。
+ *
+ * - `gain` → 0~1（超过 1 交给宿主自己 clamp 到 0~1.5，避免把游戏直接静音到无声也
+ *   不至于把用户音量顶爆）；
+ * - 截止频率 → 20~20000（20000 视作旁路；低端夹到 20，滤掉基本没用的超低频）；
+ * - `q` → 0.0001~30（Q 过高会自激振荡啸叫）。
+ *
+ * 非数值一律沿用 `prev`，并保证至少低通不高于高通（否则等于把频谱挖空成静音的
+ * " 既不是低通也不是高通"状态，容易被误当成 bug）。
+ */
+export function clampMasterEffect(
+  effect: StoryboardMasterEffect | null | undefined,
+  prev: Required<StoryboardMasterEffect>,
+): Required<StoryboardMasterEffect> {
+  const out: Required<StoryboardMasterEffect> = { ...prev };
+  if (!effect || typeof effect !== 'object') return out;
+  if (typeof effect.gain === 'number' && Number.isFinite(effect.gain)) {
+    out.gain = clamp(effect.gain, 0, 1);
+  }
+  if (typeof effect.lowpassHz === 'number' && Number.isFinite(effect.lowpassHz)) {
+    out.lowpassHz = clamp(effect.lowpassHz, MIN_HZ, MAX_HZ);
+  }
+  if (typeof effect.highpassHz === 'number' && Number.isFinite(effect.highpassHz)) {
+    out.highpassHz = clamp(effect.highpassHz, MIN_HZ, MAX_HZ);
+  }
+  if (typeof effect.q === 'number' && Number.isFinite(effect.q)) {
+    out.q = clamp(effect.q, 0.0001, 30);
+  }
+  // 频率窗不能倒挂。
+  if (out.highpassHz > out.lowpassHz) {
+    const mid = (out.highpassHz + out.lowpassHz) / 2;
+    out.highpassHz = mid;
+    out.lowpassHz = mid;
+  }
+  return out;
+}
 
 /** 加载阶段上报：下载中（含已下/总长）或解码中。供 UI 显示
  *  「音频 42%」/「解码中」，避免网络慢时只有一个笼统的「加载中」。 */
@@ -15,6 +67,15 @@ export class AudioManager {
   private masterGain: GainNode | null = null;
   private bgmGain: GainNode | null = null;
   private sfxGain: GainNode | null = null;
+  /* §3.7 v3：主输出总效果链（故事板 api.audio.setMasterEffect 写入侧）。
+     拓扑：masterGain → postFilter(lowpass|highpass) → postGain → destination。
+     放在 masterGain **之后** 是为了"音乐 + 音效 + 打击音"作为一个整体被处理
+     （故事板要的是"整个声场被介质吃掉"的效果）；analyser 仍旁路挂在 masterGain 上，
+     保证 api.audio.levels() 读到的是**未被故事板改动**的原始频谱。 */
+  private postFilter: BiquadFilterNode | null = null;
+  private postGain: GainNode | null = null;
+  /** 总效果的当前生效值（脏检查用：值未变则完全不碰音频参数）。 */
+  private masterEffect: Required<StoryboardMasterEffect> = { ...MASTER_EFFECT_RESET };
   /** 表现层频谱分析节点（§3.7 v2：故事板 api.audio）。挂在主输出上做旁路，
    *  不接入 destination —— 纯观测，不改变任何音频路由与音量。 */
   private analyser: AnalyserNode | null = null;
@@ -108,7 +169,16 @@ export class AudioManager {
       this.ctx = new AC();
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.value = 0.9;
-      this.masterGain.connect(this.ctx.destination);
+      // 主输出总效果链：默认全旁路（低通 20k / 高通 20 / 增益 1），听感与旧拓扑一致。
+      this.postFilter = this.ctx.createBiquadFilter();
+      this.postFilter.type = 'lowpass';
+      this.postFilter.frequency.value = MAX_HZ;
+      this.postFilter.Q.value = this.masterEffect.q;
+      this.postGain = this.ctx.createGain();
+      this.postGain.gain.value = this.masterEffect.gain;
+      this.masterGain.connect(this.postFilter);
+      this.postFilter.connect(this.postGain);
+      this.postGain.connect(this.ctx.destination);
 
       this.bgmGain = this.ctx.createGain();
       this.bgmGain.gain.value = this.musicVolume;
@@ -431,6 +501,40 @@ export class AudioManager {
     if (this.sfxGain && this.ctx) {
       this.sfxGain.gain.setTargetAtTime(this.effectVolume, this.ctx.currentTime, 0.015);
     }
+  }
+
+  /**
+   * 主输出总效果（§3.7 v3；故事板 `api.audio.setMasterEffect`）。
+   *
+   * **每帧调用安全**：先钳制（`clampMasterEffect`），再与当前值做脏检查 ——
+   * 值未变直接返回，不碰任何音频参数。这一点很关键：故事板习惯在 `update()` 里
+   * 无条件下发，若无脑 `setTargetAtTime` 每帧重算，会产生可听的 zipper noise。
+   * 真正变化时用 `setTargetAtTime`（时间常数 0.04s ≈ 60ms 过渡）避免爆音。
+   *
+   * 与 `setMusicVolume` 等用户设置是**乘法关系**（本节点在 masterGain 之后），
+   * 因此不会覆盖玩家的音量选择。
+   */
+  public setMasterEffect(effect: StoryboardMasterEffect): void {
+    const next = clampMasterEffect(effect, this.masterEffect);
+    const cur = this.masterEffect;
+    const unchanged =
+      next.gain === cur.gain &&
+      next.lowpassHz === cur.lowpassHz &&
+      next.highpassHz === cur.highpassHz &&
+      next.q === cur.q;
+    if (unchanged) return;
+    this.masterEffect = next;
+    if (!this.ctx || !this.postFilter || !this.postGain) return;
+    const t = this.ctx.currentTime;
+    const TC = 0.04;
+    this.postFilter.frequency.setTargetAtTime(next.lowpassHz, t, TC);
+    this.postFilter.Q.setTargetAtTime(next.q, t, TC);
+    this.postGain.gain.setTargetAtTime(next.gain, t, TC);
+  }
+
+  /** 复位为原声（重开局 / 切歌 / 故事板卸载时由宿主调用）。 */
+  public resetMasterEffect(): void {
+    this.setMasterEffect(MASTER_EFFECT_RESET);
   }
 
   /** Load an uploaded audio file. Clears forceSynth flag so play() uses the buffer. */

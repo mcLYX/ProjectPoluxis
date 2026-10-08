@@ -36,10 +36,12 @@ import {
   moveSong,
   moveAlbum,
   downloadSongToLibrary,
+  findSongById,
   getSongParentAlbumId,
 } from '../data/libraryStore';
 import { storeFile, generateId } from '../data/idb';
 import { importZip, importLooseFiles, parseChartMeta, resolveDifficulty } from '../data/zipImport';
+import { specFromSong, downloadSongZip } from '../data/zipExport';
 import { onServersChanged } from '../data/onlineServers';
 import { globalAudio } from '../audio/AudioManager';
 import { useI18n } from '../i18n';
@@ -140,10 +142,15 @@ interface SongSelectProps {
   onToggleAutoPlay: () => void;
   onOpenSettings: () => void;
   onOpenEditor: () => void;
-  /** 由卡片发起“编辑谱面/新建谱面”，携带上下文信息。 */
+  /** 由卡片发起"编辑谱面/新建谱面"，携带上下文信息。 */
   onLaunchChartEditor: (info: EditorLaunchInfo) => void;
   onSwitchLite: () => void;
-  onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, scoreKey: string, diffName: string, bgMedia?: { image?: string; video?: string }, storyboardUrl?: string) => void;
+  /* assetBase：歌曲目录的**绝对**地址前缀，供故事板 api.assets 解析相对资源
+     （§3.7 v3）。由所选难度的 chartFile（清单规范化时已重写成绝对地址）反推目录，
+     比直接用 song.basePath 可靠 —— 后者没有被规范化重写。 */
+  /* songAssets：歌曲的外部资源映射（相对路径 → idb:// 或 URL）。zip 导入 /
+     下载到本地时指向 idb，离线也能读；在线时可能为空（回退到 assetBase拼接）。 */
+  onStartGame: (chart: ChartData, hasAudio: boolean, songId: string, scoreKey: string, diffName: string, bgMedia?: { image?: string; video?: string }, storyboardUrl?: string, assetBase?: string, songAssets?: Record<string, string>) => void;
   onStateChange?: (state: SongSelectNavState) => void;
 }
 
@@ -152,7 +159,7 @@ type ViewDepth = 'root' | 'album';
 export interface SongSelectNavState {
   viewDepth: ViewDepth;
   currentAlbumId: string | null;
-  /** 专辑导航栈（从根到当前），用于支持嵌套专辑与“上一级 / 回根目录”。 */
+  /** 专辑导航栈（从根到当前），用于支持嵌套专辑与"上一级 / 回根目录"。 */
   albumStack?: string[];
   expandedId: string | null;
   selectedDifficulties: Record<string, number>;
@@ -343,7 +350,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
         setManifest(base);
         const cur = getCurrentServer();
         if (cur) {
-          // 会话内已同步过（缓存命中）则不重新 fetch、不显示“同步中”；仅
+          // 会话内已同步过（缓存命中）则不重新 fetch、不显示"同步中"；仅
           // 首次/切换服务器（缓存 key 变化）时才真正同步。
           const cached = hasOnlineManifestCache(cur.id);
           setSyncingOnline(!cached);
@@ -641,12 +648,19 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     const bgMedia = await resolveSongBgMedia(song);
     /* 故事板脚本（约定命名 story.js，§3.7）：解析为可 import() 的地址后交给宿主。 */
     const storyboardUrl = await resolveStoryboardUrl(song);
+    /* 歌曲目录绝对基址（§3.7 v3 故事板 api.assets）：由所选难度的 chartFile 反推。
+       chartFile 在清单规范化阶段已按索引根重写为绝对地址，因此取它的目录部分即得
+       歌曲目录；idb://（zip 导入的本地库歌曲）会得到不可 fetch 的基址，App 侧会
+       以明确原因 reject，故事板据此降级。 */
+    const chartUrl = diff.chartFile || '';
+    const slash = chartUrl.lastIndexOf('/');
+    const assetBase = slash > 0 ? chartUrl.slice(0, slash) : '';
 
     /* 一切就绪且无在途预载 → 直接开局，不闪加载展示。 */
     if (audioReady && chartReady && !previewPending) {
       globalAudio.stop();
       startingSongIdRef.current = null;
-      onStartGame(previewChart!.chart, !!song.audio, song.id, getScoreKey(song.id, song.source), diff.name, bgMedia, storyboardUrl);
+      onStartGame(previewChart!.chart, !!song.audio, song.id, getScoreKey(song.id, song.source), diff.name, bgMedia, storyboardUrl, assetBase, song.assets);
       return;
     }
 
@@ -694,7 +708,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
       setStartPhase(null);
       // 关卡已交出去：关闭阶段闸门，避免之后的预览预载继续写状态。
       startingSongIdRef.current = null;
-      onStartGame(chart, hasAudio, song.id, getScoreKey(song.id, song.source), diff.name, bgMedia, storyboardUrl);
+      onStartGame(chart, hasAudio, song.id, getScoreKey(song.id, song.source), diff.name, bgMedia, storyboardUrl, assetBase, song.assets);
     } catch (e) {
       if (stale()) return; // 过期会话不得复位新会话的闸门/状态
       console.error('Failed to start game:', e);
@@ -933,12 +947,55 @@ export const SongSelect: React.FC<SongSelectProps> = ({
 
   const handleCancelEdit = () => { setEditId(null); setEditDraft(null); };
 
+  /**
+   * 卡片「导出 zip」：把整首本地歌曲打包下载。
+   *
+   * 仅本地库歌曲可导出 —— 在线曲目的资源在远端服务器，把URL 打进包里毫无意义
+   * （导入侧也读不到）。所以这里对非local 来源直接提示而不产出无用的包。
+   * 编辑态里的内联改动（标题/难度列表）先落库再导出，保证包与库一致。
+   */
+  const [exportingZipId, setExportingZipId] = useState<string | null>(null);
+  const handleExportZip = async (item: BeatmapItem) => {
+    if (item.type !== 'song' || exportingZipId) return;
+    if (item.source !== 'local') {
+      showToast(t('songcard.exportZipLocalOnly'));
+      return;
+    }
+    setExportingZipId(item.id);
+    try {
+      const song = await findSongById(item.id);
+      if (!song) throw new Error(t('songcard.exportZipFailed'));
+      const spec = await specFromSong(song);
+      const built = await downloadSongZip(spec, spec.dir);
+      showToast(
+        built.skipped.length
+          ? t('songcard.exportZipPartial', { name: spec.dir })
+          : t('songcard.exportZipDone', { name: spec.dir, n: built.fileCount }),
+      );
+    } catch (err) {
+      showToast(t('songcard.exportZipFailed'));
+      console.error('导出 zip 失败', err);
+    } finally {
+      setExportingZipId(null);
+    }
+  };
+
+  /**
+   * 右下角「管理」菜单里的「导出 zip」回调（仅本地库歌曲才有该入口）。
+   * 在线曲目不提供：资源在远端服务器，打出来的包是空的。
+   */
+  const fabExportZip = (() => {
+    const it = expandedItem;
+    if (!it || it.type !== 'song' || it.source !== 'local') return undefined;
+    return () => handleExportZip(it);
+  })();
+
   const handleMove = () => {
     if (!expandedItem) return;
     setClipboard({ id: expandedItem.id, kind: expandedItem.type, fromAlbumId: currentAlbumId });
     setEditId(null);
     setEditDraft(null);
-    // 收起卡片，使底栏出现“粘贴”（粘贴仅在卡片收起时可进行）。
+    // 收起卡片，使底栏出现"粘贴"（粘贴仅在卡片收起时可进行）。
     setExpandedId(null);
   };
 
@@ -993,7 +1050,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   const currentAllowsEdit = !currentAlbum || currentAlbum.source === 'local';
   let fabMode: 'add' | 'edit' | 'download' | 'none' = 'none';
   if (expandedItem) {
-    // 在根目录展开“内置/在线”专辑时，仍可新建内容（创建到根目录），
+    // 在根目录展开"内置/在线"专辑时，仍可新建内容（创建到根目录），
     // 而不是被折叠成"无操作"。
     const isRootAlbum = expandedItem.type === 'album' && viewDepth === 'root';
     if (isRootAlbum && expandedItem.source !== 'local') {
@@ -1014,7 +1071,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
   }
   const fabVisible = fabMode !== 'none' && !result;
 
-  // 剪贴板内容标题，用于在左侧“粘贴”按钮上显示是什么（跨整个 manifest 查找，不受当前视图限制）。
+  // 剪贴板内容标题，用于在左侧"粘贴"按钮上显示是什么（跨整个 manifest 查找，不受当前视图限制）。
   const clipboardItem: BeatmapItem | null = (() => {
     if (!clipboard || !manifest?.items) return null;
     const stack: BeatmapItem[] = [...manifest.items];
@@ -1334,6 +1391,8 @@ export const SongSelect: React.FC<SongSelectProps> = ({
             onSave={handleSave}
             onCancelEdit={handleCancelEdit}
             onDownload={() => handleDownload()}
+            onExportZip={fabExportZip}
+            exportingZip={!!expandedItem && exportingZipId === expandedItem.id}
           />
         </div>
       </div>

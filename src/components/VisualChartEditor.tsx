@@ -128,6 +128,12 @@ interface VisualChartEditorProps {
    * App 侧负责存储、实时预览与写回库；此处只透传文件。抛错时显示在 fileError。
    */
   onAttachMedia?: (kind: 'bgImage' | 'bgVideo' | 'storyboard', file: File) => Promise<void> | void;
+  /**
+   * 「导出 zip」：把当前编辑目标歌曲整包导出（谱面/音频/封面/背景/故事板/外部资源）。
+   * App 侧负责读 idb、拼 info.json 并触发下载；此处只透传当前谱面内容。
+   * 抛错时显示在 fileError。
+   */
+  onExportZip?: (chartJson: string) => Promise<void> | void;
   /** 卸载已挂载的背景/故事板（实时预览同步清除 + 写回库）。错误由实现方兜底。 */
   onDetachMedia?: (kind: 'bgImage' | 'bgVideo' | 'storyboard') => void;
   onStartPlayTest: (fromCurrentBeat: boolean) => void;
@@ -361,6 +367,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   onExitEditor,
   onSaveToLocal,
   onAttachMedia,
+  onExportZip,
   onDetachMedia,
   onStartPlayTest,
   viewMode,
@@ -1829,6 +1836,25 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  /**
+   * 「导出 zip」：把**当前未保存**的谱面交给 App 整包导出。
+   * 传exportChartJson(chart) 而非让App 从 idb 读 —— 编辑器里的改动可能还没落盘，
+   * 导出的包理应是"我眼前这份"。
+   */
+  const [exportingZip, setExportingZip] = useState(false);
+  const handleExportZip = async () => {
+    if (!onExportZip || exportingZip) return;
+    setExportingZip(true);
+    try {
+      await onExportZip(exportChartJson(chart));
+      setFileError(null);
+    } catch (err) {
+      setFileError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExportingZip(false);
+    }
+  };
+
   // Panel drag via window listeners — robust in WebViews where
   // setPointerCapture is dropped when the element re-renders mid-drag.
   const onPanelPointerDown = (e: React.PointerEvent) => {
@@ -2407,7 +2433,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
                 <span className="flex items-center gap-1.5"><FileDown size={12} /> {t('editor.importExport')}</span>
                 <span className="text-cyan-300/80">{sectionOpen.importExport ? '−' : '+'}</span>
               </button>
-              {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button><div className="pt-1 mt-1 border-t border-white/10 space-y-1.5"><p className="text-[10px] text-white/40 leading-snug">{t('editor.attachMediaHint')}</p>{([['bgImage', t('editor.attachBgImage'), 'image/*'], ['bgVideo', t('editor.attachBgVideo'), 'video/mp4,video/*'], ['storyboard', t('editor.attachStoryboard'), '.js,text/javascript']] as const).map(([kind, label, accept]) => (<div key={kind} className="flex items-center gap-1"><label className="flex-1 min-w-0 text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {label}<input type="file" accept={accept} onChange={(e) => handleMediaUpload(kind, e)} className="hidden" /></label>{onDetachMedia && <button onClick={() => onDetachMedia(kind)} className="shrink-0 px-2 py-1.5 rounded glass-btn border-white/15 text-white/50 hover:text-red-300 transition cursor-pointer" title={t('editor.detachMedia')}><X size={11} /></button>}</div>))}</div></div>}
+              {sectionOpen.importExport && <div className="p-3 space-y-1.5 border-t border-white/10">{fileError && <div className="text-red-400 text-[10px]">{fileError}</div>}<label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importAudio')}<input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" onChange={handleAudioUpload} className="hidden" /></label><label className="block w-full text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {t('editor.importChartJson')}<input type="file" accept=".json,application/json" onChange={handleChartUpload} className="hidden" /></label><button onClick={handleDownloadJson} className="w-full py-1.5 rounded glass-btn-primary font-bold transition cursor-pointer"><Download size={12} className="inline mr-1" /> {t('editor.exportJson')}</button>{onExportZip && <><button onClick={handleExportZip} disabled={exportingZip} className="w-full py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 transition cursor-pointer font-bold disabled:opacity-50 disabled:cursor-wait"><Download size={12} className="inline mr-1" /> {exportingZip ? t('songcard.loading') : t('editor.exportZip')}</button><p className="text-[10px] text-white/40 leading-snug">{t('editor.exportZipHint')}</p></>}<div className="pt-1 mt-1 border-t border-white/10 space-y-1.5"><p className="text-[10px] text-white/40 leading-snug">{t('editor.attachMediaHint')}</p>{([['bgImage', t('editor.attachBgImage'), 'image/*'], ['bgVideo', t('editor.attachBgVideo'), 'video/mp4,video/*'], ['storyboard', t('editor.attachStoryboard'), '.js,text/javascript']] as const).map(([kind, label, accept]) => (<div key={kind} className="flex items-center gap-1"><label className="flex-1 min-w-0 text-center py-1.5 rounded glass-btn border-cyan-500/30 text-cyan-300 hover:text-cyan-200 cursor-pointer font-bold"><Upload size={12} className="inline mr-1" /> {label}<input type="file" accept={accept} onChange={(e) => handleMediaUpload(kind, e)} className="hidden" /></label>{onDetachMedia && <button onClick={() => onDetachMedia(kind)} className="shrink-0 px-2 py-1.5 rounded glass-btn border-white/15 text-white/50 hover:text-red-300 transition cursor-pointer" title={t('editor.detachMedia')}><X size={11} /></button>}</div>))}</div></div>}
             </div>
 
             <button

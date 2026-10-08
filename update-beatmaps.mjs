@@ -214,6 +214,19 @@ async function scanAlbums() {
       if (bgImage) song.bgImage = bgImage;
       if (bgVideo) song.bgVideo = bgVideo;
       if (storyboard) song.storyboard = storyboard;
+      // 故事板外部资源（"约定之外"的文件）：
+      // info.json 的 `assets: [...]` **显式声明为准**（未声明时由宿主回落到
+      // "story.js 同目录"拼 URL 读取）。这里转成 相对路径 → 相对 beatmaps 根 的映射，
+      // 与 zip 导入的 `assets` 形态一致，于是 api.assets 可以直接命中而不用猜。
+      if (info && Array.isArray(info.assets) && info.assets.length) {
+        const assetMap = {};
+        for (const rel of info.assets) {
+          if (typeof rel !== 'string' || !rel) continue;
+          const p = songRel(albumName, songName, rel);
+          if (p) assetMap[rel.replace(/^\.\//, '')] = p;
+        }
+        if (Object.keys(assetMap).length) song.assets = assetMap;
+      }
 
       // 解析所有难度
       if (infoDiffs) {
@@ -233,8 +246,12 @@ async function scanAlbums() {
               } catch (e) { /* 读取失败不影响导入 */ }
             }
           }
+          // 与"约定命名"分支保持一致：名字里自带 "Lv.N" 时剥掉，
+          // 否则 level 再拼一次会显示成 "Viewing Lv.7 Lv.7"。
+          const rawName = d.name || DIFFICULTY_NAMES[i] || `D${i + 1}`;
+          const cleanName = rawName.replace(/\s*Lv\.?\s*\d+\s*/i, '').trim() || rawName;
           song.difficulties.push({
-            name: d.name || DIFFICULTY_NAMES[i] || `D${i + 1}`,
+            name: cleanName,
             level: level,
             chartFile: chartFile,
           });

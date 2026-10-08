@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ChartData, ResolvedNote, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
-import type { JudgeProjector } from '../types/storyboard';
+import type { JudgeProjector, StoryboardPointerBridge, StoryboardRawPointer } from '../types/storyboard';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt } from '../utils/chartRuntime';
@@ -92,8 +92,28 @@ interface GameCanvasProps {
   defaultSkinJudgeWidth?: number;
   /** 画布后方的环境背景 DOM 层（App 内 `ambientBgRef`）。bg_change 事件据此实时更新渐变。 */
   ambientBgRef?: React.RefObject<HTMLDivElement | null>;
-  /** 判定面→屏幕投影函数的回写目标（故事板宿主经 `api.toScreen` 消费）。 */
+  /**
+   * 判定面→屏幕投影函数的回写目标（故事板宿主经 `api.toScreen` 消费）。
+   */
   projectorRef?: React.RefObject<JudgeProjector | null>;
+  /**
+   * **游戏画布**回写目标（§3.7 v4 的 `api.scene` 依赖它）。
+   *
+   * 存在的理由：宿主原本用 `querySelector('canvas')` 去猜游戏画布，但渲染器重建
+   * 时容器里可能残留旧画布（见 setup 里 `querySelector('canvas')?.remove()`），
+   * 猜错就会把**故事板自己的画布**当成游戏画面抓回来 → 逐帧自我反馈累积
+   * （实机症状：域内"大量历史帧糊成一块"，且越玩越亮）。
+   * 由渲染器显式回写，宿主就不必猜。
+   */
+  gameCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  /**
+   * 指针桥（§3.7 v3）：本组件是**唯一数据源**（每帧把 `pointersRef` 挂上去供宿主
+   * 产出 `api.input` 快照），同时执行宿主下发的命令（`releaseBindings` 立即脱手）
+   * 并同步读取 `blockedIds` 作为判定拦截依据。
+   * 传对象本身而非 ref：桥的身份恒定、字段是活的，直接传更直白（ref 只为"延迟创建"
+   * 才需要）。缺省 = 无故事板，零额外开销。
+   */
+  storyboardBridge?: StoryboardPointerBridge;
   /**
    * 背景媒体（歌曲目录约定 bg.jpg / bga.mp4，开局由 App 解析传入）。
    * 渲染优先级：video > image > 内置渐变；bg_change 事件只改渐变色，不再切换媒体。
@@ -109,6 +129,10 @@ const TOUCH_HIT_HALF = 1.0;
 const SLIDE_RED = '#ff0000';
 /** 图层偏移的零值（旧谱面恒为此），避免热路径分配。 */
 const ZERO_OFF = { x: 0, y: 0 };
+/** 指针桥的"空指针集"：故事板未挂载 / 组件卸载后桥上挂这个，宿主无需判空。 */
+const EMPTY_POINTERS: ReadonlyMap<number, StoryboardRawPointer> = new Map();
+/** 桥的默认"立即脱手"实现（无桥时的空操作）。 */
+const noopReleaseBindings = (): void => undefined;
 
 const CAMERA_VFOV = 52;
 // --- 渲染 / HUD 调参常量（P2-2：消除魔法数字）---
@@ -652,6 +676,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   skinTextures,
   ambientBgRef,
   projectorRef,
+  gameCanvasRef,
+  storyboardBridge,
   defaultSkinInnerEnabled = true,
   defaultSkinOuterEnabled = false,
   defaultSkinOuterWidth = 0.05,
@@ -1508,11 +1534,11 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const dist0 = fitCameraDistance(w / h);
     camera.position.set(0, CAMERA_AXIS_Y, dist0); camera.lookAt(0, CAMERA_AXIS_Y, 0); cameraRef.current = camera;
 
-    // 判定面 → 屏幕投影器（故事板 `api.toScreen` 消费）：用主相机实时 project，
-    // bloom / 分辨率 / 相机参数变化都天然正确。坐标返回画布 CSS 像素。
-    if (projectorRef) {
+    // 判定面 → 屏幕投影器（故事板 `api.toScreen` / `api.input` 的 sx·sy 消费）：
+    // 用主相机实时 project，bloom / 分辨率 / 相机参数变化都天然正确。坐标返回画布 CSS 像素。
+    {
       const projV = new THREE.Vector3();
-      projectorRef.current = (x: number, y: number) => {
+      const projector: JudgeProjector = (x: number, y: number) => {
         const cam = cameraRef.current;
         if (!cam) return { sx: 0, sy: 0 };
         projV.set(x, y, JUDGE_Z).project(cam);
@@ -1522,6 +1548,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           sy: (1 - (projV.y * 0.5 + 0.5)) * (el?.clientHeight ?? 0),
         };
       };
+      if (projectorRef) projectorRef.current = projector;
+      // 指针桥复用同一个投影器（§3.7 v3）：故事板不必自己投影指针坐标。
+      if (storyboardBridge) storyboardBridge.project = projector;
     }
     // 抗锯齿 / 渲染倍率由传入的细项控制（自定义档位下由用户决定）。
     const useAA = antialiasRef.current;
@@ -1548,6 +1577,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const existingCanvas = container.querySelector('canvas');
     if (existingCanvas) existingCanvas.remove();
     container.appendChild(renderer.domElement); rendererRef.current = renderer;
+    // 把真实画布回写给宿主（§3.7 v4 api.scene 用它抓画面，不猜 querySelector）
+    if (gameCanvasRef) gameCanvasRef.current = renderer.domElement;
     // 注册截图函数：结算分享时抓取当前游戏画面（不把 3D 模块静态引入首屏）。
     setCanvasCapturer(() => {
       const r = rendererRef.current;
@@ -1899,6 +1930,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       runningRef.current = false;
       window.removeEventListener('resize', onResize);
       if (projectorRef) projectorRef.current = null;
+      // 同理清画布回写：否则渲染器卸载后宿主仍会抓一个已脱离文档的旧画布
+      if (gameCanvasRef) gameCanvasRef.current = null;
       resetPlayState();
       // Dispose legacy EffectComposer resources
       if (composerRef.current) { composerRef.current.dispose(); composerRef.current = null; }
@@ -2045,8 +2078,15 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     if (rc.ray.intersectPlane(plane, hit)) {
       const isTouchLike = pointerType === 'touch' || pointerType === 'pen';
       const active = isTouchLike ? down : true;
-      pointersRef.current.set(pointerId, { x: hit.x, y: hit.y, down, active, type: pointerType });
-      if (down && dragPointerIdRef.current === null) {
+      // §3.7 v3 故事板**判定拦截**：被 blockedIds 列出的指针不参与任何判定。
+      // 故事板仍然要观测它（要画触点光斑/污染反馈），所以照常写快照，
+      // 只是把 down 语义降级为"仅观测"—— 不进判定、不绑 slide、不拖拽。
+      //
+      // ⚠️ 这一环缺了的话，故事板侧再怎么标记污染都无效：拦截结果只写进
+      //    bridge.blockedIds，游戏侧不查就等于没拦（实测"挡不住判定"）。
+      const blocked = !!storyboardBridge && down && storyboardBridge.blockedIds.has(pointerId);
+      pointersRef.current.set(pointerId, { x: hit.x, y: hit.y, down: down && !blocked, active, type: pointerType });
+      if (down && !blocked && dragPointerIdRef.current === null) {
         dragPointerIdRef.current = pointerId;
         pointerDownStartRef.current = { x: hit.x, y: hit.y };
         // Start a fresh drag: reset throttled-commit tracking so the first move
@@ -2068,6 +2108,42 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       if (isDraggingRef.current) dragFinalCommitRef.current = true;
       isDraggingRef.current = false;
     }
+  };
+
+  /* ====== 指针桥（§3.7 v3）======
+     宿主（StoryboardHost）需要两样东西：①每帧的指针集合（判定面坐标）②判定面→屏幕
+     投影。二者都不是"每帧计算"的东西，所以这里把已有的 refs / 投影器**挂到桥上**，
+     宿主每帧只做一次同步（零分配）。反向命令只有一条：releaseBindings（立即脱手）。 */
+  useEffect(() => {
+    const bridge = storyboardBridge;
+    if (!bridge) return;
+    bridge.pointers = pointersRef.current;
+    bridge.releaseBindings = (pointerId: number) => {
+      // 解除该指针在所有 slide 上的绑定 → 正在滑的滑条立即脱手（下一帧判 Miss）。
+      // 幂等：Set.delete 对不存在的 id 无副作用；遍历期间不改 slideStateRef 的结构。
+      slideStateRef.current.forEach((rt) => {
+        rt.boundPointerIds.delete(pointerId);
+      });
+    };
+    return () => {
+      bridge.pointers = EMPTY_POINTERS;
+      bridge.project = null;
+      bridge.releaseBindings = noopReleaseBindings;
+      bridge.blockedIds.clear();
+    };
+  }, [storyboardBridge]);
+
+  /** 该指针当前是否被故事板拦截（不参与任何判定）。仅游玩态生效 —— 编辑器不该被故事板夺权。 */
+  const isPointerBlocked = (pointerId: number): boolean => {
+    if (isEditorModeRef.current) return false;
+    const b = storyboardBridge;
+    if (!b) return false;
+    // ⚠️ 必须**同步重算**：tap 判定在 pointerdown 事件回调里就查这里，而宿主平时
+    // 只在 rAF 里更新 blockedIds → 第一次按下读到的是上一帧结论，必然漏判
+    //（实测"故事板挡不住 tap"）。syncBlocked 幂等且零分配，每次 tap 多一次
+    // 几条指针的过滤循环，可忽略。
+    b.syncBlocked?.();
+    return b.blockedIds.has(pointerId);
   };
 
   const isAnyPointerInside = (x: number, y: number, half: number): boolean => {
@@ -2220,6 +2296,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       return layerColorAt(tree, layerIdxOf(n), n.timeSec, global);
     },
     makeRingMesh, pickProj, projSize, chartTimeToBeat,
+    // 故事板判定拦截（§3.7 v3）：与 tap 入口读同一判定源（指针桥的 blockedIds）。
+    isPointerBlocked,
   };
   const spawnBurst = useNoteEffects(judgeCtx);
   const { commitJudgement, getSlideRt, processSlide } = useJudgeSystem(judgeCtx, spawnBurst);
@@ -2347,7 +2425,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     lastTickPerfRef.current = performance.now();
     const scene = sceneRef.current; const camera = cameraRef.current; const renderer = rendererRef.current;
     if (!scene || !camera || !renderer) return;
-    const playing = isPlayingRef.current && !isPausedRef.current;
+    // 音频时钟**真正在走**才算在播：开局 App 会先把 gameState 置为 'playing'、等首帧
+    // 与（故事板）预热完成才 play()，这段等待期 getCurrentTime() 返回陈旧的 pauseTime
+    // （0）。若只按 isPlaying 判定，会在 t=0 闪帧上跑判定（0 拍前的音符直接掉、
+    // autoplay 打掉这一帧），且画布以 t=0 渲染一帧。加上 isRunning() 后，等待期
+    // playing=false → 用 gameTime 渲染（App 置为 -leadIn 的预滚动位）、判定全部关闭。
+    const playing = isPlayingRef.current && !isPausedRef.current && globalAudio.isRunning();
     // Read audio time DIRECTLY from the audio clock (AudioContext.currentTime)
     // when playing, NOT from the gameTime prop. The prop is piped through React
     // state in the parent's rAF which is throttled to ~30fps (frame % 2 === 0)
@@ -3546,7 +3629,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           e.preventDefault();
           return;
         }
-        handlePointerInteraction(p.x, p.y);
+        /* pointerId 透传给判定层：故事板的判定拦截（§3.7 v3）在 tap 判定入口收口，
+           指针本身仍留在 pointersRef 里（故事板要靠它画反馈），过滤只发生在判定侧。 */
+        handlePointerInteraction(p.x, p.y, e.pointerId);
       }}
       onContextMenu={(e) => {
         /* 编辑器内屏蔽系统右键菜单：右键已被赋予「取消选中」语义。

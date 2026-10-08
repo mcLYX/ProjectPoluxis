@@ -132,7 +132,65 @@ async function storeEntry(entry: ZipEntry): Promise<string> {
 }
 
 /**
- * 解析 info.json / 约定命名里相对歌曲目录的路径 → 组内条目的 idb:// 引用。
+ * 约定缺省：与 `story.js` **同目录**的额外 `.json`（排除 `info.json` 与谱面本身）。
+ * 显式 `assets` 声明时不用这个。
+ */
+function conventionalAssetEntries(group: GroupedSong): ZipEntry[] {
+  const sbDir = (() => {
+    const sb = group.entries.find((e) => tailName(group, e.name).toLowerCase() === 'story.js');
+    if (!sb) return '';
+    const n = tailName(group, sb.name);
+    const i = n.lastIndexOf('/');
+    return i >= 0 ? n.slice(0, i + 1) : '';
+  })();
+  return group.entries.filter((e) => {
+    const rel = tailName(group, e.name);
+    if (sbDir && !rel.startsWith(sbDir)) return false;
+    if (!/^[^/]+\.json$/i.test(rel)) return false; // 只收同目录直属的 .json
+    return true;
+  });
+}
+
+/**
+ * 故事板外部资源 → `相对路径 → idb:// 引用` 的部分字段（可直接展开进 SongItem）。
+ *
+ * 规则（与用户约定一致）：
+ * - `info.json` 的 `assets: [...]` **显式声明为准**；
+ * - 未声明（或声明为空）时回落到约定命名 = story.js 同目录的额外 `.json`。
+ * 无论哪种都存进 idb，所以离线 / zip 导入后不需要外网也能读到。
+ */
+async function extraAssetsSuffix(
+  group: GroupedSong,
+  declared: unknown,
+  _storyboardRef: string,
+): Promise<{ assets?: Record<string, string> }> {
+  const list = Array.isArray(declared)
+    ? (declared as unknown[]).filter((v): v is string => typeof v === 'string' && !!v)
+    : [];
+  const entries = list.length
+    ? // 显式声明：按声明的相对路径在组内找条目
+      (list
+        .map((rel) => {
+          const clean = rel.replace(/^\.?\//, '').toLowerCase();
+          return group.entries.find((e) => tailName(group, e.name).toLowerCase() === clean);
+        })
+        .filter((e): e is ZipEntry => !!e))
+    : conventionalAssetEntries(group);
+  const assets: Record<string, string> = {};
+  for (const e of entries) {
+    const rel = tailName(group, e.name);
+    const lower = rel.toLowerCase();
+    if (lower === 'info.json') continue;
+    // 跳过谱面文件本身（约定名N.json / *.aff 等），它们不是"外部资源"
+    if (CONV_CHART_RE.test(lower)) continue;
+    const ref = await storeEntry(e);
+    if (ref) assets[rel] = ref;
+  }
+  return Object.keys(assets).length ? { assets } : {};
+}
+
+/**
+ * 按 info.json / 约定命名里相对歌曲目录的路径 → 组内条目的 idb:// 引用。
  * 远程地址（http/blob/idb）原样保留；找不到返回 ''。
  */
 async function resolveGroupRef(group: GroupedSong, relPath: string): Promise<string> {
@@ -184,6 +242,9 @@ async function buildSongFromInfo(group: GroupedSong, info: Record<string, unknow
     ...(bgImageRef ? { bgImage: bgImageRef } : {}),
     ...(bgVideoRef ? { bgVideo: bgVideoRef } : {}),
     ...(storyboardRef ? { storyboard: storyboardRef } : {}),
+    // 故事板外部资源：info.json 的 `assets: [...]` **显式声明为准**；
+    // 未声明时回落到约定（story.js 同目录的额外 .json，排除 info.json 与谱面）。
+    ...(await extraAssetsSuffix(group, info.assets, storyboardRef)),
     basePath: '',
     difficulties,
   };
@@ -257,6 +318,8 @@ async function buildSong(group: GroupedSong, fallbackTitle: string): Promise<Son
     ...(bgImageRef ? { bgImage: bgImageRef } : {}),
     ...(bgVideoRef ? { bgVideo: bgVideoRef } : {}),
     ...(storyboardRef ? { storyboard: storyboardRef } : {}),
+    // 这条路径没有 info.json（即无显式声明）→ 直接用约定缺省。
+    ...(await extraAssetsSuffix(group, undefined, storyboardRef)),
     basePath: '',
     difficulties,
   };
@@ -291,6 +354,20 @@ export async function readChartMeta(file: File): Promise<ChartMetaLite | null> {
   }
 }
 
+/**
+ * 约定缺省（扁平条目形态）：除 info.json / 谱面外的直属 .json。
+ * zip 内manifest 分支拿不到 GroupedSong（无 folder 前缀概念），故按列表处理。
+ */
+function defaultAssetEntriesOf(entries: ZipEntry[], tailOf: (name: string) => string): ZipEntry[] {
+  return entries.filter((e) => {
+    const rel = tailOf(e.name);
+    if (!/^[^/]+\.json$/i.test(rel)) return false;
+    const lower = rel.toLowerCase();
+    if (lower === 'info.json') return false;
+    if (CONV_CHART_RE.test(lower)) return false;
+    return true;
+  });
+}
 /** 将 beatmaps.json 中的相对文件路径解析为 zip 内对应文件的 idb:// 引用。 */
 async function resolveZipFileRef(
   raw: unknown,
@@ -335,6 +412,27 @@ async function normalizeZipManifest(raw: unknown, entryMap: Map<string, ZipEntry
         (Array.isArray(o.difficulties) ? (o.difficulties as unknown[]) : []).map(normDifficulty),
       ),
     ]);
+    // 故事板外部资源：zip 内manifest 显式声明的 assets 优先，否则约定缺省。
+    let assets: Record<string, string> | undefined;
+    if (o.assets && typeof o.assets === 'object' && !Array.isArray(o.assets)) {
+      assets = {};
+      for (const [rel, v] of Object.entries(o.assets as Record<string, unknown>)) {
+        const ref = await resolveZipFileRef(v, entryMap);
+        if (ref) assets[rel] = ref;
+      }
+      if (!Object.keys(assets).length) assets = undefined;
+    } else {
+      const flat = Array.from(entryMap.values());
+      const picked = defaultAssetEntriesOf(flat, (n) => n.replace(/^.*\//, ''));
+      if (picked.length) {
+        assets = {};
+        for (const e of picked) {
+          const ref = await resolveZipFileRef(e.name, entryMap);
+          if (ref) assets[e.name.replace(/^.*\//, '')] = ref;
+        }
+        if (!Object.keys(assets).length) assets = undefined;
+      }
+    }
     return {
       type: 'song',
       id,
@@ -347,6 +445,7 @@ async function normalizeZipManifest(raw: unknown, entryMap: Map<string, ZipEntry
       ...(bgImage ? { bgImage } : {}),
       ...(bgVideo ? { bgVideo } : {}),
       ...(storyboard ? { storyboard } : {}),
+      ...(assets ? { assets } : {}),
       basePath: '',
       difficulties,
     };

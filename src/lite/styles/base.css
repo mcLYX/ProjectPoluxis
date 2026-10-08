@@ -444,6 +444,30 @@
       transition: background 160ms ease, border-color 160ms ease;
     }
     .modal-close:hover { background: rgba(6, 182, 212, 0.22); border-color: rgba(6, 182, 212, 0.7); }
+    /* 设置弹窗：固定顶栏（标题 + 关闭），**不**随内容上下滑动；内容在 .modal-body 内独立
+     * 滚动。仅作用于 #settings-modal，编辑器弹窗保持原 overflow 行为不变。 */
+    #settings-modal .modal-card {
+      padding: 0;
+      display: -ms-flexbox; display: flex; -ms-flex-direction: column; flex-direction: column;
+      overflow: hidden;
+    }
+    #settings-modal .modal-head {
+      -ms-flex: 0 0 auto; flex: 0 0 auto;
+      display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center;
+      -ms-flex-pack: justify; justify-content: space-between;
+      padding: 18px 22px 12px;
+      background: rgba(14, 27, 56, 0.99);
+      border-bottom: 1px solid rgba(6, 182, 212, 0.18);
+      border-radius: 18px 18px 0 0;
+    }
+    #settings-modal .modal-body {
+      -ms-flex: 1 1 auto; flex: 1 1 auto; overflow-y: auto;
+      padding: 8px 22px 22px; box-sizing: border-box;
+    }
+    #settings-modal .modal-title { margin: 0; padding-right: 0; }
+    #settings-modal .modal-close {
+      position: static; -ms-flex: 0 0 auto; flex: 0 0 auto;
+    }
     /* Explanatory line under a settings row (e.g. the frame-rate cap tradeoff). */
     .modal-hint { font-size: 11px; color: #94a3b8; line-height: 1.5; margin: -2px 0 10px 0; }
     .modal-row { display: -ms-flexbox; display: flex; -ms-flex-align: center; align-items: center; -ms-flex-pack: justify; justify-content: space-between; margin: 10px 0; font-size: 13px; color: #cbd5e1; }

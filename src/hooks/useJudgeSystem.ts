@@ -138,7 +138,13 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
     const rt = getSlideRt(note.id, allNodes.length);
 
     const pointers: SlideJudgePointer<number>[] = [];
+    /* 故事板判定拦截（§3.7 v3）：被拦截的指针不参与 slide 判定 —— 既不能绑新节点，
+       也不会被判为命中。与 tap 入口（useEditorGestures）读同一个判定源，
+       三处（tap / slide 指针表 / 绑定脱手）因此不会出现行为分叉。
+       未注入 isPointerBlocked = 不拦截（旧行为逐字不变）。 */
+    const blocked = ctx.isPointerBlocked;
     for (const [pid, p] of ctx.pointersRef.current) {
+      if (blocked && blocked(pid)) continue;
       pointers.push({ id: pid, x: p.x, y: p.y, down: p.down });
     }
 
