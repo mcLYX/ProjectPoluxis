@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { QualityMode } from './types/game';
+import { safeStorage } from './utils/storage';
 
 /**
  * R4-6：quality 渲染设置切片（qualityMode + 5 个 custom*），从 App 根 state 下沉。
@@ -9,8 +10,10 @@ import type { QualityMode } from './types/game';
  *   位于 React 树之外，只有订阅的组件（SettingsModal / App）才会随设置变化重渲染，
  *   GameCanvas 通过 React.memo 保持隔离。
  * - `set` 逐字段去重：无变化不 emit，避免订阅组件无谓重渲染。
- * - `init` 幂等：App 首渲染前以 loadSettings() 结果初始化一次，之后不再覆盖
- *   （保持与持久化设置一致）。
+ * - `init` 幂等：App 首渲染前调用一次，store 自行从 `poluxis-settings` 读取画质
+ *   切片；`set` 时立即回写同一 key 的画质字段（读-改-写，不动 App 的其余字段）。
+ *   因此画质设置是**单一真相**：`App.tsx` 的 DEFAULT_SETTINGS 不再包含画质字段，
+ *   新增一个画质开关只需改本文件。
  * - 取值全部为低频稳定项（仅设置弹窗修改），游戏过程中不变化，因此无性能风险。
  */
 export interface QualityState {
@@ -64,6 +67,64 @@ const DEFAULT_QUALITY: QualityState = {
   maxFps: 60,
 };
 
+/** 画质切片的字段名（同时也是写入 localStorage 的键名）。 */
+const QUALITY_KEYS: Array<keyof QualityState> = [
+  'qualityMode',
+  'customAntialias',
+  'customBloom',
+  'customParticles',
+  'customDynamicLighting',
+  'customHitEffects',
+  'customRenderScale',
+  'maxFps',
+];
+
+/** 与 App 共用的设置持久化 key：App 只写非画质字段，本 store 只写画质字段。 */
+const SETTINGS_KEY = 'poluxis-settings';
+
+/**
+ * 读取持久化设置中的画质切片。
+ * 逐字段比对默认值类型，丢弃非法项（持久化数据可能来自旧版本或被外部改写）。
+ */
+function readPersisted(): Partial<QualityState> {
+  const out: Partial<QualityState> = {};
+  try {
+    const raw = safeStorage.getItem(SETTINGS_KEY);
+    if (!raw) return out;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return out;
+    const src = parsed as Record<string, unknown>;
+    for (const k of QUALITY_KEYS) {
+      const v = src[k];
+      if (typeof v === typeof DEFAULT_QUALITY[k]) (out as Record<string, unknown>)[k] = v;
+    }
+  } catch {
+    /* JSON 损坏 / 隐私模式：整体走默认值 */
+  }
+  return out;
+}
+
+/**
+ * 只回写画质切片，保留同一 key 下 App 负责的其余设置。
+ *
+ * 采用「读-改-写」而非整体覆盖：两侧共用 `poluxis-settings`，整体覆盖会清掉
+ * 对方的字段（App 保存音画/皮肤设置、本 store 保存画质设置）。
+ */
+function writePersisted(s: QualityState): void {
+  try {
+    const raw = safeStorage.getItem(SETTINGS_KEY);
+    let base: Record<string, unknown> = {};
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+    }
+    for (const k of QUALITY_KEYS) base[k] = s[k];
+    safeStorage.setItem(SETTINGS_KEY, JSON.stringify(base));
+  } catch {
+    /* 配额 / 隐私模式：忽略，设置仅在本次会话内生效 */
+  }
+}
+
 let state: QualityState = { ...DEFAULT_QUALITY };
 let initialized = false;
 const listeners = new Set<() => void>();
@@ -83,11 +144,17 @@ function emit(): void {
 }
 
 export const qualityStore = {
-  /** 幂等初始化：仅首次调用生效（App 首渲染前以持久化设置调用）。 */
-  init(initial: QualityState): void {
+  /**
+   * 幂等初始化：仅首次调用生效，由 App 首渲染前调用一次。
+   *
+   * 持久化由本 store 自行负责（不再由 App 传入画质字段），故这里直接读取
+   * `poluxis-settings` 中的画质切片。
+   */
+  init(): void {
     if (initialized) return;
     initialized = true;
-    const next: QualityState = { ...initial };
+    const persisted = readPersisted();
+    const next: QualityState = { ...DEFAULT_QUALITY, ...persisted };
     // 无 WebGL 时强制 2D 渲染器：覆盖持久化设置里的 3D 档位（该档位在此设备上
     // 根本无法工作）。有 WebGL 时完全不改动用户设置。
     if (hasNoWebGL()) next.qualityMode = 'lite';
@@ -105,6 +172,14 @@ export const qualityStore = {
       }
     }
     state = next;
+    // 回填（预设有效值）或强制覆盖（无 WebGL → lite）可能让实际状态偏离持久化值；
+    // 此时立即落盘，保持「常驻展示 = 真实渲染 = 下次启动」三者一致。
+    for (const k of QUALITY_KEYS) {
+      if (next[k] !== persisted[k]) {
+        writePersisted(state);
+        break;
+      }
+    }
   },
   /** 返回当前快照（对象引用仅在 set 时更换，满足 useSyncExternalStore 缓存要求）。 */
   getSnapshot: (): QualityState => state,
@@ -126,6 +201,7 @@ export const qualityStore = {
     }
     if (!changed) return;
     state = { ...state, ...patch };
+    writePersisted(state);
     emit();
   },
 };

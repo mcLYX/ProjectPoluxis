@@ -25,7 +25,7 @@ import { storeFile, storeFileDedup, getFile, generateId } from './data/idb';
 import { getAlbumById, createAlbum, addSong, findSongById, findAlbumTitleForSong, addDifficultyToSong, updateDifficultyOfSong, updateSongById } from './data/libraryStore';
 import { resolveBeatmapUrl, parseDifficultyMeta, resolveStoryboardUrl, resolveCoverUrl } from './data/beatmapLoader';
 import { specFromChart, downloadSongZip, audioExtOf } from './data/zipExport';
-import type { QualityMode, SkinTextureSet, SkinImageSet } from './types/game';
+import type { SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { editorTimeStore } from './editorTimeStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
@@ -86,16 +86,8 @@ const DEFAULT_SETTINGS = {
   projectionLeadMs: 500,
   noteRenderDistance: 70,
   noteSizeScale: 1.0,
-  qualityMode: 'standard' as QualityMode,
-  // 自定义档位下的各项画面特效开关与渲染倍率。
-  customAntialias: true,
-  customBloom: true,
-  customParticles: true,
-  customDynamicLighting: true,
-  customHitEffects: true,
-  customRenderScale: 1.0,
-  // 渲染帧率上限（0 = 不限帧）。默认 60：高刷屏上省电明显，视觉影响很小。
-  maxFps: 60,
+  // 画质设置（qualityMode / custom* / maxFps）不在此处：它们是 `qualityStore` 的
+  // 单一真相，由该 store 自行持久化到同一个 `poluxis-settings` key。
   musicVolume: 0.8,
   effectVolume: 0.5,
   // 兼容模式（HarmonyOS 弱设备音频时钟停滞时）：谱面走墙钟、音频跟随谱面校准。
@@ -145,9 +137,24 @@ function loadSettings(): typeof DEFAULT_SETTINGS {
   }
 }
 
+/**
+ * 保存 App 负责的设置。
+ *
+ * 与 `qualityStore` 共用 `poluxis-settings`：画质字段由 store 自行维护，故这里必须
+ * 「读-改-写」——只覆盖本函数收到的字段，保留持久化对象里的其余字段，否则每次保存
+ * 都会把画质设置清掉。
+ */
 function saveSettings(settings: typeof DEFAULT_SETTINGS) {
   try {
-    safeStorage.setItem('poluxis-settings', JSON.stringify(settings));
+    const raw = safeStorage.getItem('poluxis-settings');
+    let base: Record<string, unknown> = {};
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+    }
+    const src = settings as unknown as Record<string, unknown>;
+    for (const k of Object.keys(src)) base[k] = src[k];
+    safeStorage.setItem('poluxis-settings', JSON.stringify(base));
   } catch (e) { /* ignore quota / private mode errors */ }
 }
 
@@ -179,17 +186,9 @@ export function App() {
   const { platform, ready } = usePlatform();
   const initialSettings = loadSettings();
   // R4-6: quality 渲染设置切片下沉到模块级 qualityStore（App 根 state 之外）。
-  // 幂等初始化；SettingsModal/App 经 useQuality 订阅，GameCanvas 仍以 props 接收。
-  qualityStore.init({
-    qualityMode: initialSettings.qualityMode,
-    customAntialias: initialSettings.customAntialias,
-    customBloom: initialSettings.customBloom,
-    customParticles: initialSettings.customParticles,
-    customDynamicLighting: initialSettings.customDynamicLighting,
-    customHitEffects: initialSettings.customHitEffects,
-    customRenderScale: initialSettings.customRenderScale,
-    maxFps: initialSettings.maxFps,
-  });
+  // 幂等初始化 + 自持久化（见 qualityStore）；SettingsModal/App 经 useQuality
+  // 订阅，GameCanvas 仍以 props 接收。
+  qualityStore.init();
   const quality = useQuality();
   // 当前正在进行的谱面加载请求（用于防快速切歌覆盖 / 卸载取消，P2-9）。
   const loadChartAbortRef = useRef<AbortController | null>(null);
@@ -596,11 +595,10 @@ export function App() {
     }
     saveSettings({
       speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance,
-      noteSizeScale, qualityMode: quality.qualityMode, customAntialias: quality.customAntialias, customBloom: quality.customBloom,
-      customParticles: quality.customParticles, customDynamicLighting: quality.customDynamicLighting, customHitEffects: quality.customHitEffects, customRenderScale: quality.customRenderScale, maxFps: quality.maxFps, musicVolume, effectVolume, compatMode, disableExtraContent,
+      noteSizeScale, musicVolume, effectVolume, compatMode, disableExtraContent,
       selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth
     });
-  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, quality, musicVolume, effectVolume, compatMode, disableExtraContent, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
+  }, [speedMultiplier, audioOffsetMs, projectionLeadMs, noteRenderDistance, noteSizeScale, musicVolume, effectVolume, compatMode, disableExtraContent, selectedSkinId, defaultSkinInnerEnabled, defaultSkinOuterEnabled, defaultSkinOuterWidth, defaultSkinOuterColor, defaultSkinOuterAlpha, defaultSkinJudgeWidth]);
 
   // 皮肤资产按需加载（去重 + 可等待）：key = 皮肤 id | 渲染器种类。
   // - 菜单态不加载：避免把 three 拉进首屏（保持原有约束）；
@@ -2240,6 +2238,30 @@ export function App() {
   // 3D preview is off.
   const viewportActive = !(gameState === 'editor' && editorViewMode === '2d' && !editorPreview3D);
 
+  /**
+   * 3D 画布 `onPlaceEditorNote` 的**稳定适配层**。
+   *
+   * 3D 回调只给 (x, y)，而 `handlePlaceEditorNote` 需要「拍 + 图层偏移」，故在放置
+   * 瞬间按当前编辑拍求解。必须包在 `useCallback` 里：原先是内联箭头，每次 App 重
+   * 渲染都换新身份，而 `GameCanvas` 的 `arePropsEqual` 是**逐 key 身份比较** → 播放
+   * 期间每次判定回传都会让整棵 3D 子树重渲染，React.memo 完全失效。
+   */
+  const handlePlaceEditorNote3D = useCallback(
+    (x: number, y: number) => {
+      // 3D 编辑视图所见 = 合成后落点；写回前反解出存储坐标 base（§4.3：
+      // 偏移按「被放置音符自己的时间」取值，这里即当前编辑拍的时刻）。
+      const meta = currentChartRef.current.metadata;
+      const b = editorTimeStore.getSnapshot().beat;
+      const t = beatToSecondsMultiBpm(b, meta.bpm, meta.offset, meta.bpmlist);
+      const tree = buildLayerTree(currentChartRef.current);
+      const idx = tree.byId[placeTargetLayerId] ?? 0;
+      const off = layerOffsetAt(tree, idx, t);
+      // 传「显示坐标 + 偏移」，由 handlePlaceEditorNote 统一换算并做落点裁剪。
+      return handlePlaceEditorNote(x, y, b, off);
+    },
+    [placeTargetLayerId, handlePlaceEditorNote]
+  );
+
   return (
     <div className="relative w-full h-screen overflow-hidden bg-[#0a0d12] select-none text-white font-rajdhani">
       {/* Static ambient background: a radial gradient painted once per chart (no
@@ -2305,18 +2327,7 @@ export function App() {
           onFirstFrame={handleFirstFrame}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
-          onPlaceEditorNote={(x: number, y: number) => {
-            // 3D 编辑视图所见 = 合成后落点；写回前反解出存储坐标 base（§4.3：
-            // 偏移按「被放置音符自己的时间」取值，这里即当前编辑拍的时刻）。
-            const meta = currentChartRef.current.metadata;
-            const b = editorTimeStore.getSnapshot().beat;
-            const t = beatToSecondsMultiBpm(b, meta.bpm, meta.offset, meta.bpmlist);
-            const tree = buildLayerTree(currentChartRef.current);
-            const idx = tree.byId[placeTargetLayerId] ?? 0;
-            const off = layerOffsetAt(tree, idx, t);
-            // 传「显示坐标 + 偏移」，由 handlePlaceEditorNote 统一换算并做落点裁剪。
-            return handlePlaceEditorNote(x, y, b, off);
-          }}
+          onPlaceEditorNote={handlePlaceEditorNote3D}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           skinTextures={skinTextures}
           defaultSkinInnerEnabled={defaultSkinInnerEnabled}
