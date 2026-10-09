@@ -45,6 +45,7 @@ const enableServer = !argv.includes('--no-server') && process.env.LITE_SERVER !=
  *    - easing.ts        : EASING_FNS (slide pipe easing)
  *    - layers.ts        : 图层树 + offset / speed / noteColor 三通道合成
  *    - triggers.ts      : 音符触发器（§3.4）的纯解析（动作 → 事件）
+ *    - slideJudge.ts    : slide 链式判定的纯逻辑核心（外部能力经 SlideJudgeDeps 注入）
  *    Order only affects readability; all are in scope before the components run. */
 const SHARED_FILES = [
   'gameplaySpec.ts',
@@ -54,6 +55,7 @@ const SHARED_FILES = [
   'easing.ts',
   'layers.ts',
   'triggers.ts',
+  'slideJudge.ts',
 ];
 let sharedFragment = '';
 for (const f of SHARED_FILES) {
