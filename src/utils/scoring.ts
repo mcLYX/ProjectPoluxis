@@ -1,10 +1,8 @@
-import { JudgementType, GameStats } from '../types/game';
+import { JudgementType } from '../types/game';
 import {
   JUDGE_THRESH,
   JUDGE_COLORS,
   JUDGE_SCALE,
-  SCORE_BASE,
-  RANK_THRESHOLDS,
 } from '../shared/gameplaySpec';
 
 /** Legacy alias kept so existing importers (judge system, UI) need no change. */
@@ -19,53 +17,8 @@ export const JUDGEMENT_COLORS: Record<JudgementType, { hex: string; name: string
   'Miss': { hex: JUDGE_COLORS['Miss'], name: '暗红灰', glowClass: 'text-red-500', scale: JUDGE_SCALE['Miss'] },
 };
 
-/**
- * Determine judgement based on absolute time difference Δt (in milliseconds)
- */
-export function evaluateJudgement(deltaTMs: number): JudgementType | null {
-  const absDelta = Math.abs(deltaTMs);
-  if (absDelta < JUDGE_THRESH.S_PERFECT) {
-    return 'S-Perfect';
-  } else if (absDelta < JUDGE_THRESH.PERFECT) {
-    return 'Perfect';
-  } else if (absDelta < JUDGE_THRESH.GOOD) {
-    return 'Good';
-  }
-  return null; // outside valid hit window (too early / too late)
-}
-
-/**
- * Calculate single note score strictly adhering to specifications:
- * - S-Perfect: (10,000,000 / totalNotes) + 1
- * - Perfect: 10,000,000 / totalNotes
- * - Good: (10,000,000 / totalNotes) * 0.5
- * - Miss: 0
- */
-export function calculateNoteScore(judgement: JudgementType, totalNotes: number): number {
-  if (totalNotes <= 0) return 0;
-  const baseUnit = SCORE_BASE / totalNotes;
-  switch (judgement) {
-    case 'S-Perfect':
-      return baseUnit + 1;
-    case 'Perfect':
-      return baseUnit;
-    case 'Good':
-      return baseUnit * 0.5;
-    case 'Miss':
-    default:
-      return 0;
-  }
-}
-
-/**
- * Calculate Rank based on current score
- */
-export function calculateRank(score: number): GameStats['rank'] {
-  if (score >= RANK_THRESHOLDS.EX_PLUS) return 'EX+';
-  if (score >= RANK_THRESHOLDS.EX) return 'EX';
-  if (score >= RANK_THRESHOLDS.S) return 'S';
-  if (score >= RANK_THRESHOLDS.A) return 'A';
-  if (score >= RANK_THRESHOLDS.B) return 'B';
-  if (score >= RANK_THRESHOLDS.C) return 'C';
-  return 'F';
-}
+/* 判定档位 / 单音符得分 / 评级的**纯规则**实现已下沉到 `shared/gameplaySpec.ts`
+ * （三端单一真相：完整版 3D、完整版 2D、Lite 单文件共用同一份，Lite 原先手抄的
+ * 副本已删除）。本模块只保留完整版独有的**呈现细节** —— `JUDGEMENT_COLORS` 的
+ * `name` / `glowClass` —— 并原样重新导出下沉的函数，使既有消费方无需改动。 */
+export { calculateNoteScore, calculateRank, evaluateJudgement } from '../shared/gameplaySpec';
