@@ -618,11 +618,16 @@
   function layerOffAtIdxLite(idx, t) {
     return game.layerTree ? layerOffsetAt(game.layerTree, idx, t) : ZERO_OFF_LITE;
   }
+  /* 音符时间取值：`note` 结构上可能缺 timeSec，取不到即按 0（等价原先内联的
+   * `typeof note.timeSec === 'number'` 三元）。原先同一表达式在两处各写一遍。 */
+  function noteTimeOfLite(note) {
+    return (note && typeof note.timeSec === 'number') ? note.timeSec : 0;
+  }
+
   /* 判定落位偏移（按音符自己 timeSec）——投影引导/打击特效钉落位用。 */
   function landingOffOfLite(note) {
     if (!game.layerTree) return ZERO_OFF_LITE;
-    var t = (note && typeof note.timeSec === 'number') ? note.timeSec : 0;
-    return layerOffAtIdxLite(layerIdxOfLite(note), t);
+    return layerOffAtIdxLite(layerIdxOfLite(note), noteTimeOfLite(note));
   }
   /* 写入式变体：热路径（每可见音符每帧 / 每图层每帧）用，避免每次分配 {x,y}。
    * 共享 layers.ts 已提供零分配的 layerOffsetAtInto（与完整版同一份实现）。
@@ -635,8 +640,7 @@
   }
   function landingOffOfLiteInto(note, out) {
     if (!game.layerTree) { out.x = 0; out.y = 0; return; }
-    var t = (note && typeof note.timeSec === 'number') ? note.timeSec : 0;
-    layerOffAtIdxLiteInto(layerIdxOfLite(note), t, out);
+    layerOffAtIdxLiteInto(layerIdxOfLite(note), noteTimeOfLite(note), out);
   }
 
   function render() {
