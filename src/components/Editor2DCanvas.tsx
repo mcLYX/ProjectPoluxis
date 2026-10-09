@@ -6,6 +6,7 @@ import { getWaveformPeaks, peakInRange } from '../utils/waveform';
 import type { ChartData, NoteData, EasingType, EventType, EventData } from '../types/game';
 import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
+import { usePropRefs } from '../hooks/usePropRefs';
 import { buildLayerTree, layerOffsetAt } from '../utils/layers';
 import { shouldDeselectOnRightClick } from '../utils/editorPointer';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
@@ -155,17 +156,15 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   const wrapRef = useRef<HTMLDivElement>(null);
   // Read in the rAF draw loop without re-subscribing it on every toggle.
   const previewRef = useRef(preview);
-  previewRef.current = preview;
 
   const chartRef = useRef(chart);
-  chartRef.current = chart;
+  // 派生值（由 chart 计算），不是纯 prop→ref 镜像 —— 保留独立 effect。
   const segsRef = useRef(buildSegments(chart));
   useEffect(() => {
     segsRef.current = buildSegments(chart);
   }, [chart]);
 
   const snapRef = useRef(snapSubdivision);
-  snapRef.current = snapSubdivision;
 
   // —— 屏幕坐标（所见即所得）——
   // 2D 俯视画布的渲染 / 命中 / 拖拽 / 放置全部在**屏幕坐标**（base + 该单位自己
@@ -190,35 +189,21 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   const clampScreenX = (x: number) => Math.max(X_MIN, Math.min(X_MAX, x));
 
   const toolRef = useRef(activeTool);
-  toolRef.current = activeTool;
   const selectedRef = useRef(selectedNoteId);
-  selectedRef.current = selectedNoteId;
   const isPlayingRef = useRef(isPlaying);
-  isPlayingRef.current = isPlaying;
   const gameTimeRef = useRef(gameTime);
-  gameTimeRef.current = gameTime;
 
   const onPlaceRef = useRef(onPlaceNote);
-  onPlaceRef.current = onPlaceNote;
   const onMoveRef = useRef(onMoveNote);
-  onMoveRef.current = onMoveNote;
   const onSelectRef = useRef(onSelectNote);
-  onSelectRef.current = onSelectNote;
   const onSeekRef = useRef(onSeekBeat);
-  onSeekRef.current = onSeekBeat;
   const onSelectNotesRef = useRef(onSelectNotes);
-  onSelectNotesRef.current = onSelectNotes;
   const onMarqueeSelectRef = useRef(onMarqueeSelect);
-  onMarqueeSelectRef.current = onMarqueeSelect;
   const onMoveNotesRef = useRef(onMoveNotes);
-  onMoveNotesRef.current = onMoveNotes;
 
   const multiSelectRef = useRef(isMultiSelect);
-  multiSelectRef.current = isMultiSelect;
   const selectedIdsRef = useRef<string[]>(selectedNoteIds);
-  selectedIdsRef.current = selectedNoteIds;
   const marqueeModeRef = useRef<MarqueeMode>(marqueeMode);
-  marqueeModeRef.current = marqueeMode;
 
   // Live-drag override: while a note is being dragged we keep its position in
   // a ref and let the canvas draw loop render it every frame — this gives
@@ -234,11 +219,30 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   }, []);
 
   const vlineRef = useRef(vlineCount);
-  vlineRef.current = vlineCount;
   const pxPerBeatRef = useRef(pxPerBeat);
-  pxPerBeatRef.current = pxPerBeat;
   const showWaveformRef = useRef(showWaveform);
-  showWaveformRef.current = showWaveform;
+
+  /* C 类统一：所有**纯** prop→ref 镜像改走 usePropRefs，与 GameCanvas 同一机制。
+   * 原先是在渲染阶段直接 `ref.current = prop` —— React 不推荐在渲染期读写 ref
+   * （并发渲染下被丢弃的渲染同样会留下副作用），且与 GameCanvas 的写法不一致。
+   * 初始值仍由上面的 `useRef(prop)` 提供，故首帧（含首次 draw）无需等 effect。 */
+  usePropRefs(
+    {
+      activeTool, selectedNoteId, isPlaying, gameTime,
+      onPlaceNote, onMoveNote, onSelectNote, onSeekBeat, onSelectNotes, onMarqueeSelect, onMoveNotes,
+      isMultiSelect, selectedNoteIds, marqueeMode,
+      vlineCount, pxPerBeat, showWaveform,
+      preview, chart, snapSubdivision,
+    },
+    {
+      activeTool: toolRef, selectedNoteId: selectedRef, isPlaying: isPlayingRef, gameTime: gameTimeRef,
+      preview: previewRef, chart: chartRef, snapSubdivision: snapRef,
+      onPlaceNote: onPlaceRef, onMoveNote: onMoveRef, onSelectNote: onSelectRef, onSeekBeat: onSeekRef,
+      onSelectNotes: onSelectNotesRef, onMarqueeSelect: onMarqueeSelectRef, onMoveNotes: onMoveNotesRef,
+      isMultiSelect: multiSelectRef, selectedNoteIds: selectedIdsRef, marqueeMode: marqueeModeRef,
+      vlineCount: vlineRef, pxPerBeat: pxPerBeatRef, showWaveform: showWaveformRef,
+    },
+  );
 
   // Drag state
   const dragRef = useRef<{
