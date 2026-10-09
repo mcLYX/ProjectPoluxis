@@ -2365,8 +2365,6 @@ export function App() {
           isPaused={gameState === 'paused'}
           isEditorMode={gameState === 'editor'}
           activeEditorTool={effectiveEditorTool}
-          selectedNoteId={selectedNoteId}
-          selectedNoteIds={selectedNoteIds}
           isMultiSelect={effectiveMultiSelect}
           snapSubdivision={snapSubdivision}
           gameTime={gameTime}
@@ -2407,9 +2405,7 @@ export function App() {
             isPlaying={editorPreviewPlaying}
             snapSubdivision={snapSubdivision}
             activeTool={effectiveEditorTool}
-            selectedNoteId={selectedNoteId}
             isMultiSelect={effectiveMultiSelect}
-            selectedNoteIds={selectedNoteIds}
             marqueeMode={marqueeMode}
             vlineCount={editorVlineCount}
             pxPerBeat={editorPxPerBeat}

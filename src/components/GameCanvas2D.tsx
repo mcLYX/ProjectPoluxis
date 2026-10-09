@@ -51,6 +51,7 @@ import {
   TOUCH_SIZE,
 } from '../shared/gameplaySpec';
 import { globalAudio } from '../audio/AudioManager';
+import { selectionStore } from '../selectionStore';
 // 快速制谱手势引擎：与 3D 渲染器共用同一份实现（渲染器只负责喂坐标 + 转发 delta）。
 import {
   createQuickCreateController,
@@ -232,10 +233,10 @@ export interface GameCanvas2DProps {
   /* ---- 编辑器模式（quality 'lite' 时替代 3D 编辑器视口） ---- */
   isEditorMode?: boolean;
   activeEditorTool?: EditorToolKind;
-  selectedNoteId?: string | null;
-  /** 多选集合（note base id；可含子节点 id#i）。用于在 2D 视图为所有选中
-   *  note 绘制选中框，与 3D 视图保持一致。 */
-  selectedNoteIds?: string[];
+  /* 选中态（`selectedNoteId` / `selectedNoteIds`）**不再是 prop**：
+   * 与 GameCanvas 一致，直接读模块级 `selectionStore`（rAF 内按需
+   * getSnapshot()），于是点选不再触发本组件的 React 重渲染。
+   * `isMultiSelect` 是交互模式而非选中数据，仍走 prop。 */
   /** 是否处于多选模式（含 Ctrl 临时）。为 true 时才绘制多选框。 */
   isMultiSelect?: boolean;
   /** 快速制谱的吸附细分（拍）。 */
@@ -1734,23 +1735,24 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         }
       }
 
-      /* 编辑器：选中音符高亮（单选焦点） */
-      if (propsRef.current.isEditorMode && propsRef.current.selectedNoteId) {
-        const sel = propsRef.current.selectedNoteId;
+      /* 编辑器：选中音符高亮（单选焦点）。选中态读模块级 store 而非 props，
+       * 故点选不再触发本组件的 React 重渲染。 */
+      const selSnap = selectionStore.getSnapshot();
+      const selFocus = selSnap.focus;
+      if (propsRef.current.isEditorMode && selFocus) {
         for (const item of toDraw) {
-          if (item.id === sel) drawEditorSelection(item.p, item.kind, vScale, item.angle);
+          if (item.id === selFocus) drawEditorSelection(item.p, item.kind, vScale, item.angle);
         }
       }
 
       /* 编辑器：多选高亮。与 3D 一致 —— 仅在多选模式下绘制，且跳过焦点音符
        * （它已由上面的单选高亮绘制，避免双框重叠）。 */
       if (propsRef.current.isEditorMode && propsRef.current.isMultiSelect) {
-        const selIds = propsRef.current.selectedNoteIds;
+        const selIds = selSnap.ids;
         if (selIds && selIds.length > 0) {
-          const focus = propsRef.current.selectedNoteId;
           const selSet = new Set(selIds);
           for (const item of toDraw) {
-            if (item.id === focus) continue;
+            if (item.id === selFocus) continue;
             if (selSet.has(item.id)) drawEditorSelection(item.p, item.kind, vScale, item.angle);
           }
         }
@@ -2282,7 +2284,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         needRender = true;
       } else if (timeSource !== lastRenderedTime) {
         needRender = true; // 编辑器拖动时间轴 / 试玩定位
-      } else if (p.selectedNoteId !== lastRenderedSelection) {
+      } else if (selectionStore.getSnapshot().focus !== lastRenderedSelection) {
         needRender = true; // 编辑器选中高亮变化
       } else if (renderDirty) {
         needRender = true; // 尺寸变化等外部请求
@@ -2293,7 +2295,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       if (needRender) {
         game.curTime = timeSource;
         lastRenderedTime = timeSource;
-        lastRenderedSelection = p.selectedNoteId ?? null;
+        lastRenderedSelection = selectionStore.getSnapshot().focus;
         lastRenderedMode = modeTag;
         renderState.dirty = false;
         if (p.isPlaying) flushPointerMoves();

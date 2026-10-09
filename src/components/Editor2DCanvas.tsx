@@ -7,6 +7,7 @@ import type { ChartData, NoteData, EasingType, EventType, EventData } from '../t
 import type { EditorTool, MarqueeMode } from './VisualChartEditor';
 import { liveDragStore } from '../liveDragStore';
 import { usePropRefs } from '../hooks/usePropRefs';
+import { selectionStore } from '../selectionStore';
 import { buildLayerTree, layerOffsetAt } from '../utils/layers';
 import { shouldDeselectOnRightClick } from '../utils/editorPointer';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
@@ -70,11 +71,12 @@ interface Editor2DCanvasProps {
   isPlaying: boolean;
   snapSubdivision: number;
   activeTool: EditorTool;
-  selectedNoteId: string | null;
+  /* 选中态（`selectedNoteId` / `selectedNoteIds`）**不再是 prop**：与
+   * GameCanvas / GameCanvas2D 一致，直接读模块级 `selectionStore`。
+   * `isMultiSelect` 是交互模式而非选中数据，仍走 prop。 */
   /** 多选模式开启时，在画布空白处拖动变为框选而非移动时间轴。 */
   isMultiSelect: boolean;
-  /** 当前多选集合（note base id）。 */
-  selectedNoteIds: string[];
+
   /** 框选合并方式。 */
   marqueeMode: MarqueeMode;
   /** Number of vertical grid lines (incl. both edges); sets X snap columns. */
@@ -136,9 +138,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   isPlaying,
   snapSubdivision,
   activeTool,
-  selectedNoteId,
   isMultiSelect,
-  selectedNoteIds,
   marqueeMode,
   vlineCount,
   pxPerBeat,
@@ -189,7 +189,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   const clampScreenX = (x: number) => Math.max(X_MIN, Math.min(X_MAX, x));
 
   const toolRef = useRef(activeTool);
-  const selectedRef = useRef(selectedNoteId);
   const isPlayingRef = useRef(isPlaying);
   const gameTimeRef = useRef(gameTime);
 
@@ -202,7 +201,6 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
   const onMoveNotesRef = useRef(onMoveNotes);
 
   const multiSelectRef = useRef(isMultiSelect);
-  const selectedIdsRef = useRef<string[]>(selectedNoteIds);
   const marqueeModeRef = useRef<MarqueeMode>(marqueeMode);
 
   // Live-drag override: while a note is being dragged we keep its position in
@@ -228,18 +226,18 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
    * 初始值仍由上面的 `useRef(prop)` 提供，故首帧（含首次 draw）无需等 effect。 */
   usePropRefs(
     {
-      activeTool, selectedNoteId, isPlaying, gameTime,
+      activeTool, isPlaying, gameTime,
       onPlaceNote, onMoveNote, onSelectNote, onSeekBeat, onSelectNotes, onMarqueeSelect, onMoveNotes,
-      isMultiSelect, selectedNoteIds, marqueeMode,
+      isMultiSelect, marqueeMode,
       vlineCount, pxPerBeat, showWaveform,
       preview, chart, snapSubdivision,
     },
     {
-      activeTool: toolRef, selectedNoteId: selectedRef, isPlaying: isPlayingRef, gameTime: gameTimeRef,
+      activeTool: toolRef, isPlaying: isPlayingRef, gameTime: gameTimeRef,
       preview: previewRef, chart: chartRef, snapSubdivision: snapRef,
       onPlaceNote: onPlaceRef, onMoveNote: onMoveRef, onSelectNote: onSelectRef, onSeekBeat: onSeekRef,
       onSelectNotes: onSelectNotesRef, onMarqueeSelect: onMarqueeSelectRef, onMoveNotes: onMoveNotesRef,
-      isMultiSelect: multiSelectRef, selectedNoteIds: selectedIdsRef, marqueeMode: marqueeModeRef,
+      isMultiSelect: multiSelectRef, marqueeMode: marqueeModeRef,
       vlineCount: vlineRef, pxPerBeat: pxPerBeatRef, showWaveform: showWaveformRef,
     },
   );
@@ -776,7 +774,10 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       }
 
       // Draw notes (future first so near-line notes draw on top)
-      const multiIds = selectedIdsRef.current;
+      /* 选中态读模块级 store：同一数组引用在 setIds 前保持不变，故下方
+       * multiSetCache 的引用比较缓存依然有效。 */
+      const selSnap = selectionStore.getSnapshot();
+      const multiIds = selSnap.ids;
       if (multiSetCache.ids !== multiIds) {
         multiSetCache = { ids: multiIds, set: multiIds.length > 0 ? new Set(multiIds) : null };
       }
@@ -786,7 +787,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
         const { px, py } = worldToPixel(tb, it.x, cssW, cssH, curTime);
         if (py < field.top - 60 || py > field.top + field.height + 60) continue;
         // 高亮精确选中的单位（头节点或子节点独立高亮）。
-        const selected = it.id === selectedRef.current || (multiSet != null && multiSet.has(it.id));
+        const selected = it.id === selSnap.focus || (multiSet != null && multiSet.has(it.id));
         drawNoteShape(it.type, px, py, it.color, selected, it.angle);
       }
 
@@ -888,11 +889,11 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       if (hit) {
         if (isMulti) {
           // 多选模式：点击音符。子节点与头节点独立选中（不带动整条链）。
-          const alreadySelected = selectedIdsRef.current.includes(hit.id);
+          const alreadySelected = selectionStore.getSnapshot().ids.includes(hit.id);
           if (alreadySelected) {
             // 已选中 → 开始多选拖拽（只移动被选中的单位：头节点或子节点）。
             // 点击时暂不 toggle；若 pointerup 时未移动，则在 up 中 toggle 取消选中。
-            const selSet = new Set(selectedIdsRef.current);
+            const selSet = new Set(selectionStore.getSnapshot().ids);
             const snapshot: Array<{ id: string; beat: number; x: number; y: number; ox: number }> = [];
             const snapUnit = (id: string, beat: number, bx: number, by: number, layerId?: string) => {
               const o = offAt(layerId, beat);
