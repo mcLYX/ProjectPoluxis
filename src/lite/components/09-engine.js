@@ -512,7 +512,7 @@
    * judgement (miss / autoplay / hit-testing). Mirrors full version. */
   function findWindow(curTime, spawnLimit) {
     var speed = game.speed * game.speedMul;
-    var pastBuffer = 0.3 + (game.maxSlideSpan || 0), futureBuffer = -spawnLimit / speed + 0.3;
+    var pastBuffer = 0.3 + (game.maxSlideSpan), futureBuffer = -spawnLimit / speed + 0.3;
     var pastTh = curTime - pastBuffer, futureTh = curTime + futureBuffer;
     var lo = 0, hi = game.notes.length, mid;
     while (lo < hi) { mid = (lo + hi) >> 1; if (game.notes[mid].timeSec < pastTh) lo = mid + 1; else hi = mid; }
@@ -1098,7 +1098,7 @@
   }
   function findWindowOf(notes, curTime, spawnLimit) {
     var speed = game.speed * game.speedMul;
-    var pastBuffer = 0.3 + (game.maxSlideSpan || 0), futureBuffer = -spawnLimit / speed + 0.3;
+    var pastBuffer = 0.3 + (game.maxSlideSpan), futureBuffer = -spawnLimit / speed + 0.3;
     var pastTh = curTime - pastBuffer, futureTh = curTime + futureBuffer;
     var lo = 0, hi = notes.length, mid;
     while (lo < hi) { mid = (lo + hi) >> 1; if (notes[mid].timeSec < pastTh) lo = mid + 1; else hi = mid; }

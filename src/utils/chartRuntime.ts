@@ -117,7 +117,14 @@ export interface ChartRuntime {
   hasNegativeSpeed: boolean;
   /** min(1, 所有变速点速度)。 */
   minSpeed: number;
-  /** 可判定音符总数（头 + slide 子节点）。 */
+  /**
+   * 可判定音符总数（`fake` / `noScore` 不计），与 `countPlayableNotes` 同口径。
+   *
+   * ⚠️ 两类音符的计法**不同**，别按字面以为漏统计了：
+   *  - `slide`：子节点留在头节点的 `resolvedNodes` 里 → 头 + `resolvedNodes.length`；
+   *  - `tap` / `touch`：子节点在解析阶段已**摊平为独立音符**（`id#n`，字段继承头
+   *    节点），各自走一次下面的 `totalNotes++`，故不再单独累加。
+   */
   totalNotes: number;
   /** 最后一个音符（含 slide 子节点）的时间。 */
   lastNoteTime: number;

@@ -53,7 +53,7 @@ export function buildChartDensity(
 
   const bucketOfType: Record<NoteType, Uint32Array> = { tap, touch, slide };
 
-  const notes = chart.notes ?? [];
+  const notes = chart.notes;
   for (let i = 0; i < notes.length; i++) {
     const note = notes[i];
     const type: NoteType =

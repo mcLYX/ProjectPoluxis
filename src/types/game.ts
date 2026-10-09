@@ -169,7 +169,17 @@ export interface NoteData {
   type: NoteType;
   /** Optional custom hex color overriding the global chart metadata.noteColor. */
   color?: string;
-  /** Slide only: child nodes following the head node, each judged independently (1 note each). */
+  /**
+   * 子节点（可选）。**tap / touch / slide 都可以有**（谱面写了就有）；子节点缺省
+   * 继承头节点的 `x` / `y` / `angle` / `easing`（见 `shared/chartSchema.ts`）。
+   *
+   * 解析后的形态随类型不同（见 `shared/beatTime.ts` 的 `resolveChart`）：
+   *  - `slide`：子节点收进头节点的 `resolvedNodes`，走链式判定；
+   *  - `tap` / `touch`：子节点被**摊平**为顶层独立音符（`id#n`），判定与渲染
+   *    和头节点无异，只是继承头节点的字段。
+   *
+   * ⚠️ 旧注释写的 "Slide only" 与实际行为不符 —— 勿据此认为 tap / touch 没有子节点。
+   */
   nodes?: SlideNodeData[];
   /** Global rotation (degrees) applied to this chain's visuals. Child nodes may
    *  override it. Touch notes ignore it (a rotated circle looks identical). */

@@ -128,7 +128,11 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
       if (n.timeSec !== bestTimeSec) continue; // only the most-late time group
       const ep = ctx.getEffectivePos?.(n) ?? n;
       const d = Math.hypot(px - ep.x, py - ep.y);
-      if (d < bestDist || (d === bestDist && best !== null && n.timeSec < best.timeSec)) {
+      /* 同级时间组内的并列处理：上面的 `n.timeSec !== bestTimeSec` 已把候选收敛到
+       * **同一时刻**，故原先那句 `d === bestDist && best !== null && n.timeSec <
+       * best.timeSec` 恒为 false —— 三者都是死判断（`best !== null` 亦非 TS 窄化所需，
+       * 因为删掉后不再访问 `best.timeSec`）。并列时取先遇到者即可，语义不变。 */
+      if (d < bestDist) {
         best = n;
         bestDist = d;
       }
