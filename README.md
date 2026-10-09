@@ -340,6 +340,7 @@ npm run preview            # 本地预览（未带私有内容时仅显示内置
 歌曲目录下放置 `story.js`（ES Module），即可在游戏画面上叠加一套自己的演出 —— 也就是所谓的 **MV / 背景动画**。
 
 - **纯表现层**：只读游戏实时数据来驱动自身演出，**绝不回写**，不影响判定与计分。
+- **必须调用 `api.markReady()`**：重型初始化（搭建场景、预取资源、解码等）完成后调用一次（每局一次）。宿主据此才允许启动音频时钟 —— 漏调会让**每次加载都白等宿主的兜底超时**（当前 5s），表现为「这首曲子加载特别慢」。初始化全同步的故事板，在 `create()` 返回前调用即可；有异步预热的，必须等预热真正完成后再调用。
 - **仅完整版 3D 渲染器**挂载：2D / Lite 版与「Lite」画质预设都不挂。缺少 `create()` 或加载失败会静默降级为「无故事板」，不影响游玩。
 - 菜单态不挂载；离开即卸载，并主动释放 WebGL 上下文，避免反复进出把上下文耗尽。
 - 编辑器里挂载的故事板会**实时预览**，拖动进度条时演出跟着走（`storyUrl` 置空即卸载）。
@@ -353,6 +354,9 @@ export default {
     // 自建 canvas / renderer 挂到 ov 上；three 用 api.three（与游戏同一实例，别再打包一份）
     const el = document.createElement('div');
     ov.appendChild(el);
+
+    api.markReady();                        // ⚠️ 必须：重型初始化完成 → 放行音频时钟
+
     return {
       update(t, snapshot) {                  // t = 歌曲绝对秒
         el.style.opacity = String(0.5 + 0.5 * Math.sin(t));
@@ -366,6 +370,7 @@ export default {
 
 常用的 `api` 能力（完整契约见 `src/types/storyboard.ts`）：
 
+- `api.markReady()` —— **必须**，每局一次。重型初始化完成后调用，宿主据此放行音频时钟（详见上文「故事板」一节的必须项）。漏调 → 每次加载白等兜底超时。
 - `api.three` —— three.js 命名空间，**与游戏同一模块实例**；故事板自建 renderer，互不干扰。建议把 `three` 设为 external 构建，运行时从这里取。
 - `api.chart` / `api.beatAt(t)` / `api.timeAtBeat(beat)` —— 谱面元数据与拍↔秒换算。**不要硬编码 BPM**，变速谱会全错。
 - `api.notes(fromSec, toSec)` —— 整谱音符切片（开局缓存，不进热路径），用来让演出与谱面「共舞」。

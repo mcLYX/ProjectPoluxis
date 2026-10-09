@@ -41,7 +41,7 @@ import {
 import { useI18n } from '../i18n';
 import { lintDsl, applyDslToNote } from '../utils/editorRules';
 import { useLiveDrag } from '../liveDragStore';
-import { editorTimeStore, useEditorTime } from '../editorTimeStore';
+import { playheadStore, usePlayhead } from '../playheadStore';
 import { EditorHeatScrubber } from './EditorHeatScrubber';
 
 export type EditorTool = 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
@@ -311,23 +311,23 @@ function AngleEasingRow({
 /* ------------------------------------------------------------------ *
  * 播放头时间订阅组件
  *
- * 这些微型组件订阅 `editorTimeStore`，是**唯一**会随预览播放 ~30fps 重渲染的地方。
+ * 这些微型组件订阅 `playheadStore`，是**唯一**会随预览播放 ~30fps 重渲染的地方。
  * `VisualChartEditor` 本体不再接收高频时间 prop，因此在预览播放期间不重渲染，
  * 其 O(n) 计算也只在 chart / 选中项真正变化时才重算（见组件内的 useMemo）。
  * ------------------------------------------------------------------ */
 const LiveBeat: React.FC<{ decimals?: number }> = ({ decimals = 2 }) => {
-  const { beat } = useEditorTime();
+  const { beat } = usePlayhead();
   return <>{beat.toFixed(decimals)}</>;
 };
 
 const LiveTime: React.FC<{ decimals?: number }> = ({ decimals = 3 }) => {
-  const { timeSec } = useEditorTime();
+  const { timeSec } = usePlayhead();
   return <>{timeSec.toFixed(decimals)}s</>;
 };
 
 /** Render-prop 订阅：用于需要 beat 参与的属性/计算（disabled、BPM 查询、seek 步进）。 */
 const LiveBeatGate: React.FC<{ children: (beat: number) => React.ReactNode }> = ({ children }) => {
-  const { beat } = useEditorTime();
+  const { beat } = usePlayhead();
   return <>{children(beat)}</>;
 };
 
@@ -813,7 +813,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const getBpmList = (): BpmPoint[] => chart.metadata.bpmlist ?? [];
 
   const handleAddBpmPoint = () => {
-    const snappedBeat = Math.round(editorTimeStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
+    const snappedBeat = Math.round(playheadStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
     if (snappedBeat <= 0) return;
     const currentBpm = getBpmAtBeatLocal(snappedBeat);
     const newPoint: BpmPoint = { beat: snappedBeat, bpm: currentBpm };
@@ -930,7 +930,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const handleAddEvent = (type: EventType) => {
     // 偏移事件：先快照「变更前落点」，再在变更生效后防抖全量复检（§4.4）。
     if (type === 'offset_change') scheduleOffsetRecheck();
-    const snappedBeat = Math.round(editorTimeStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
+    const snappedBeat = Math.round(playheadStore.getSnapshot().beat / snapSubdivision) * snapSubdivision;
     const newEvent: EventData = {
       id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       type: 'event',
@@ -1019,18 +1019,18 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   // 界面上的起/终点会被偷偷对调，容易困惑）。实际操作区间由 validBatchRange 用
   // Math.min/max 归一化，所以 start>end 时仍按 [end,start] 执行。
   const handleSetBatchStart = () => {
-    const newStart = Math.round(editorTimeStore.getSnapshot().beat * 100) / 100;
+    const newStart = Math.round(playheadStore.getSnapshot().beat * 100) / 100;
     onSetBatchSelection({ startBeat: newStart, endBeat: batchSelection.endBeat });
   };
 
   const handleSetBatchEnd = () => {
-    const newEnd = Math.round(editorTimeStore.getSnapshot().beat * 100) / 100;
+    const newEnd = Math.round(playheadStore.getSnapshot().beat * 100) / 100;
     onSetBatchSelection({ startBeat: batchSelection.startBeat, endBeat: newEnd });
   };
 
   const handleBatchClone = () => {
     if (!validBatchRange || notesInBatch.length === 0) return;
-    const deltaBeat = editorTimeStore.getSnapshot().beat - validBatchRange.start;
+    const deltaBeat = playheadStore.getSnapshot().beat - validBatchRange.start;
 
     const clonedNotes: NoteData[] = notesInBatch.map((n, idx) => ({
       ...n,
@@ -1185,7 +1185,7 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     // 保持段内相邻连接；克隆出的新头节点缺省参数继承自原头节点。
     if (op === 'Clone') {
       const baseBeat = selectedUnits[0].beat; // 最早选中单位的 beat
-      const dBeat = editorTimeStore.getSnapshot().beat - baseBeat;
+      const dBeat = playheadStore.getSnapshot().beat - baseBeat;
       const affectedChains = new Set<string>();
       for (const id of selIds) affectedChains.add(id.indexOf('#') >= 0 ? id.split('#')[0] : id);
 

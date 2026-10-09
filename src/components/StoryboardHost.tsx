@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { ensureThreeImportMap } from '../utils/storyboardThree';
 import { globalAudio } from '../audio/AudioManager';
 import { PRESET_VALUES, qualityStore, type QualityState } from '../qualityStore';
+import { playheadStore } from '../playheadStore';
 import { beatToSecondsMultiBpm, countPlayableNotes, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { JUDGEMENT_THRESHOLDS } from '../utils/scoring';
 import { SCORE_BASE } from '../shared/gameplaySpec';
@@ -237,16 +238,29 @@ export function isPointerBlocked(
 /**
  * 纯函数（便于单测）：本帧故事板的时间源。
  *
- * 音频时钟运行时严格用它（与判定时钟同源）；未运行时（菜单 / 暂停 / 编辑器未预览 /
- * 曲终）`getCurrentTime()` 返回陈旧的 `pauseTime`，必须退回宿主的播放头时间，
- * 否则拖动进度条画面不更新。
+ * ## 为什么需要 `sessionActive` 而不只看 `audioRunning`
+ * `globalAudio.isRunning()` 描述的是**音频引擎的时钟是否在推进**，它**不等价于**
+ * 「本局仍在进行」。曲终时走的 `fadeOutAndStop()` 会**故意**把 `isPlaying` 保持为
+ * true（见其 NOTE：置 false 会让 `getCurrentTime()` 回退到陈旧的 `pauseTime`，把整段
+ * 曲终窗口的画面与粒子冻住）。若只按 `audioRunning` 选时间源，那么「试玩结束后回到
+ * 编辑器」时音频时钟仍在推进，故事板就会**继续自己跑**一段。
+ *
+ * 因此这里把判据收紧为「音频时钟在推进 **且** 本局仍在进行」：一旦回到编辑器
+ * （`gameState` 离开 playing/paused），立即改用播放头（编辑器的单一真相），故事板
+ * 立刻停住 —— 同时音频仍能把自己的淡出正常播完，两者互不牵制。
+ *
+ * @param audioRunning  `globalAudio.isRunning()`：音频时钟是否实时。
+ * @param audioTime     `globalAudio.getCurrentTime()`。
+ * @param fallbackTime  宿主播放头（未在局中 / 未运行时的时间源）。
+ * @param sessionActive 本局是否仍在进行（playing 或 paused）。
  */
 export function resolveStoryboardTime(
   audioRunning: boolean,
   audioTime: number,
   fallbackTime: number | undefined,
+  sessionActive: boolean = true,
 ): number {
-  return audioRunning ? audioTime : (fallbackTime ?? 0);
+  return audioRunning && sessionActive ? audioTime : (fallbackTime ?? 0);
 }
 
 /**
@@ -564,16 +578,6 @@ export interface StoryboardHostProps {
    * 无故事板 / 加载失败时宿主也会回调，避免时钟被永久挂起。
    */
   onReady?: () => void;
-  /**
-   * 宿主播放头时间（秒）的 ref —— **音频时钟未运行时的回退时间源**。
-   *
-   * `globalAudio.getCurrentTime()` 在未播放态返回陈旧的 `pauseTime`（见 AudioManager），
-   * 因此编辑器未预览 / 暂停时拖动进度条若只更新 `gameTime`，故事板会停在旧画面。
-   * 其它画布（`GameCanvas` / `Editor2DCanvas` / `GameCanvas2D`）全部写了
-   * `playing ? getCurrentTime() : gameTime` 这条回退，本宿主此前漏了它。
-   * 省略则回退到 0。
-   */
-  fallbackTimeRef?: RefObject<number>;
   /** 开局会话号：变化即重建（dispose 旧实例）。 */
   playSession: number;
   playing: boolean;
@@ -646,7 +650,6 @@ function StoryboardHostImpl(
     chartRef,
     storyUrl,
     onReady,
-    fallbackTimeRef,
     playSession,
     playing,
     paused,
@@ -1216,7 +1219,13 @@ function StoryboardHostImpl(
           const t = resolveStoryboardTime(
             globalAudio.isRunning(),
             globalAudio.getCurrentTime(),
-            fallbackTimeRef?.current,
+            /* 回退时间源：直接读播放头的单一真相（编辑器预览播放时它由 App 的 HUD
+             * rAF 实时写入，故编辑器内一样跟得上），不再经 App 的 ref 镜像。 */
+            playheadStore.getSnapshot().timeSec,
+            /* 仅当本局仍在进行（playing / paused）时才认音频时钟。曲终后
+             * fadeOutAndStop 会**故意**让 isPlaying 保持为真，若据此认音频时钟，
+             * 回到编辑器后故事板会继续跑。 */
+            playingRef.current || pausedRef.current,
           );
           const snap = buildSnapshotInto(
             snapshotRef.current,

@@ -27,7 +27,7 @@ import { resolveBeatmapUrl, parseDifficultyMeta, resolveStoryboardUrl, resolveCo
 import { specFromChart, downloadSongZip, audioExtOf } from './data/zipExport';
 import type { SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
-import { editorTimeStore } from './editorTimeStore';
+import { playheadStore } from './playheadStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
 import { getSkin, loadSkinImages, loadSkinTextures } from './data/skinStore';
 import type { EditorLaunchInfo, SongItem } from './types/beatmap';
@@ -248,12 +248,6 @@ export function App() {
   const gameStateRef = useRef(gameState);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   const [gameTime, setGameTime] = useState(0);
-  /** 故事板回退时间源（秒）：镜像 `gameTime`，与 GameCanvas 的 gameTimeRef 同语义。
-   *  音频时钟未运行（暂停 / 编辑器未预览 / 曲终）时 `globalAudio.getCurrentTime()`
-   *  返回陈旧值，故事板据此改读这里 —— 拖进度条画面才会跟着走。
-   *  用 ref 而非 prop：seek/暂停时更新不触发重渲染（与 HUD 的 ref 直写同理）。 */
-  const storyboardFallbackTimeRef = useRef(gameTime);
-  storyboardFallbackTimeRef.current = gameTime;
   const [speedMultiplier, setSpeedMultiplier] = useState(initialSettings.speedMultiplier);
   const [autoPlay, setAutoPlay] = useState(false);
   const [audioOffsetMs, setAudioOffsetMs] = useState(initialSettings.audioOffsetMs);
@@ -661,14 +655,14 @@ export function App() {
     currentChart.metadata.offset || 0,
     currentChart.metadata.bpmlist
   );
-  // 编辑器处理器读取「当前播放头」一律走 editorTimeStore（见下方 effect 与 HUD rAF）：
+  // 编辑器处理器读取「当前播放头」一律走 playheadStore（见下方 effect 与 HUD rAF）：
   // 预览播放时它由 rAF 实时写入，非预览时与 gameTime 同步；读取方无需依赖会每帧变化的
   // currentBeat，从而保持 useCallback 身份稳定（避免 GameCanvas 被无谓重渲染）。
 
   // 把（低频的）gameTime 变化同步进编辑器时间源：seek / 暂停 / 进出编辑器时让编辑器
   // 显示立即跟上。预览播放期间由 HUD rAF 直接写 store，本 effect 不参与（gameTime 不变）。
   useEffect(() => {
-    editorTimeStore.set({ timeSec: gameTime, beat: currentBeat });
+    playheadStore.set({ timeSec: gameTime, beat: currentBeat });
   }, [gameTime, currentBeat]);
 
   /* ===== 首帧后才启动音频时钟 =====
@@ -854,7 +848,7 @@ export function App() {
     // the current play-test started; otherwise it's the live editor playhead (or 0).
     // 编辑器播放头时间源（预览播放期间由 HUD rAF 实时写入；非预览时与 gameTime 同步）。
     // 用它而非 gameTime：预览播放时 gameTime 不再每帧更新。
-    const editorTime = editorTimeStore.getSnapshot();
+    const editorTime = playheadStore.getSnapshot();
     const startBeat = restartFromRecorded
       ? playTestStartBeatRef.current
       : (fromCurrentBeat ? editorTime.beat : 0);
@@ -1394,6 +1388,19 @@ export function App() {
         // In play-test mode, return to editor instead of showing results
         setIsPlayTestMode(false);
         setGameState('editor');
+        /* fadeOutAndStop() **故意**不置 isPlaying=false（见其 NOTE：置 false 会让
+         * 游戏时钟回退到陈旧的 pauseTime，把整段曲终窗口的画面/粒子冻住），它把复位
+         * 责任交给「曲终序列里的 stop()」。但本分支走的是编辑器而非结算页，那句
+         * stop() 从未执行 —— 于是 isPlaying 与 globalAudio.isRunning() 会**永远**
+         * 停在「运行中」，音频时钟一直空转。
+         *
+         * 故事板已不再受此影响：resolveStoryboardTime 另加了「本局仍在进行」判据，
+         * 回到编辑器即刻停住。这里补复位是为了让 isRunning() 重新说真话，避免后续
+         * 新的消费方再踩同一个坑。延迟到淡出时长之后，以免硬切音频；并用
+         * gameStateRef 兜住竞态：若这段时间内用户已重新开始试玩，不要掐断新播放。 */
+        window.setTimeout(() => {
+          if (gameStateRef.current === 'editor') globalAudio.stop();
+        }, 1100);
       } else {
         // Calculate badge for THIS play (shown on result card, including auto mode)
         const badge = calcBadgeFromStats(statsRef.current);
@@ -1664,7 +1671,7 @@ export function App() {
     const dir = e.deltaY > 0 ? 1 : -1;
     const deltaBeats = dir * (snapSubdivision || 0.25);
     // 用时间源而非 gameTime：预览播放期间 gameTime 不再每帧更新。
-    const curBeat = editorTimeStore.getSnapshot().beat;
+    const curBeat = playheadStore.getSnapshot().beat;
     handleSeekBeat(curBeat + deltaBeats);
   }, [gameState, snapSubdivision, handleSeekBeat]);
 
@@ -1784,7 +1791,7 @@ export function App() {
             // 编辑器预览：时间经 store 下发，只有订阅它的微型组件重渲染 ——
             // 不再 setGameTime，从而消除「整个 App 每 30fps 全树重渲染」。
             const md = currentChartRef.current.metadata;
-            editorTimeStore.set({
+            playheadStore.set({
               timeSec: t,
               beat: secondsToBeatMultiBpm(t, md.bpm, md.offset || 0, md.bpmlist),
             });
@@ -1812,7 +1819,7 @@ export function App() {
    * 直接裁掉，导致「指哪不打哪」（设计 §4.3/§4.4）。
    */
   const handlePlaceEditorNote = useCallback((x: number, y: number, beat?: number, offset?: { x: number; y: number }): { id: string; x: number; y: number; beat: number } | null => {
-    const exactBeat = Math.round((beat ?? editorTimeStore.getSnapshot().beat) * 1000) / 1000;
+    const exactBeat = Math.round((beat ?? playheadStore.getSnapshot().beat) * 1000) / 1000;
     const ox = offset?.x ?? 0;
     const oy = offset?.y ?? 0;
     const bx = Math.round((x - ox) * 10) / 10;
@@ -2251,7 +2258,7 @@ export function App() {
       // 3D 编辑视图所见 = 合成后落点；写回前反解出存储坐标 base（§4.3：
       // 偏移按「被放置音符自己的时间」取值，这里即当前编辑拍的时刻）。
       const meta = currentChartRef.current.metadata;
-      const b = editorTimeStore.getSnapshot().beat;
+      const b = playheadStore.getSnapshot().beat;
       const t = beatToSecondsMultiBpm(b, meta.bpm, meta.offset, meta.bpmlist);
       const tree = buildLayerTree(currentChartRef.current);
       const idx = tree.byId[placeTargetLayerId] ?? 0;
@@ -2444,7 +2451,6 @@ export function App() {
           projectorRef={gameProjectorRef}
           statsRef={statsRef}
           chartRef={currentChartRef}
-          fallbackTimeRef={storyboardFallbackTimeRef}
           onReady={handleStoryboardReady}
           storyUrl={disableExtraContent || gameState === 'menu' ? undefined : storyUrl}
           playSession={playSession}

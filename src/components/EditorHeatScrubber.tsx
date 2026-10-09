@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChartData } from '../types/game';
 import { buildChartDensity } from '../utils/chartDensity';
-import { useEditorTime } from '../editorTimeStore';
+import { usePlayhead } from '../playheadStore';
 import { useI18n } from '../i18n';
 
 /**
@@ -16,7 +16,7 @@ import { useI18n } from '../i18n';
  *  - 柱体只在 (chart, maxBeat, 桶数, 尺寸, dpr) 变化时重算并重绘到**离屏 canvas**；
  *  - 每帧只做 clearRect + drawImage(离屏) + 文字/竖线 → 每帧 O(1)。
  * 桶数由容器宽度经 ResizeObserver 决定（48~192），宽度不变则不重算。
- * 播放头经 useEditorTime 订阅（~30fps），不触发编辑器本体重渲染。
+ * 播放头经 usePlayhead 订阅（~30fps），不触发编辑器本体重渲染。
  */
 
 const BAR_H = 30;
@@ -59,7 +59,7 @@ export const EditorHeatScrubber: React.FC<EditorHeatScrubberProps> = ({
   const offRef = useRef<HTMLCanvasElement | null>(null);
   const draggingRef = useRef(false);
   const [size, setSize] = useState({ w: 0, h: BAR_H });
-  const { beat } = useEditorTime();
+  const { beat } = usePlayhead();
   const { t } = useI18n();
 
   useEffect(() => {
