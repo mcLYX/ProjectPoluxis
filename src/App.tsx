@@ -28,6 +28,7 @@ import { specFromChart, downloadSongZip, audioExtOf } from './data/zipExport';
 import type { SkinTextureSet, SkinImageSet } from './types/game';
 import { qualityStore, useQuality } from './qualityStore';
 import { playheadStore } from './playheadStore';
+import { selectionStore, useSelection } from './selectionStore';
 import { ChartData, GameStats, JudgementFeedback, NoteData } from './types/game';
 import { getSkin, loadSkinImages, loadSkinTextures } from './data/skinStore';
 import type { EditorLaunchInfo, SongItem } from './types/beatmap';
@@ -301,16 +302,19 @@ export function App() {
   // ref 镜像当前工具：R 键等事件闭包中读取最新值。
   const editorToolRef = useRef<EditorTool>('select');
   useEffect(() => { editorToolRef.current = editorTool; }, [editorTool]);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [batchSelection, setBatchSelection] = useState<BatchSelection>({ startBeat: null, endBeat: null });
   // 多选模式：双击“选择/移动”工具、双击 R 键、或按住 Ctrl 临时进入。
   const [isMultiSelect, setIsMultiSelect] = useState(false);
-  // 多选集合（note base id，不含 # 子节点后缀）。与单选 selectedNoteId 并存：
-  // 多选模式下的单击/框选改写此集合；批量编辑弹窗据此显示。
-  const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
-  // ref 镜像，供事件回调读取最新集合，避免闭包过期。
-  const selectedNoteIdsRef = useRef<string[]>(selectedNoteIds);
-  useEffect(() => { selectedNoteIdsRef.current = selectedNoteIds; }, [selectedNoteIds]);
+  // —— 编辑选中态：单一真相源是模块级 selectionStore（App 只是订阅方）——
+  // 原实现为「集合 state + 单选焦点 state + ref 镜像 + 散落各处的双写清空」，
+  // 三者一致性只靠注释维持（新增写入点必须记得同步，漏一处就分叉）。
+  // 现收口到 store：集合与焦点同处一个快照，写入只有 setIds / setFocus / clear
+  // 三个入口，清空不再需要「记得同时清两处」。
+  // 订阅后仍把值原样以 props 下发给画布，故 3D / 2D / 编辑器的 props 契约与
+  // React.memo 特性零改动 —— 收口只改变「谁拥有这个状态」，不波及下游渲染链路。
+  const selection = useSelection();
+  const selectedNoteIds = selection.ids;
+  const selectedNoteId = selection.focus;
   // 2D 框选合并方式（仅多选 + 2D 生效）。
   const [marqueeMode, setMarqueeMode] = useState<MarqueeMode>('normal');
   // Ctrl 临时切换：按住时生效，松开恢复。用 state 而非 ref，以在按住/松开时
@@ -962,7 +966,7 @@ export function App() {
     setCountdownVal(null);
     setGameTime(0);
     setPlaySession((s) => s + 1);
-    setSelectedNoteId(null);
+    selectionStore.setFocus(null);
     setEditorPreviewPlaying(false);
     setEditorTarget(null);
     // 图层隔离必须跟着谱面走：上一个谱面选中的图层 id 在新谱面里通常不存在，
@@ -1033,7 +1037,7 @@ export function App() {
     setCountdownVal(null);
     setGameTime(0);
     setPlaySession((s) => s + 1);
-    setSelectedNoteId(null);
+    selectionStore.setFocus(null);
     setEditorPreviewPlaying(false);
 
     // 取消上一次可能仍在飞行的谱面加载，避免快速重入时旧请求后到覆盖新谱面（P2-9）。
@@ -1859,8 +1863,8 @@ export function App() {
           return { ...prev, notes: updatedNotes };
         });
         // 选中刚放下的子节点：单选焦点与多选集合同步（Ctrl 切多选时集合不会为空）。
-        setSelectedNoteId(childId);
-        setSelectedNoteIds([childId]);
+        selectionStore.setFocus(childId);
+        selectionStore.setIds([childId]);
         // 返回新子节点的 id 与 x/y/beat（slide 子节点不受 DSL 影响，即传入值）。
         return { id: childId, x: bx, y: by, beat: newBeat };
       }
@@ -1880,8 +1884,8 @@ export function App() {
         : dslNote;
     // 统一选中数据源：单选焦点与多选集合都指向新音符，避免 Ctrl 切到多选后
     // 该音符不被视为已选中（多选集合为空）。
-    setSelectedNoteId(newNoteId);
-    setSelectedNoteIds([newNoteId]);
+    selectionStore.setFocus(newNoteId);
+    selectionStore.setIds([newNoteId]);
     setCurrentChart((prev) => ({ ...prev, notes: [...prev.notes, newNote].sort((a, b) => a.beat - b.beat) }));
     // 返回新音符 id 与 DSL 处理后的实际 x/y/beat，供 2D 放置后仅调整 y、
     // x/beat 使用规则结果（不再拉回拖动前的原值）。
@@ -1915,26 +1919,26 @@ export function App() {
     if (id === null) {
       // 取消单选焦点。多选模式保留集合（批量弹窗不消失）；
       // 单选模式（含切换工具后）清空集合，使音符视觉上取消选中。
-      setSelectedNoteId(null);
-      if (!effectiveMultiSelect) setSelectedNoteIds([]);
+      selectionStore.setFocus(null);
+      if (!effectiveMultiSelect) selectionStore.setIds([]);
       return;
     }
     if (effectiveMultiSelect) {
       // 多选模式：切换精确 id（头节点或子节点独立选中，子节点不带动整条链）。
-      const wasSelected = selectedNoteIdsRef.current.includes(id);
-      setSelectedNoteIds((prev) =>
+      const wasSelected = selectionStore.getSnapshot().ids.includes(id);
+      selectionStore.setIds((prev) =>
         wasSelected ? prev.filter((x) => x !== id) : [...prev, id]
       );
       if (wasSelected) {
         // 取消选中：若该 note 恰是单选焦点，同步清除焦点，避免残留选中高亮。
-        setSelectedNoteId((cur) => (cur === id ? null : cur));
+        selectionStore.setFocus((cur) => (cur === id ? null : cur));
       } else {
-        setSelectedNoteId(id);
+        selectionStore.setFocus(id);
       }
     } else {
       // 单选模式：精确 id 作为集合唯一成员（子节点可独立选中，缺省参数继承头节点）。
-      setSelectedNoteId(id);
-      setSelectedNoteIds([id]);
+      selectionStore.setFocus(id);
+      selectionStore.setIds([id]);
     }
   }, [effectiveMultiSelect]);
 
@@ -1957,13 +1961,13 @@ export function App() {
   /** 覆盖式设置多选集合（null = 清空）。同时清空单选焦点以避免两者不一致，
    *  也避免关闭批量弹窗后残留单音符面板。 */
   const handleSelectNotes = useCallback((ids: string[] | null) => {
-    setSelectedNoteIds(ids ?? []);
-    setSelectedNoteId(null);
+    selectionStore.setIds(ids ?? []);
+    selectionStore.setFocus(null);
   }, []);
 
   /** 按 marqueeMode 合并框选命中的 note id 到多选集合。 */
   const handleMarqueeSelect = useCallback((hitIds: string[], mode: MarqueeMode) => {
-    setSelectedNoteIds((prev) => {
+    selectionStore.setIds((prev) => {
       const set = new Set(prev);
       if (mode === 'normal') {
         return hitIds;
@@ -1983,7 +1987,7 @@ export function App() {
       }
       return Array.from(set);
     });
-    setSelectedNoteId(null);
+    selectionStore.setFocus(null);
   }, []);
 
   /** 批量移动：接收一组绝对位置（头节点与子节点 id 均可），一次性写入。
@@ -2150,8 +2154,7 @@ export function App() {
 
     // Per spec: suppressSelection → never auto-select notes or show panel.
     // In quick-create we always suppress, so just clear any stale selection.
-    setSelectedNoteId(null);
-    setSelectedNoteIds([]);
+    selectionStore.clear();
   }, [placeTargetLayerId]);
 
   const chartDuration = useMemo(() => getChartDuration(currentChart), [currentChart]);
@@ -2494,7 +2497,7 @@ export function App() {
             if (mode === '2d' && editorTool === 'quick-create') {
               // Quick-create is unavailable in 2D mode.
               setEditorTool('select');
-              setSelectedNoteId(null);
+              selectionStore.setFocus(null);
               setBatchSelection({ startBeat: null, endBeat: null });
             }
           }}
@@ -2508,7 +2511,7 @@ export function App() {
             if (tool === 'quick-create') {
               // Quick-create mode must not show the floating edit panel, even
               // for a note that a prior "select" tool left highlighted.
-              setSelectedNoteId(null);
+              selectionStore.setFocus(null);
               setBatchSelection({ startBeat: null, endBeat: null });
             }
           }}
