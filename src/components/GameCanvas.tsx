@@ -23,6 +23,7 @@ import {
 } from '../systems/quickCreate';
 import { createSceneGroups, disposeSceneGroups, type SceneGroups } from '../scenes/sceneGroups';
 import { usePropRefs } from '../hooks/usePropRefs';
+import { selectionStore } from '../selectionStore';
 import type { JudgeSystemContext } from '../hooks/judgeContext';
 import { useJudgeSystem } from '../hooks/useJudgeSystem';
 import { useNoteEffects, recycleBurst, recycleShatter, disposeEffectPools } from '../hooks/useNoteEffects';
@@ -65,10 +66,12 @@ interface GameCanvasProps {
   playSession: number;
   isEditorMode?: boolean;
   activeEditorTool?: 'select' | 'place-tap' | 'place-touch' | 'place-slide' | 'quick-create';
-  selectedNoteId?: string | null;
-  /** 多选集合（note base id；可能含子节点 id#i）。用于在 3D 视图为所有
-   *  选中的 note 绘制选中框（金色）。 */
-  selectedNoteIds?: string[];
+  /* 选中态（`selectedNoteId` / `selectedNoteIds`）**不再是 prop**：
+   * 它是模块级 `selectionStore` 的单一真相，本组件在 rAF / 指针处理器里按需
+   * `getSnapshot()` 读取。这样选中变化不再触发整个 3D 子树的 React 重渲染
+   * （`arePropsEqual` 对数组按身份比较，原先每次点选都会重渲染整棵子树）。
+   * 选中高亮由常驻的 rAF 循环自然刷新，观感不变。
+   * 注：`isMultiSelect` 是交互模式而非选中数据，仍走 prop。 */
   /** 是否处于多选模式（含 Ctrl 临时）。为 true 时绘制多选框。 */
   isMultiSelect?: boolean;
   snapSubdivision?: number;
@@ -719,8 +722,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   playSession,
   isEditorMode = false,
   activeEditorTool = 'select',
-  selectedNoteId = null,
-  selectedNoteIds,
   isMultiSelect = false,
   snapSubdivision = 0.25,
   onJudgement,
@@ -1033,8 +1034,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const selectionGizmoRef = useRef<THREE.Line | null>(null);
   // 多选 gizmo 池：为每个选中的 note（头节点）绘制一个金色选中框。
   const multiGizmosRef = useRef<THREE.Line[]>([]);
-  const selectedNoteIdsRef = useRef<string[]>(selectedNoteIds ?? []);
-  useEffect(() => { selectedNoteIdsRef.current = selectedNoteIds ?? []; }, [selectedNoteIds]);
   const isMultiSelectRef = useRef(isMultiSelect);
   useEffect(() => { isMultiSelectRef.current = isMultiSelect; }, [isMultiSelect]);
   const activeBurstsRef = useRef<Array<{
@@ -1164,8 +1163,6 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const autoPlayRef = useRef(autoPlay);
   const isEditorModeRef = useRef(isEditorMode);
   const activeToolRef = useRef(activeEditorTool);
-  const selectedNoteIdRef = useRef(selectedNoteId);
-
   const onSelectEditorNoteRef = useRef(onSelectEditorNote);
   const onMoveEditorNoteRef = useRef(onMoveEditorNote);
   const onPlaceEditorNoteRef = useRef(onPlaceEditorNote);
@@ -1181,7 +1178,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       isPlaying, isPaused, gameTime, speedMultiplier, projectionLeadMs, noteRenderDistance, noteSizeScale,
       antialias, renderScale, allowBloom, allowParticles,
       allowDynamicLighting, allowHitEffects, autoPlay, isEditorMode, activeEditorTool, snapSubdivision,
-      selectedNoteId, chart, speedPoints,
+      chart, speedPoints,
       onSelectEditorNote, onMoveEditorNote, onPlaceEditorNote, onApplyQuickCreateDelta, onJudgement, onSongEnd,
       onFirstFrame,
     },
@@ -1191,7 +1188,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
       antialias: antialiasRef, renderScale: renderScaleRef, allowBloom: allowBloomRef,
       allowParticles: allowParticlesRef, allowDynamicLighting: allowDynamicLightingRef, allowHitEffects: allowHitEffectsRef,
       autoPlay: autoPlayRef, isEditorMode: isEditorModeRef, activeEditorTool: activeToolRef, snapSubdivision: snapSubdivisionRef,
-      selectedNoteId: selectedNoteIdRef, chart: chartRef, speedPoints: speedPointsRef,
+      chart: chartRef, speedPoints: speedPointsRef,
       onSelectEditorNote: onSelectEditorNoteRef, onMoveEditorNote: onMoveEditorNoteRef, onPlaceEditorNote: onPlaceEditorNoteRef,
       onApplyQuickCreateDelta: onApplyQuickCreateDeltaRef, onJudgement: onJudgementRef, onSongEnd: onSongEndRef,
       onFirstFrame: onFirstFrameRef,
@@ -2583,7 +2580,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     lastCurTimeRef.current = curTime;
 
     // Editor drag — only the pointer that initiated the drag may move the note.
-    if (isEditorModeRef.current && selectedNoteIdRef.current && dragPointerIdRef.current !== null && pointerDownStartRef.current) {
+    if (isEditorModeRef.current && selectionStore.getSnapshot().focus && dragPointerIdRef.current !== null && pointerDownStartRef.current) {
       const dragPointer = pointersRef.current.get(dragPointerIdRef.current);
       if (dragPointer && dragPointer.down) {
         const dDragX = dragPointer.x - pointerDownStartRef.current.x;
@@ -2595,7 +2592,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // 图层偏移：拖动写回的是**存储坐标 base**（编辑态所见 = 合成后落点，
           // 故 base = 显示位置 − 该音符图层在「被拖动单位自己的时间」的偏移；
           // slide 子节点各自有自己的 timeSec，不能沿用头节点的）。
-          const dragSelId = selectedNoteIdRef.current || '';
+          const dragSelId = selectionStore.getSnapshot().focus || '';
           const dragHead = noteIndexRef.current.get(dragSelId.split('#')[0]);
           let dragOff = ZERO_OFF;
           if (dragHead) {
@@ -2623,7 +2620,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // the main thread (single-digit FPS during fast drags, even on flagship
           // Android). The mesh still follows the pointer perfectly every frame via
           // this live override, so the drag looks smooth.
-          liveMoveResolvedNote(noteIndexRef.current, selectedNoteIdRef.current, dragStoredX, dragStoredY);
+          liveMoveResolvedNote(noteIndexRef.current, dragSelId, dragStoredX, dragStoredY);
           dragLiveXRef.current = dragStoredX;
           dragLiveYRef.current = dragStoredY;
           // Push the live position to the editor side panel so its x/y inputs
@@ -2631,7 +2628,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           // (it subscribes to the store); it does NOT touch React chart state or
           // re-render this canvas. Dedup inside the store keeps notifications to
           // one per visible grid-step change.
-          liveDragStore.set({ id: selectedNoteIdRef.current, x: dragStoredX, y: dragStoredY });
+          liveDragStore.set({ id: dragSelId, x: dragStoredX, y: dragStoredY });
         }
       }
     }
@@ -2639,10 +2636,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // Final commit after the drag pointer is released — guarantees the last
     // live position is persisted to React state once (the only commit during a
     // drag, so the full chart is never re-resolved mid-move).
-    if (dragFinalCommitRef.current && selectedNoteIdRef.current) {
+    /* 先取一次快照再判空：TS 无法跨 getSnapshot() 调用做窄化。 */
+    const commitSelId = selectionStore.getSnapshot().focus;
+    if (dragFinalCommitRef.current && commitSelId) {
       dragFinalCommitRef.current = false;
       if (!Number.isNaN(dragLiveXRef.current)) {
-        onMoveEditorNoteRef.current?.(selectedNoteIdRef.current, dragLiveXRef.current, dragLiveYRef.current);
+        onMoveEditorNoteRef.current?.(commitSelId, dragLiveXRef.current, dragLiveYRef.current);
       }
       // Drop the live override now that the authoritative position is committed
       // to React state; the panel will show the committed value from `chart`.
@@ -2653,8 +2652,9 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     const selGizmo = selectionGizmoRef.current;
     if (selGizmo) {
       let placed = false;
-      if (isEditorModeRef.current && selectedNoteIdRef.current) {
-        const selId = selectedNoteIdRef.current;
+      /* 同上：先取快照再判空，避免跨调用丢失窄化。 */
+      const selId = selectionStore.getSnapshot().focus;
+      if (isEditorModeRef.current && selId) {
         const hashIdx = selId.indexOf('#');
         const base = hashIdx >= 0 ? selId.slice(0, hashIdx) : selId;
         const childIdx = hashIdx >= 0 ? parseInt(selId.slice(hashIdx + 1)) : 0;
@@ -2687,12 +2687,14 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
     // (head id or child id "id#i"), independent selection. Only editor mode
     // + multi-select mode (so a single focused note doesn't get a double box).
     const multiGizmos = multiGizmosRef.current;
-    const multiSel = selectedNoteIdsRef.current;
+    const multiSel = selectionStore.getSnapshot().ids;
+    /* 循环内不要每轮都调 getSnapshot()：先取一次快照再比较。 */
+    const selFocus = selectionStore.getSnapshot().focus;
     let mi = 0;
     if (multiGizmos.length > 0 && isEditorModeRef.current && isMultiSelectRef.current && multiSel.length > 0) {
       for (const selId of multiSel) {
         // 焦点 note 由单选 gizmo 绘制，避免双框重叠。
-        if (selId === selectedNoteIdRef.current) continue;
+        if (selId === selFocus) continue;
         const hashIdx = selId.indexOf('#');
         const base = hashIdx >= 0 ? selId.slice(0, hashIdx) : selId;
         const childIdx = hashIdx >= 0 ? parseInt(selId.slice(hashIdx + 1)) : 0;

@@ -2328,8 +2328,6 @@ export function App() {
           playSession={playSession}
           isEditorMode={gameState === 'editor'}
           activeEditorTool={effectiveEditorTool}
-          selectedNoteId={selectedNoteId}
-          selectedNoteIds={selectedNoteIds}
           isMultiSelect={effectiveMultiSelect}
           snapSubdivision={snapSubdivision}
           onJudgement={handleJudgementStable}
