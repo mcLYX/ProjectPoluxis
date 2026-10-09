@@ -1214,15 +1214,9 @@
   function getSlideRt(noteId, nodeCount) {
     var rt = game.slideStates[noteId];
     if (!rt || rt.nodes.length !== nodeCount) {
-      rt = { boundPointerIds: {}, nodes: [] };
-      for (var i = 0; i < nodeCount; i++) {
-        rt.nodes.push({
-          judged: false, missLocked: false, everInZone: false,
-          lastInsideTime: null, lastInsidePointerId: null,
-          arrivalChecked: false, tailLockedSPerfect: false,
-          earlySPLocked: false, earlyTouchIds: []
-        });
-      }
+      /* 节点运行态由共享内核创建（字段与原手抄版逐字一致）；headReleasePending 是
+       * 内核头窗口逻辑所需的标志，必须显式初始化（原实现依赖 undefined 为假值）。 */
+      rt = { boundPointerIds: {}, nodes: createSlideJudgeNodes(nodeCount), headReleasePending: false };
       game.slideStates[noteId] = rt;
     }
     return rt;
@@ -1251,14 +1245,9 @@
   }
 
   /* === processSlide 的复用缓冲与无闭包 helper ===
-   * 原实现「每个活跃 slide 每帧」会新建 3 个数组 + 2 个闭包 + 6 次 Object.keys +
-   * 5 次 .slice()，是密集 slide 谱的主要 GC 源。这里改为模块级 scratch + helper。
-   * processSlide 同步、不可重入，且每 slide 顺序处理 —— 复用安全。 */
-  var _allDown = [];
-  var _onNode = [];
-  var _boundOffNode = [];
-  var _boundKeysScratch = [];
-  var _EMPTY_IDS = [];
+   * 判定内核已下沉到 src/shared/slideJudge.ts（构建期内联），这里只剩「把 Lite
+   * 运行时形态翻译成内核输入」所需的复用缓冲。processSlide 同步、不可重入，
+   * 且每条 slide 顺序处理 —— 复用安全。 */
   var _slideLandTmp = { x: 0, y: 0 };
   var _slideLandOut = { x: 0, y: 0 };
   /** 绑定数（for..in 计数，避免每帧 Object.keys 分配）。 */
@@ -1275,11 +1264,81 @@
     _slideLandOut.y = nd.y - hoff.y + _slideLandTmp.y;
     return _slideLandOut;
   }
-  /** 提交一个 slide 节点判定（取代原先内联的 judge 闭包；语义逐字保留，含命中音效）。 */
-  function _commitSlideNode(boundObj, cns, note, nextIdx, dt, cnd, j, bindPids) {
-    cns.judged = true;
-    for (var bi = 0; bi < bindPids.length; bi++) boundObj[bindPids[bi]] = true;
-    commitJudge(note.id + '#' + nextIdx, j, dt);
+  /* ---------------------------------------------------------------------------
+   * slide 判定的跨端复用层。
+   *
+   * 判定内核已下沉到 src/shared/slideJudge.ts（3D / 2D / Lite 单一真相），由
+   * build-lite 内联成本作用域的 processSlideCore / createSlideJudgeNodes。手抄的
+   * 状态机（红锁 / 头节点特殊窗口 / 早锁 S-Perfect / 多指绑定剪枝）已删除，
+   * 本层只负责形态翻译：
+   *   - game.pointers 是对象映射，内核要数组 → _slidePtrs 复用缓冲（零分配）；
+   *   - rt.boundPointerIds 是普通对象，内核要 SlideBinding → 单个复用适配器 +
+   *     可变目标引用（不用 WeakMap —— IE9 没有）。
+   * ------------------------------------------------------------------------- */
+
+  /** 当前正在判定的 slide（供 commit 回调查阅；processSlide 开头设置）。 */
+  var _slideCurNote = null;
+  var _slideCurNodes = null;
+  /** 复用适配器当前的绑定容器目标。 */
+  var _slideBoundTarget = null;
+
+  /** 指针数组复用缓冲：每个槽位是同一个对象，逐帧原地改写，热路径零分配。 */
+  var _slidePtrs = [];
+  function _slidePointersFrom() {
+    var n = 0;
+    for (var k in game.pointers) {
+      if (!game.pointers.hasOwnProperty(k)) continue;
+      var p = game.pointers[k];
+      var slot = _slidePtrs[n];
+      if (!slot) { slot = { id: '', x: 0, y: 0, down: false }; _slidePtrs[n] = slot; }
+      slot.id = k; slot.x = p.x; slot.y = p.y; slot.down = !!p.down;
+      n++;
+    }
+    _slidePtrs.length = n;
+    return _slidePtrs;
+  }
+
+  /** rt.boundPointerIds（普通对象）→ 内核要求的 SlideBinding 接口。 */
+  var _slideBoundAdapter = {
+    has: function (id) { return _slideBoundTarget.hasOwnProperty(id); },
+    add: function (id) { _slideBoundTarget[id] = true; },
+    /* 关键字作键名需加引号（ES3 解析器友好）。 */
+    'delete': function (id) { delete _slideBoundTarget[id]; },
+    size: function () { return _boundCount(_slideBoundTarget); },
+    ids: function () {
+      var out = [];
+      for (var k in _slideBoundTarget) { if (_slideBoundTarget.hasOwnProperty(k)) out.push(k); }
+      return out;
+    },
+    idsInto: function (out) {
+      out.length = 0;
+      for (var k in _slideBoundTarget) { if (_slideBoundTarget.hasOwnProperty(k)) out.push(k); }
+    }
+  };
+
+  /* 内核的依赖注入。这些符号全部来自构建期内联的 shared/gameplaySpec.ts，
+   * 与完整版同源（判定窗口 / 命中盒半宽 / 档位评定 / 盒内判定 / 窗口判定）。 */
+  var _SLIDE_DEPS = {
+    hitWindowMs: HIT_WINDOW_MS,
+    slideHitHalf: SLIDE_HIT_HALF,
+    evaluateJudgement: evaluateJudgement,
+    isWithinBox: isWithinBox,
+    withinHitWindow: withinHitWindow
+  };
+
+  /** 内核的 commit 回调；语义与原 _commitSlideNode 逐字一致，但区分两种提交形态：
+   *   - Miss（超窗）：带落点提交，**不**播音效、不爆花；
+   *   - 其余档位（命中）：额外播音效 + 爆花。
+   *  judged 标记与绑定入链由内核的 applyJudge 完成，此处不重复。 */
+  function _commitSlideNodeLite(idx, j, dt) {
+    var note = _slideCurNote;
+    var cnd = _slideCurNodes[idx];
+    if (j === 'Miss') {
+      var lm = _slideLanding(note, cnd);
+      commitJudge(note.id + '#' + idx, 'Miss', dt, lm.x, lm.y, 'slide', cnd.angle);
+      return;
+    }
+    commitJudge(note.id + '#' + idx, j, dt);
     audio.playHitSound('slide');
     var lp = _slideLanding(note, cnd);
     spawnBurst(lp.x, lp.y, j, 'slide', cnd.angle);
@@ -1288,183 +1347,28 @@
   /* Per-frame slide judgment — faithful port of GameCanvas.processSlide.
    * Key rule: nodes are judged ONLY when dt>=0 (node reached the plane),
    * never early on proximity alone. This fixes the "early judgment" bug. */
+  /* Per-frame slide judgment.
+   *
+   * 判定内核见 src/shared/slideJudge.ts（构建期内联为本作用域的 processSlideCore）。
+   * 本函数只做「形态翻译 + 提交」：节点仅在 dt>=0（到达判定面）时判定，绝不因临近
+   * 而提前判定。原先手抄的 250 行状态机已删除。 */
   function processSlide(note, curTime) {
     if (note.fake) return; /* 假音符：整条 slide 链不判定、不产生 Miss */
     var allNodes = getAllSlideNodes(note);
     var rt = getSlideRt(note.id, allNodes.length);
-    /* 特效/反馈钉落位：allNodes 已嵌入 curTime 偏移，反解 base 再加该节点
-     * 自己 timeSec 的落点偏移（与完整版一致）。 */
-    /* 落点统一走模块级 _slideLanding（写入复用缓冲），不再每次 new {x,y}。 */
-    /* 1) Late-miss every unjudged node past +160ms (incl. missLocked ones) */
-    for (var i = 0; i < allNodes.length; i++) {
-      var ns = rt.nodes[i];
-      if (ns.judged) continue;
-      var dtI = (curTime - allNodes[i].timeSec) * 1000;
-      if (dtI > HIT_WINDOW_MS) {
-        ns.judged = true;
-        var _lm = _slideLanding(note, allNodes[i]);
-        commitJudge(note.id + '#' + i, 'Miss', dtI, _lm.x, _lm.y, 'slide', allNodes[i].angle);
-      }
-    }
-
-    /* 头节点特殊逻辑的生效区间：默认持续到「头节点时间 + HIT_WINDOW_MS」；
-     * 若第一子节点与头节点相距不足 HIT_WINDOW_MS，则只持续到第一子节点的时间，
-     * 避免宽松窗口越界覆盖子节点自身的判定。 */
-    var headT = allNodes[0].timeSec;
-    var child1T = allNodes.length > 1 ? allNodes[1].timeSec : Infinity;
-    var headWindowEnd = Math.min(headT + HIT_WINDOW_MS / 1000, child1T);
-    var headSpecialActive = curTime < headWindowEnd;
-
-    /* 2) 头节点开放绑定窗口：头节点一旦被命中（judged），在上述区间内持续把
-     * 「处于头节点判定盒内」的手指自由加入链上绑定。这样即便划过的 A 先被判定、
-     * 真正要接的 B 晚一帧才按下（甚至 A 已抬起），B 仍能在窗口内加入接管；
-     * 交叉 slide 中划过且仍在盒内的 A 也能自由加绑（多一个绑定只更安全）。
-     * 仅在头已被命中后才加绑，避免早期窗口（-160..0）提前产生绑定而误触发红锁。 */
-    if (rt.nodes[0].judged && headSpecialActive) {
-      var hx = allNodes[0].x;
-      var hy = allNodes[0].y;
-      for (var hk in game.pointers) {
-        if (!game.pointers.hasOwnProperty(hk)) continue;
-        var hp = game.pointers[hk];
-        if (!hp.down) continue;
-        if (Math.abs(hp.x - hx) < SLIDE_HIT_HALF && Math.abs(hp.y - hy) < SLIDE_HIT_HALF) {
-          rt.boundPointerIds[hk] = true;
-        }
-      }
-    }
-
-    /* Determine the next unjudged node early — needed for the off-node pruning
-     * below AND for step 3. Mirrors GameCanvas.processSlide. */
-    var nextIdx = -1;
-    for (var k0 = 0; k0 < rt.nodes.length; k0++) { if (!rt.nodes[k0].judged) { nextIdx = k0; break; } }
-    if (nextIdx < 0) return;
-    var cns = rt.nodes[nextIdx];
-    var cnd = allNodes[nextIdx];
-    var dt = (curTime - cnd.timeSec) * 1000;
-    var isTail = nextIdx === allNodes.length - 1;
-    var isHead = nextIdx === 0;
-
-    if (game.autoPlay) {
-      if (dt >= 0 && !cns.judged) {
-        _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, 'S-Perfect', _EMPTY_IDS);
-      }
-      return;
-    }
-
-    if (cns.missLocked) return;
-
-    /* Unified per-frame scan: maintain bindings AND classify every down finger.
-     * 三个数组改用模块级 scratch（见文件顶部说明），每帧重置。 */
-    var hadBinding = _boundCount(rt.boundPointerIds) > 0;
-    var anyDown = false;
-    var allDown = _allDown;
-    var onNode = _onNode;
-    var boundOnNode = 0;
-    var boundOffNode = _boundOffNode;
-    allDown.length = 0;
-    onNode.length = 0;
-    boundOffNode.length = 0;
-    for (var pk in game.pointers) {
-      if (!game.pointers.hasOwnProperty(pk)) continue;
-      var pp = game.pointers[pk];
-      var isBound = rt.boundPointerIds.hasOwnProperty(pk);
-      if (isBound && !pp.down) { delete rt.boundPointerIds[pk]; continue; }
-      if (!pp.down) continue;
-      anyDown = true;
-      allDown.push(pk);
-      var inBox = Math.abs(pp.x - cnd.x) < SLIDE_HIT_HALF && Math.abs(pp.y - cnd.y) < SLIDE_HIT_HALF;
-      var elig = hadBinding ? isBound : true;
-      if (inBox && elig) onNode.push(pk);
-      if (isBound) { if (inBox) boundOnNode++; else boundOffNode.push(pk); }
-    }
-    /* Drop bound pointers that have lifted. This runtime deletes lifted pointers
-     * from game.pointers entirely, so the scan above never sees them — remove
-     * them here so the chain can detect a full release (→ red lock / Miss). */
-    var boundKeys2 = _boundKeysScratch;
-    boundKeys2.length = 0;
-    for (var bk in rt.boundPointerIds) {
-      if (rt.boundPointerIds.hasOwnProperty(bk)) boundKeys2.push(bk);
-    }
-    for (var dk = 0; dk < boundKeys2.length; dk++) {
-      var bp2 = game.pointers[boundKeys2[dk]];
-      if (!bp2 || !bp2.down) delete rt.boundPointerIds[boundKeys2[dk]];
-    }
-    if (boundOnNode > 0) for (var bo = 0; bo < boundOffNode.length; bo++) delete rt.boundPointerIds[boundOffNode[bo]];
-    var allReleased = _boundCount(rt.boundPointerIds) === 0;
-
-    /* Tail relaxed rule: held through the end. */
-    if (isTail && !cns.tailLockedSPerfect && dt >= -HIT_WINDOW_MS) {
-      if (_boundCount(rt.boundPointerIds) > 0 || anyDown) cns.tailLockedSPerfect = true;
-    }
-
-    /* Red lock on full release (tail exempt).
-     * 头节点特殊窗口内不立即落锤：只记录「发生过全松手」，等窗口结束再裁定
-     * （期间允许目标手指 B 自由加绑接管，避免划过的 A 抬起就误判 misslock）。 */
-    if (hadBinding && allReleased && nextIdx >= 0 && !cns.judged && !cns.tailLockedSPerfect) {
-      if (headSpecialActive) rt.headReleasePending = true;
-      else cns.missLocked = true;
-    }
-    if (!headSpecialActive && rt.headReleasePending) {
-      rt.headReleasePending = false;
-      /* 窗口结束时仍无人绑定 → 链确已放弃，才红锁下一个未判定节点。 */
-      if (_boundCount(rt.boundPointerIds) === 0 && nextIdx >= 0 && !cns.judged && !cns.tailLockedSPerfect) {
-        cns.missLocked = true;
-      }
-    }
-    if (cns.missLocked) return;
-
-    /* Bookkeeping. */
-    if (_boundCount(rt.boundPointerIds) > 0 && onNode.length > 0) cns.everInZone = true;
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && onNode.length > 0) {
-      cns.lastInsideTime = curTime;
-      cns.lastInsidePointerId = onNode[0];
-    }
-
-    /* Pre-window early S-Perfect lock (lenient early sweep). */
-    if (!cns.judged && !cns.earlySPLocked && dt < 0 && dt >= -HIT_WINDOW_MS && onNode.length > 0) {
-      cns.earlySPLocked = true;
-      if (isHead) for (var ei = 0; ei < onNode.length; ei++) {
-        if (cns.earlyTouchIds.indexOf(onNode[ei]) === -1) cns.earlyTouchIds.push(onNode[ei]);
-      }
-    }
-
-    if (dt >= 0 && !cns.judged) {
-      var sPerfect = false;
-      if (cns.earlySPLocked) {
-        if (isHead) {
-          /* 优先绑定「当前仍在判定盒内」的手指：这把真正在头节点处按下的手指
-           * （B）以及仍停在盒内的合法早扫 / 拖入手指判给头节点，避免被只是扫过的
-           * A 抢走。仅当盒内当前无人时，才回退到宽松早锁（早扫过但手指仍按着）。 */
-          if (onNode.length > 0) {
-            sPerfect = true;
-            _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, 'S-Perfect', onNode);
-          } else {
-            var earlyAnyDown = false;
-            for (var et = 0; et < cns.earlyTouchIds.length; et++) {
-              var etp = game.pointers[cns.earlyTouchIds[et]];
-              if (etp && etp.down) { earlyAnyDown = true; break; }
-            }
-            if (earlyAnyDown) { sPerfect = true; _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, 'S-Perfect', cns.earlyTouchIds); }
-            else { cns.earlySPLocked = false; cns.earlyTouchIds = []; }
-          }
-        } else {
-          sPerfect = true; _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, 'S-Perfect', _EMPTY_IDS);
-        }
-      }
-      if (!cns.judged && !sPerfect) {
-        if (isTail && cns.tailLockedSPerfect) {
-          _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, 'S-Perfect',
-            _boundCount(rt.boundPointerIds) > 0 ? _EMPTY_IDS : allDown);
-        } else if (!cns.arrivalChecked) {
-          cns.arrivalChecked = true;
-          if (onNode.length > 0) _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, 'S-Perfect', onNode);
-        } else if (onNode.length > 0 && dt <= HIT_WINDOW_MS) {
-          var j2 = evaluateJudgement(dt);
-          if (j2) _commitSlideNode(rt.boundPointerIds, cns, note, nextIdx, dt, cnd, j2, onNode);
-        }
-      }
-    }
-
+    /* 供 commit 回调读取当前 slide 上下文（内核同步调用，不会跨帧残留）。 */
+    _slideCurNote = note;
+    _slideCurNodes = allNodes;
+    _slideBoundTarget = rt.boundPointerIds;
+    processSlideCore({
+      nodes: allNodes,
+      rt: rt,
+      bound: _slideBoundAdapter,
+      pointers: _slidePointersFrom(),
+      curTime: curTime,
+      autoPlay: !!game.autoPlay,
+      commit: _commitSlideNodeLite
+    }, _SLIDE_DEPS);
   }
 
   /* Per-frame touch note judgment — 与 GameCanvas 的 touch 判定同口径。
