@@ -61,34 +61,26 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
     if (!noScore) ctx.judgedCountRef.current++;
     const sc = noScore ? 0 : calculateNoteScore(j, countPlayableNotes(ctx.chartRef.current));
     if (j !== 'Miss') globalAudio.playHitSound(note.type);
-    // Note color = per-note override, then layer color (inherit / layer events), then chart default.
-    const noteColor = ctx.getNoteColor
-      ? ctx.getNoteColor(note)
-      : note.color || ctx.currentNoteColorRef.current || ctx.chartRef.current.metadata.noteColor;
+    // 有效音符色：note.color → 图层色（就近继承 / 图层内事件）→ 全局色，
+    // 由渲染器实现（本层不再回退到旧链 —— 见 judgeContext 的类型契约说明）。
+    const noteColor = ctx.getNoteColor(note);
     // Spawn the burst at the note's ACTUAL z position when hit, not at the
     // judgement plane. noteZ = JUDGE_Z + (dtMs/1000)*speed: early hits
     // (dtMs<0) place the burst behind the plane (note still approaching);
     // late hits (dtMs>0) place it in front (note has passed). +0.05 keeps
     // particles just in front of the note mesh to avoid z-fighting.
     const noteZ = noteHitZ(dtMs, ctx.speedRef.current);
-    // 图层偏移：打击特效与判定反馈**钉在判定落位**（不随播放中的整列平移跑动）；
-    // 未注入 getLandingPos 时退回 getEffectivePos / 原坐标。
-    const ep = ctx.getLandingPos
-      ? ctx.getLandingPos(note)
-      : ctx.getEffectivePos
-        ? ctx.getEffectivePos(note)
-        : note;
+    // 图层偏移：打击特效与判定反馈**钉在判定落位**（不随播放中的整列平移跑动）。
+    const ep = ctx.getLandingPos(note);
     spawnBurst(ep.x, ep.y, j, note.type, noteColor, noteZ, note.angle ?? 0);
     ctx.onJudgementRef.current?.({ id: note.id, type: j, x: ep.x, y: ep.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: note.type, noScore: noScore || undefined });
     // 音符触发器（§3.4）：判定提交后分发（幂等由 judgedNotesRef 保证每个音符只判一次）。
-    ctx.dispatchNoteTrigger?.(note, j);
+    ctx.dispatchNoteTrigger(note, j);
   };
 
   const commitSlideNode = (
     slide: PreparedNote,
     idx: number,
-    nx: number,
-    ny: number,
     j: JudgementType,
     dtMs: number,
   ): void => {
@@ -101,15 +93,12 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
     if (!noScore) ctx.judgedCountRef.current++;
     const sc = noScore ? 0 : calculateNoteScore(j, countPlayableNotes(ctx.chartRef.current));
     if (j !== 'Miss') globalAudio.playHitSound('slide');
-    const noteColor = ctx.getNoteColor
-      ? ctx.getNoteColor(slide)
-      : slide.color || ctx.currentNoteColorRef.current || ctx.chartRef.current.metadata.noteColor;
+    const noteColor = ctx.getNoteColor(slide);
     // Spawn at the slide node's actual z position (see commitJudgement).
     const noteZ = noteHitZ(dtMs, ctx.speedRef.current);
     const nodeAngle = idx === 0 ? (slide.angle ?? 0) : (slide.resolvedNodes?.[idx - 1]?.angle ?? 0);
-    // 特效/反馈钉落位：slide 子节点用各自 timeSec 求落点偏移（nx/ny 是嵌入
-    // curTime 偏移后的坐标，仅作未注入时的回退）。
-    const lp = ctx.getLandingPos ? ctx.getLandingPos(slide, idx) : { x: nx, y: ny };
+    // 特效/反馈钉落位：slide 子节点用各自 timeSec 求落点偏移。
+    const lp = ctx.getLandingPos(slide, idx);
     spawnBurst(lp.x, lp.y, j, 'slide', noteColor, noteZ, nodeAngle);
     ctx.onJudgementRef.current?.({ id: key, type: j, x: lp.x, y: lp.y, deltaT: dtMs, scoreGained: sc, createdAt: performance.now(), noteType: 'slide', noScore: noScore || undefined });
     // slide 子节点沿用**头节点**的触发器（子节点不带自己的 trigger）。
@@ -156,12 +145,10 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
 
     /* 故事板判定拦截（§3.7 v3）：被拦截的指针不参与 slide 判定 —— 既不能绑新节点，
        也不会被判为命中。与 tap 入口（useEditorGestures）读同一个判定源，
-       三处（tap / slide 指针表 / 绑定脱手）因此不会出现行为分叉。
-       未注入 isPointerBlocked = 不拦截（旧行为逐字不变）。 */
+       三处（tap / slide 指针表 / 绑定脱手）因此不会出现行为分叉。 */
     _slidePtrs.length = 0;
-    const blocked = ctx.isPointerBlocked;
     for (const [pid, p] of ctx.pointersRef.current) {
-      if (blocked && blocked(pid)) continue;
+      if (ctx.isPointerBlocked(pid)) continue;
       pushSlidePtr(pid, p.x, p.y, p.down);
     }
 
@@ -173,7 +160,7 @@ export const useJudgeSystem = (ctx: JudgeSystemContext, spawnBurst: SpawnBurstFn
       curTime,
       autoPlay: ctx.autoPlayRef.current,
       playStartTime: ctx.playStartTimeRef.current,
-      commit: (idx, j, dtMs) => commitSlideNode(note, idx, allNodes[idx].x, allNodes[idx].y, j, dtMs),
+      commit: (idx, j, dtMs) => commitSlideNode(note, idx, j, dtMs),
     });
   };
 

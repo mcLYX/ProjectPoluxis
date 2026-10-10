@@ -60,6 +60,12 @@ export interface ShatterEntry {
  *
  * 字段必须与被迁出逻辑实际读取的依赖严格一一对应；缺字段会在编译期触发 TS 报错，
  * 从而消除"漏依赖只在运行时暴露"的回归风险。
+ *
+ * **所有字段必填**：本 context 的唯一构造点是 3D 渲染器（`GameCanvas`）；2D 画布
+ * 自带 `commitJudge`、Lite 是 ES5 单文件，二者都不构造也不消费它。此前 5 个字段曾
+ * 标为可选并各自带「未注入 → 降级到旧行为」的分支，形成永久的并行双路径（代码审查
+ * 文档第二节 #9）。这些分支在唯一调用点恒不触发，已删除 —— **不要把字段改回可选**，
+ * 否则等于把双路径换个形式留下。
  */
 export interface JudgeSystemContext {
   // —— 场景 / 特效 ——
@@ -78,7 +84,6 @@ export interface JudgeSystemContext {
   judgedNotesRef: MutableRefObject<Set<string>>;
   judgedCountRef: MutableRefObject<number>;
   chartRef: MutableRefObject<ChartData>;
-  currentNoteColorRef: MutableRefObject<string | null>;
   onJudgementRef: MutableRefObject<((f: JudgementFeedback) => void) | undefined>;
   slideStateRef: MutableRefObject<Map<string, SlideRt>>;
   playStartTimeRef: MutableRefObject<number>;
@@ -104,30 +109,28 @@ export interface JudgeSystemContext {
     easing: EasingType;
   }>;
   /**
-   * 图层（Layer）偏移后的音符位置。未提供 = 无图层概念，按原坐标判定（旧行为，
-   * 2D / Lite 目前不提供）。slide 子节点由调用方按头节点图层换算。
+   * 图层（Layer）偏移后的音符位置。由渲染器（唯一持有图层树者）提供；
+   * 编辑器选择与 tap 命中都用「合成后」坐标。slide 子节点由调用方按头节点图层换算。
    */
-  getEffectivePos?: (note: PreparedNote) => { x: number; y: number };
-  /** 音符触发器（§3.4）：分发该音符在此判定下触发的事件。可选，未注入则不触发。 */
-  dispatchNoteTrigger?: DispatchNoteTrigger;
+  getEffectivePos: (note: PreparedNote) => { x: number; y: number };
+  /** 音符触发器（§3.4）：判定提交后由渲染器分发该音符触发的事件。 */
+  dispatchNoteTrigger: DispatchNoteTrigger;
   /**
    * 判定**落位**处的音符位置（按音符 / slide 子节点自己的 timeSec 求图层偏移）。
    * 打击特效与判定反馈钉在落位（不随播放中的整列平移跑动）；slide 子节点经
-   * `childIdx`（1-based，与 id 后缀一致）取各自坐标。未提供时退回 getEffectivePos。
+   * `childIdx`（1-based，与 id 后缀一致）取各自坐标。
    */
-  getLandingPos?: (note: PreparedNote, childIdx?: number) => { x: number; y: number };
+  getLandingPos: (note: PreparedNote, childIdx?: number) => { x: number; y: number };
   /**
    * 音符的**有效音符色**：note.color → 图层色（就近继承 / 图层内 note_color_change 事件）
-   * → 全局 noteColor。未提供时退回旧的全局单值链。
+   * → 全局 noteColor。
    */
-  getNoteColor?: (note: PreparedNote) => string;
+  getNoteColor: (note: PreparedNote) => string;
   /**
    * 该指针是否被故事板拦截（§3.7 v3 `api.input.setPointerFilter`）——true = **不参与
-   * 任何判定**（tap / touch / slide 全部屏蔽）。
-   * 由渲染器（唯一持有指针桥的组件）注入；未提供 = 不拦截，旧行为逐字不变
-   * （2D / Lite 无故事板概念，走的就是这条路径）。
+   * 任何判定**（tap / touch / slide 全部屏蔽）。由渲染器（唯一持有指针桥的组件）提供。
    */
-  isPointerBlocked?: (pointerId: number) => boolean;
+  isPointerBlocked: (pointerId: number) => boolean;
   makeRingMesh: (
     outer: RingPt[],
     thickness: number,

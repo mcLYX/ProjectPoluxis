@@ -2314,7 +2314,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const judgeCtx: JudgeSystemContext = {
     sceneRef, groupsRef, sizeScaleRef, defaultSkinJudgeWidthRef, activeBurstsRef,
     allowHitEffectsRef, speedRef, particleSpriteRef, shatterSystemsRef,
-    isEditorModeRef, judgedNotesRef, judgedCountRef, chartRef, currentNoteColorRef,
+    isEditorModeRef, judgedNotesRef, judgedCountRef, chartRef,
     onJudgementRef, slideStateRef, playStartTimeRef, pointersRef, autoPlayRef,
     resolvedRef, isPlayingRef, isPausedRef, gameTimeRef, activeToolRef,
     onPlaceEditorNoteRef, onSelectEditorNoteRef, isDraggingRef,

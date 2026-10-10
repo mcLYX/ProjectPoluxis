@@ -47,9 +47,9 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
 
       for (const n of notes) {
         // 图层偏移：编辑器选择同样针对「合成后」位置（slide 子节点沿用头节点图层）。
-        const ep = ctx.getEffectivePos?.(n);
-        const dx = ep ? ep.x - n.x : 0;
-        const dy = ep ? ep.y - n.y : 0;
+        const ep = ctx.getEffectivePos(n);
+        const dx = ep.x - n.x;
+        const dy = ep.y - n.y;
         const candidates: Array<{ id: string; x: number; y: number; beat: number; r: number }> =
           n.type === 'slide'
             ? [
@@ -81,7 +81,7 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     if (!ctx.isPlayingRef.current || ctx.isPausedRef.current) return;
     /* 故事板判定拦截（§3.7 v3）：被拦截的指针不产生任何 tap 判定。
        放在这里（而非调用处）是为了让"判定入口"只有这一处收口。 */
-    if (pointerId !== undefined && ctx.isPointerBlocked?.(pointerId)) return;
+    if (pointerId !== undefined && ctx.isPointerBlocked(pointerId)) return;
     // Read audio time directly from the audio clock. Must NOT use gameTimeRef
     // here because React.memo skips gameTime prop updates during playback →
     // ref stays at initial value → all notes appear outside the hit window →
@@ -100,7 +100,7 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
       if (ctx.judgedNotesRef.current.has(n.id) || n.type !== 'tap' || n.fake) continue;
       const dt = Math.abs((curTime - n.timeSec) * 1000);
       if (dt >= HIT_WINDOW_MS) continue;
-      const ep = ctx.getEffectivePos?.(n) ?? n;
+      const ep = ctx.getEffectivePos(n);
       const inOwn = isWithinBox(px, py, ep.x, ep.y, TAP_HIT_HALF);
       const inExtra = (n.extraHitRegions ?? []).some(
         (r) => Math.abs(px - r.x) < r.half && Math.abs(py - r.y) < r.half
@@ -126,7 +126,7 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     }
     for (const n of overlapSet) {
       if (n.timeSec !== bestTimeSec) continue; // only the most-late time group
-      const ep = ctx.getEffectivePos?.(n) ?? n;
+      const ep = ctx.getEffectivePos(n);
       const d = Math.hypot(px - ep.x, py - ep.y);
       /* 同级时间组内的并列处理：上面的 `n.timeSec !== bestTimeSec` 已把候选收敛到
        * **同一时刻**，故原先那句 `d === bestDist && best !== null && n.timeSec <
@@ -146,7 +146,7 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
         // timeSec (方案二). Never cross time windows: a tap at a different beat
         // must keep its own hitbox, otherwise its hit area would be polluted and
         // trigger false/early hits later (e.g. note-9 / note-10 same position).
-        const bestEp = ctx.getEffectivePos?.(best) ?? best;
+        const bestEp = ctx.getEffectivePos(best);
         const merged: HitRegion = { x: bestEp.x, y: bestEp.y, half: TAP_HIT_HALF };
         for (const other of overlapSet) {
           if (other === best || other.timeSec !== best.timeSec) continue;
