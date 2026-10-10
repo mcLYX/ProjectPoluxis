@@ -712,6 +712,9 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     } catch (e) {
       if (stale()) return; // 过期会话不得复位新会话的闸门/状态
       console.error('Failed to start game:', e);
+      /* 谱面加载失败现在会从 beatmapLoader 抛出（不再静默回落内置 DEMO 谱），
+       * 必须给玩家可见反馈，否则点「开始」会毫无动静。 */
+      showToast(t('songselect.loadError', { err: e instanceof Error ? e.message : String(e) }));
       setLoadingSongId(null);
       setStartPhase(null);
       isStartingGameRef.current = false;
@@ -719,7 +722,7 @@ export const SongSelect: React.FC<SongSelectProps> = ({
     }
     // syncStartPhase / reportPhase 均以 t 为依赖（useCallback 链），切换语言时
     // 身份会更新，放入依赖是安全的。
-  }, [onStartGame, syncStartPhase, reportPhase]);
+  }, [onStartGame, syncStartPhase, reportPhase, showToast, t]);
 
   // Click outside to collapse (in result mode: exit result, keep card expanded)
   const handleContainerClick = useCallback((e: React.MouseEvent) => {

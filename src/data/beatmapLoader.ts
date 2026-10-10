@@ -25,7 +25,10 @@ const BACKUP_BPMCONFIG = { min: 120, max: 200 };
 const DEFAULT_NOTE_COLOR = '#22d3ee';
 
 function getFallbackChartData(): ChartData {
-  return Object.values(DEMO_CHARTS)[0];
+  /* 深拷贝：正常加载路径（下方 `loadChartForDifficulty`）返回的就是深拷贝，回落路径
+   * 若交出**共享引用**，游玩运行时 / 编辑器对谱面的就地修改会污染之后每一次回落
+   * （审查文档第二节 #21 的相邻缺陷）。DEMO_CHARTS 是字面量常量表，必有元素。 */
+  return JSON.parse(JSON.stringify(Object.values(DEMO_CHARTS)[0]));
 }
 
 const BASE_URL = import.meta.env.BASE_URL;
@@ -44,8 +47,8 @@ export function getFallbackChart(_id?: string): ChartData {
  * 键 = chartFile 原始引用。重试 / 暂停重来 / 换难度再切回 / 预览后开局都直接命中，
  * 不再重复 fetch（此前完整版没有谱面缓存，只靠浏览器 HTTP 缓存兜底）。
  * 命中与写入都返回深拷贝：游玩运行时与编辑器可能持有并修改谱面对象，共享同一
- * 实例会把上一局的修改泄漏进下一局。上限防长会话累积；加载失败回落 fallback
- * 不入缓存，下次仍会真实重试。 */
+ * 实例会把上一局的修改泄漏进下一局。上限防长会话累积；加载失败不入缓存
+ * （非 fallback 曲抛出、fallback 曲回落内置谱），故下次仍会真实重试。 */
 const chartJsonCache = new Map<string, ChartData>();
 const CHART_JSON_CACHE_MAX = 16;
 
@@ -58,13 +61,21 @@ export async function loadChartForDifficulty(
   const diff = item.difficulties[difficultyIndex];
   if (!diff) throw new Error('难度索引无效');
   const raw = diff.chartFile;
-  if (!raw) return getFallbackChart();
+  /* 失败收口：内置 DEMO 曲（`song.id` 是 fallback）本来就没有「真谱面」，回落内置谱
+   * 是对的；**其余曲目一律抛出** —— 静默换成 DEMO 谱会让玩家在「原曲的歌名 / 音频 /
+   * 封面」下玩到一份无关谱面，且成绩仍记在原曲名下（审查文档第二节 #21）。
+   * 由调用方捕获后 toast 提示，不再无声降级。 */
+  if (!raw) {
+    if (isFallbackSong(item.id)) return getFallbackChart();
+    throw new Error(`「${item.title}」该难度缺少谱面文件引用`);
+  }
   // 内置谱面：直接返回打包进 JS 的 DEMO_CHARTS，不联网
   if (raw.startsWith('embedded://')) {
     const id = raw.slice('embedded://'.length);
     const chart = DEMO_CHARTS[id];
     if (chart) return JSON.parse(JSON.stringify(chart));
-    return getFallbackChart();
+    if (isFallbackSong(item.id)) return getFallbackChart();
+    throw new Error(`内置谱面不存在：${id}`);
   }
   const cachedChart = chartJsonCache.get(raw);
   if (cachedChart) return JSON.parse(JSON.stringify(cachedChart));
@@ -93,8 +104,10 @@ export async function loadChartForDifficulty(
   } catch (e) {
     // 调用方主动中止（如玩家切走卡片）：向上抛出，不回落 fallback、不报错误日志。
     if (signal?.aborted) throw e;
+    if (isFallbackSong(item.id)) return getFallbackChart();
     console.error('加载谱面出错', e);
-    return getFallbackChart();
+    // 归一成 Error 后抛出：调用方（SongSelect）取 `message` 做 toast。（见上文失败收口）
+    throw e instanceof Error ? e : new Error(`谱面加载失败：${String(e)}`);
   }
 }
 
