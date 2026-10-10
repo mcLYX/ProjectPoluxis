@@ -104,6 +104,19 @@ function extOf(path: string): string {
 }
 
 /**
+ * 由 `song.audio` 之类的引用名推断导出用的扩展名，推断不出时回退 `fallback`。
+ *
+ * 先去掉 `?query`（签名 URL / 带参数的在线地址会污染 `lastIndexOf('.')`）。
+ * 之所以放在模块级而不是各函数内联：`specFromSong` / `specFromChart` 两处
+ * 合计四处路径拼装共用同一规则，内联会让"库里是 .ogg、包里写成 .mp3"这类
+ * 错位在两个函数里各修一次（本文件曾因此重复两份实现）。
+ */
+function extOfRef(ref: string | undefined, fallback: string): string {
+  const e = ref ? extOf(ref.split('?')[0]) : '';
+  return e || fallback;
+}
+
+/**
  * 从 Blob 推断音频扩展名（编辑器新导入的音频是内存 File，没有可依赖的引用路径）。
  * 目的是让包内文件名与内容一致 —— 否则会写出"名为 base.mp3、内容却是 ogg"的文件，
  * 导入侧的 `resolveGroupRef` 按名字找文件时虽然还能找到，但播放器按扩展名选解码器会出错。
@@ -261,15 +274,12 @@ export async function downloadSongZip(spec: SongZipSpec, fileName?: string): Pro
 export async function specFromSong(
   song: SongItem,
   opts?: { dirName?: string; chartOverride?: Record<number, string> },
-): Promise<SongZipSpec> {  const dir = sanitizeZipName(opts?.dirName ?? song.title ?? song.id);
-  const ext = (ref: string | undefined, fallback: string): string => {
-    const e = ref ? extOf(ref.split('?')[0]) : '';
-    return e || fallback;
-  };
-  const audioPath = `base.${ext(song.audio, 'mp3')}`;
-  const coverPath = `cover.${ext(song.cover, 'jpg')}`;
-  const bgImagePath = song.bgImage ? `bg.${ext(song.bgImage, 'jpg')}` : '';
-  const bgVideoPath = song.bgVideo ? `bga.${ext(song.bgVideo, 'mp4')}` : '';
+): Promise<SongZipSpec> {
+  const dir = sanitizeZipName(opts?.dirName ?? song.title ?? song.id);
+  const audioPath = `base.${extOfRef(song.audio, 'mp3')}`;
+  const coverPath = `cover.${extOfRef(song.cover, 'jpg')}`;
+  const bgImagePath = song.bgImage ? `bg.${extOfRef(song.bgImage, 'jpg')}` : '';
+  const bgVideoPath = song.bgVideo ? `bga.${extOfRef(song.bgVideo, 'mp4')}` : '';
   const storyboardPath = 'story.js';
 
   const difficulties: SongZipSpec['difficulties'] = [];
@@ -393,12 +403,6 @@ export async function specFromChart(opts: ChartExportSpec): Promise<SongZipSpec>
     });
   }
 
-  // 扩展名沿用库里的实际格式，避免"库里是 .ogg、包里写成 .mp3"这种错位。
-  const ext = (ref: string | undefined, fallback: string): string => {
-    const e = ref ? extOf(ref.split('?')[0]) : '';
-    return e || fallback;
-  };
-
   const assets: ZipOutFile[] = [];
   for (const [rel, ref] of Object.entries(song?.assets ?? {})) {
     assets.push({ path: rel, blob: await blobOfRef(ref) });
@@ -414,10 +418,10 @@ export async function specFromChart(opts: ChartExportSpec): Promise<SongZipSpec>
     artist: opts.artist || song?.artist || '',
     bpm: opts.bpm || song?.bpm || 120,
     accentColor: opts.accentColor ?? song?.accentColor,
-    audioPath: `base.${opts.audioExtHint || ext(song?.audio, 'mp3')}`,
-    coverPath: `cover.${ext(song?.cover, 'jpg')}`,
-    bgImagePath: song?.bgImage ? `bg.${ext(song.bgImage, 'jpg')}` : '',
-    bgVideoPath: song?.bgVideo ? `bga.${ext(song.bgVideo, 'mp4')}` : '',
+    audioPath: `base.${opts.audioExtHint || extOfRef(song?.audio, 'mp3')}`,
+    coverPath: `cover.${extOfRef(song?.cover, 'jpg')}`,
+    bgImagePath: song?.bgImage ? `bg.${extOfRef(song.bgImage, 'jpg')}` : '',
+    bgVideoPath: song?.bgVideo ? `bga.${extOfRef(song.bgVideo, 'mp4')}` : '',
     storyboardPath: 'story.js',
     audio: audioBlob,
     cover: await blobOfRef(song?.cover),

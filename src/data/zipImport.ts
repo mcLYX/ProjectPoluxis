@@ -1,6 +1,7 @@
 import { unzip } from 'fflate';
 import type { AlbumItem, BeatmapItem, SongItem, DifficultyEntry } from '../types/beatmap';
 import { storeFileDedup, generateId } from './idb';
+import { isAbsoluteRef } from '../utils/refs';
 
 const AUDIO_EXT = ['mp3', 'ogg', 'wav', 'm4a', 'flac', 'webm', 'aac'];
 const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
@@ -361,7 +362,7 @@ async function resolveZipFileRef(
   entryMap: Map<string, ZipEntry>,
 ): Promise<string> {
   if (typeof raw !== 'string' || !raw) return '';
-  if (/^https?:\/\//.test(raw) || raw.startsWith('blob:') || raw.startsWith('idb://')) return raw;
+  if (isAbsoluteRef(raw)) return raw;
   const clean = raw.replace(/^\.?\//, '');
   const entry = entryMap.get(clean) ?? entryMap.get(clean.replace(/^\/+/, ''));
   if (!entry) return '';

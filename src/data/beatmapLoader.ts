@@ -16,6 +16,7 @@ import {
 } from './idb';
 import { getLibraryVersion } from './libraryStore';
 import { readBodyWithProgress, type BodyProgress } from '../utils/bodyProgress';
+import { isAbsoluteRef } from '../utils/refs';
 import { getCurrentServer, type OnlineServer } from './onlineServers';
 
 // Local fallbacks (previously imported from removed modules)
@@ -232,7 +233,7 @@ export async function resolveStoryboardUrl(
 function normalizeManifest(raw: unknown, baseUrl: string): BeatmapsManifest {
   const abs = (p?: unknown): string => {
     if (typeof p !== 'string' || !p) return '';
-    if (/^https?:\/\//.test(p) || p.startsWith('blob:') || p.startsWith('idb://')) return p;
+    if (isAbsoluteRef(p)) return p;
     return `${baseUrl}/${p.replace(/^\//, '')}`;
   };
   const asStr = (v: unknown): string => (typeof v === 'string' ? v : '');

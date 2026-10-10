@@ -37,8 +37,9 @@ function getPlaneGeo(nt: NoteType): THREE.PlaneGeometry {
 
 export function recycleBurst(group: THREE.Group): void {
   // 保留子 Mesh 与其 Material 供复用（不再逐命中 dispose + new）。
-  const key = group.userData.burstKey;
-  if (typeof key !== 'string') return;
+  // 调用点（GameCanvas 的 activeBurstsRef 回收）只传 `spawnBurst` 造出的 Group，
+  // 而那里必写 `userData.burstKey` —— 故不再做 `typeof` 守卫（死分支）。
+  const key = group.userData.burstKey as string;
   const bin = burstPool.get(key);
   if (bin) bin.push(group);
   else burstPool.set(key, [group]);
@@ -55,13 +56,14 @@ export function recycleShatter(points: THREE.Points): void {
 export function disposeEffectPools(): void {
   burstPool.forEach((bin) => {
     for (const g of bin) {
-      const child = g.children[0] as THREE.Mesh | undefined;
-      (child?.material as THREE.Material | undefined)?.dispose();
+      // 池内 Group 恒含一个 Mesh（`spawnBurst` 里 `g.add(mesh)`），其 material 恒存在。
+      ((g.children[0] as THREE.Mesh).material as THREE.Material).dispose();
     }
   });
   burstPool.clear();
   for (const p of shatterPool) {
-    (p.material as THREE.Material | undefined)?.dispose();
+    // Points 构造时必带 material（`spawnBurst` 内 `new THREE.PointsMaterial`）。
+    (p.material as THREE.Material).dispose();
   }
   shatterPool.length = 0;
   for (const k of Object.keys(planeGeoCache)) {
