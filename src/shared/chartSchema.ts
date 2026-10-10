@@ -53,25 +53,27 @@ export function parseAndValidateChart(input: unknown): {
   var warnings: string[] = [];
 
   // ---- metadata: fill defaults for anything missing ----
-  var meta: any =
-    data.metadata && typeof data.metadata === 'object' ? data.metadata : {};
-  if (!data.metadata || typeof data.metadata !== 'object') {
+  // 每处「取值 + 告警」共用同一个布尔量：原先把同一条件算了两遍（先三元取值、再 if 判空）。
+  var hasMeta = !!data.metadata && typeof data.metadata === 'object';
+  var meta: any = hasMeta ? data.metadata : {};
+  if (!hasMeta) {
     warnings.push('缺少 metadata，已使用默认元数据。');
   }
-  var title = typeof meta.title === 'string' && meta.title.trim() ? meta.title : '';
-  if (!title) {
-    title = 'Custom Track';
+  var hasTitle = typeof meta.title === 'string' && !!meta.title.trim();
+  var title = hasTitle ? meta.title : 'Custom Track';
+  if (!hasTitle) {
     warnings.push('metadata.title 缺失或非法，已使用 "Custom Track"。');
   }
-  var bpm = isNum(meta.bpm) && meta.bpm > 0 ? meta.bpm : 0;
-  if (!bpm) {
-    bpm = DEFAULT_BPM;
+  var hasBpm = isNum(meta.bpm) && meta.bpm > 0;
+  var bpm = hasBpm ? meta.bpm : DEFAULT_BPM;
+  if (!hasBpm) {
     warnings.push('metadata.bpm 缺失或非法，已使用 ' + DEFAULT_BPM + '。');
   }
 
   // ---- notes: allow empty; salvage per note, drop the unrecoverable ----
-  var rawNotes: any[] = Array.isArray(data.notes) ? data.notes : [];
-  if (!Array.isArray(data.notes)) {
+  var hasNotes = Array.isArray(data.notes);
+  var rawNotes: any[] = hasNotes ? data.notes : [];
+  if (!hasNotes) {
     warnings.push('notes 缺失或不是数组，已视为空谱面。');
   }
   var notes: any[] = [];

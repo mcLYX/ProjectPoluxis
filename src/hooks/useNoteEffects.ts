@@ -135,8 +135,10 @@ export const useNoteEffects = (ctx: JudgeSystemContext) => {
       const size = ctx.projSize(nt);
       mesh.scale.set(size, size, 1);
     }
+    // burst Group 钉在判定平面上 —— 但 `z` 并未被丢弃：它作为粒子初始深度
+    // 传给 deriveShatterParticles（判定瞬间的音符 z），故这里只用平面 z。
     g.position.set(x, y, JUDGE_Z + 0.05);
-    g.rotation.z = -(angle ?? 0);
+    g.rotation.z = -angle;
     const visualScale = ctx.sizeScaleRef.current;
     g.scale.set(visualScale, visualScale, 1);
     fx.add(g);

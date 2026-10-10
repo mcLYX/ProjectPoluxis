@@ -26,9 +26,11 @@ export async function readBodyWithProgress(
   const chunks: Uint8Array[] = [];
   let loaded = 0;
   for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
+    // 不解构：`ReadableStreamReadResult` 是可辨识联合，解构会丢掉 `done` 与 `value`
+    // 的关联，逼出一个恒假的 `value == null` 判空。保留整体即可让 TS 自行窄化。
+    const result = await reader.read();
+    if (result.done) break;
+    const value = result.value;
     chunks.push(value);
     loaded += value.byteLength;
     onProgress(loaded, total);

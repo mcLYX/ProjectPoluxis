@@ -1,6 +1,7 @@
 import type { NoteData, NoteType } from '../types/game';
 import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
 import { EASING_TYPES } from './easing';
+import { clamp } from './math';
 import { safeStorage } from './storage';
 
 /**
@@ -592,7 +593,7 @@ function sanitizeDslResult(
   /** 裁剪**屏幕坐标**到 ±range，换算回 base。 */
   const clampScreen = (v: number, range: number, o: number): number => {
     if (!Number.isFinite(v)) return (v > 0 ? range : v < 0 ? -range : 0) - o;
-    return Math.max(-range, Math.min(range, v)) - o;
+    return clamp(v, -range, range) - o;
   };
   /** 裁剪 **base**（先转屏幕坐标再夹，最后换算回 base；等价旧的 clamp(base+o)−o）。 */
   const clampBase = (v: number, range: number, o: number): number => clampScreen(v + o, range, o);

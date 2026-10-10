@@ -17,7 +17,6 @@ import {
 import { EASING_FNS } from './easing';
 
 export {
-  beatToSeconds,
   beatToSecondsMultiBpm,
   secondsToBeatMultiBpm,
   getBpmAtBeat,

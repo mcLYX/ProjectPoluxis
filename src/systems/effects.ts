@@ -1,12 +1,9 @@
 import type { JudgementType, NoteType } from '../types/game';
 import { JUDGEMENT_COLORS } from '../utils/scoring';
 import { WORLD_UNITS_PER_SECOND } from './judge';
-
-// 特效尺寸常量（与 GameCanvas 中 note 视觉尺寸同源，集中到此供粒子几何复用）。
-const TAP_SIZE = 1.6;
-const TOUCH_SIZE = TAP_SIZE * 0.707;
-const SLIDE_SIZE = TAP_SIZE * 0.707;
-const SLIDE_HALF = (SLIDE_SIZE * Math.SQRT2) / 2;
+// 音符尺寸常量：与渲染层同一来源（shared/gameplaySpec 经 gameplayConstants 再导出），
+// 不再在本文件手写第三份副本 —— 改尺寸只需改 gameplaySpec 一处。
+import { TAP_SIZE, TOUCH_SIZE, SLIDE_HALF } from '../gameplayConstants';
 
 /** 打击特效框的纯参数推导结果（不含任何 THREE 对象，便于单测）。 */
 export interface BurstConfig {
@@ -84,7 +81,7 @@ export function deriveShatterParticles(
   const noteSpeed = WORLD_UNITS_PER_SECOND * speed;
   const zSpeedBase = 9 + noteSpeed * 0.1;
   const zSpeedRange = noteSpeed * 0.06;
-  const rot = -(angle ?? 0);
+  const rot = -angle;
   const cosR = Math.cos(rot);
   const sinR = Math.sin(rot);
   for (let i = 0; i < PCOUNT; i++) {

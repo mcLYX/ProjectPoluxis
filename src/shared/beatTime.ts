@@ -214,8 +214,13 @@ export function prefixDistanceAt(prefix: SpeedPrefix, timeSec: number): number {
   return prefix.cum[lo] + (timeSec - baseT) * prefix.segSpeed[lo];
 }
 
-/** Convert a beat number to absolute seconds with constant BPM. */
-export function beatToSeconds(beat: number, bpm: number, offset: number): number {
+/**
+ * Convert a beat number to absolute seconds with constant BPM.
+ *
+ * 非导出：唯一调用点是下方 `beatToSecondsMultiBpm` 的无 bpmlist 回退；对外只暴露
+ * 多 BPM 版本（全仓库无外部调用点，见审查文档第三节 原则1 #9）。
+ */
+function beatToSeconds(beat: number, bpm: number, offset: number): number {
   return offset + (beat * 60) / bpm;
 }
 
