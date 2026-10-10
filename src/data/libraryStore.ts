@@ -436,8 +436,8 @@ export async function downloadSongToLibrary(song: SongItem): Promise<void> {
     source: 'local',
     onlineId,
     onlineUrls: {
-      audio: (song.onlineUrls?.audio ?? song.audio) || undefined,
-      cover: (song.onlineUrls?.cover ?? song.cover) || undefined,
+      audio: audioUrl || undefined,
+      cover: coverUrl || undefined,
       bgImage: bgImageUrl || undefined,
       bgVideo: bgVideoUrl || undefined,
       storyboard: storyboardUrl || undefined,

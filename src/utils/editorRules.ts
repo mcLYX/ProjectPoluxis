@@ -547,11 +547,23 @@ function assignProp(
 // 对外 API
 // ---------------------------------------------------------------------------
 
+/**
+ * beat 的合法上界（绝对值）。
+ *
+ * 为什么需要：只判 `Number.isFinite` **不够** —— 超大的有限 beat 会让下游
+ * `Number.prototype.toFixed()` **抛 RangeError**（规范规定 |x| ≥ 1e21 时必须抛）。
+ * 实测崩溃路径是 `EditorHeatScrubber` 的 `span.toFixed(2)`（span = 谱面最大拍）
+ * 与 `VisualChartEditor` 的总时长显示。
+ *
+ * 取 1e9：比崩溃阈值低 12 个数量级，同时远超任何真实谱面（120 BPM 下约 139 小时）。
+ */
+const MAX_BEAT = 1e9;
+
 /** 将 DSL 计算结果修正为合法值（统一在 applyDslToNote 出口处执行，所有
  *  使用放置规则脚本的地方（放置、快速创建、区间规则、UseRule、子节点）都受益）。
  *
  *  通用：inf / NaN / null / undefined、类型不对、值不合法 → 缺省值。
- *  - beat：允许所有非 inf 数字；值不合法时回退为未经脚本处理的原数据。
+ *  - beat：允许所有**有限数**，但绝对值须小于 `MAX_BEAT`；不合法时回退为未经脚本处理的原数据。
  *  - x / y：**屏幕坐标**（= base + 该音符时刻的图层偏移），范围 ±2.4 / ±1.5。
  *  - basex / basey：**存储坐标 base**；被赋值且晚于 x / y 时优先生效（后写者胜）。
  *  - type：非法时回退原类型。
@@ -567,9 +579,11 @@ function sanitizeDslResult(
   off?: { x: number; y: number },
   assignOrder?: Map<string, number>,
 ): NoteData {
-  // beat：范围 21 亿，否则回退原数据。之前只写inf会崩。
+  // beat：须为有限数且 |beat| < MAX_BEAT，否则回退原数据。
+  // ⚠️ 上界判断**不是**冗余：只判 inf 时，超大有限值会让下游 toFixed() 抛
+  // RangeError 而崩溃（详见 MAX_BEAT 的注释）。上界原为随手填的 2^31，已换成常量。
   const beat =
-    typeof ctx.beat === 'number' && Number.isFinite(ctx.beat) && Math.abs(ctx.beat) < 2147483648
+    typeof ctx.beat === 'number' && Number.isFinite(ctx.beat) && Math.abs(ctx.beat) < MAX_BEAT
       ? (ctx.beat as number)
       : note.beat;
 
