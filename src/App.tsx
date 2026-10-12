@@ -2249,14 +2249,15 @@ export function App() {
   const viewportActive = !(gameState === 'editor' && editorViewMode === '2d' && !editorPreview3D);
 
   /**
-   * 3D 画布 `onPlaceEditorNote` 的**稳定适配层**。
+   * 透视图视口（3D `GameCanvas` 与 lite 的 2D `GameCanvas2D`）`onPlaceEditorNote`
+   * 的**稳定适配层**。两者都以 (x, y) 传**显示坐标**，需要在这里补「拍 + 图层偏移」。
    *
-   * 3D 回调只给 (x, y)，而 `handlePlaceEditorNote` 需要「拍 + 图层偏移」，故在放置
+   * 回调只给 (x, y)，而 `handlePlaceEditorNote` 需要「拍 + 图层偏移」，故在放置
    * 瞬间按当前编辑拍求解。必须包在 `useCallback` 里：原先是内联箭头，每次 App 重
    * 渲染都换新身份，而 `GameCanvas` 的 `arePropsEqual` 是**逐 key 身份比较** → 播放
    * 期间每次判定回传都会让整棵 3D 子树重渲染，React.memo 完全失效。
    */
-  const handlePlaceEditorNote3D = useCallback(
+  const handlePlaceEditorNoteFromViewport = useCallback(
     (x: number, y: number) => {
       // 3D 编辑视图所见 = 合成后落点；写回前反解出存储坐标 base（§4.3：
       // 偏移按「被放置音符自己的时间」取值，这里即当前编辑拍的时刻）。
@@ -2335,7 +2336,7 @@ export function App() {
           onFirstFrame={handleFirstFrame}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
-          onPlaceEditorNote={handlePlaceEditorNote3D}
+          onPlaceEditorNote={handlePlaceEditorNoteFromViewport}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           skinTextures={skinTextures}
           defaultSkinInnerEnabled={defaultSkinInnerEnabled}
@@ -2379,7 +2380,7 @@ export function App() {
           onFirstFrame={handleFirstFrame}
           onSelectEditorNote={handleSelectEditorNote}
           onMoveEditorNote={handleMoveEditorNote}
-          onPlaceEditorNote={handlePlaceEditorNote}
+          onPlaceEditorNote={handlePlaceEditorNoteFromViewport}
           onApplyQuickCreateDelta={handleApplyQuickCreateDelta}
           skinImages={skinImages}
           defaultSkinInnerEnabled={defaultSkinInnerEnabled}

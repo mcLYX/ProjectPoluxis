@@ -891,7 +891,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     /* —— 图层（Layer）运行时（与 3D GameCanvas 同构）——
      * 树随谱面在 resetGame 里重建；偏移每帧每图层一次（render 顶部统一求值）；
-     * 音符→图层下标按对象缓存。编辑器模式下偏移恒 0（2D 编辑器 = 图层本地坐标视图）。 */
+     * 音符→图层下标按对象缓存。编辑器与游玩都用**合成后坐标**（所见即所得，
+     * 与 3D 编辑器/游玩一致）：渲染、命中、放置、拖拽全部走 base + 合成偏移。 */
     let layerTree: LayerTree | null = null;
     let layerOffs: Array<{ x: number; y: number }> = [{ x: 0, y: 0 }];
     let noteLayerCache = new WeakMap<object, number>();
@@ -905,18 +906,16 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return idx;
     }
     const ZERO_OFF2D = { x: 0, y: 0 };
-    /** 当前帧该音符图层的合成偏移（offsetAt(curTime)）。编辑器恒 0。 */
+    /** 当前帧该音符图层的合成偏移（offsetAt(curTime)）—— 编辑器与游玩一致（不再特判 0）。 */
     function offOf2D(n: object): { x: number; y: number } {
-      if (propsRef.current.isEditorMode) return ZERO_OFF2D;
       const idx = layerIdxOf2D(n);
       return idx >= 0 && idx < layerOffs.length ? layerOffs[idx] : ZERO_OFF2D;
     }
     function layerOffAtIdx2D(idx: number, t: number): { x: number; y: number } {
       return layerTree ? layerOffsetAt(layerTree, idx, t) : ZERO_OFF2D;
     }
-    /** 判定落位偏移（按音符自己 timeSec）——投影引导/打击特效钉落位用。编辑器恒 0。 */
+    /** 判定落位偏移（按音符自己 timeSec）——投影引导/打击特效钉落位用（编辑器一致）。 */
     function landingOffOf2D(n: { timeSec?: number }): { x: number; y: number } {
-      if (propsRef.current.isEditorMode) return ZERO_OFF2D;
       const t = typeof n.timeSec === 'number' ? n.timeSec : 0;
       return layerOffAtIdx2D(layerIdxOf2D(n), t);
     }
@@ -924,9 +923,9 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
      * 各调用点用**各自的** scratch，避免被中途调用（如 commitJudge）串改。 */
     const _projOff2DScratch = { x: 0, y: 0 };
     const _touchOff2DScratch = { x: 0, y: 0 };
-    /** 判定落位偏移 — **写入 out**（零分配）。编辑器恒 0。 */
+    /** 判定落位偏移 — **写入 out**（零分配）。 */
     function landingOffOf2DInto(n: { timeSec?: number }, out: { x: number; y: number }): void {
-      if (propsRef.current.isEditorMode || !layerTree) { out.x = 0; out.y = 0; return; }
+      if (!layerTree) { out.x = 0; out.y = 0; return; }
       const t = typeof n.timeSec === 'number' ? n.timeSec : 0;
       layerOffsetAtInto(layerTree, layerIdxOf2D(n), t, out);
     }
@@ -1100,13 +1099,27 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     /* ---------------- 窗口搜索 / z 推导（镜像 GameCanvas） ---------------- */
     /**
+     * 未来窗秒数：必须按谱面**最小流速**扩宽（与 GameCanvas 正流速分支同构）。
+     * 慢速 / 冻结（speed → 0）段里，同样的 Δz 对应更长的 Δt —— 用常数流速
+     * (`game.speed * game.speedMul`) 算窗会把仍然可见的音符排除在窗口外
+     * （表现为「编辑器内音符消失」）。`minSpeed = 0` 得到 +Infinity，恰好覆盖
+     * 到谱面末尾，正是冻结段的正确语义。负流速不走这里（渲染改走距离窗），
+     * 保守取 1，避免误把窗口收窄。
+     */
+    function futureBufferSec(spawnLimit: number): number {
+      const baseSpeed = game.speed * game.speedMul;
+      const ms = game.runtime ? game.runtime.minSpeed : 1;
+      const minSpeed = ms >= 0 ? ms : 1;
+      return -spawnLimit / (baseSpeed * minSpeed) + 0.3;
+    }
+
+    /**
      * 时间窗（**判定语义**，与流速符号无关）：音符按 timeSec 升序 → 二分。
      * 判定天然是时间事件（命中窗 / 迟 Miss / slide 跨度），故含负流速时也用它。
      */
     function timeWindow(curTime: number, spawnLimit: number): { first: number; last: number } {
-      const speed = game.speed * game.speedMul;
       const pastBuffer = 0.3 + (game.maxSlideSpan || 0);
-      const futureBuffer = -spawnLimit / speed + 0.3;
+      const futureBuffer = futureBufferSec(spawnLimit);
       const pastTh = curTime - pastBuffer;
       const futureTh = curTime + futureBuffer;
       let lo = 0;
@@ -1500,7 +1513,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const vScale = game.sizeScale;
       const colorHex = game.currentNoteColor || game.noteColor;
 
-      /* 图层偏移：每帧每图层一次（与 3D 同构）。编辑器模式 offOf2D 恒 0（图层本地视图）。 */
+      /* 图层偏移：每帧每图层一次（与 3D 同构）。编辑器与游玩一致，均用合成后坐标。 */
       if (layerTree && layerOffs.length === layerTree.nodes.length) {
         for (let li = 0; li < layerTree.nodes.length; li++) {
           layerOffsetAtInto(layerTree, li, curTime, layerOffs[li]);
@@ -1808,9 +1821,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
 
     /* 通用时间窗二分（对任意按 timeSec 升序的数组），供 tap 子集复用。 */
     function timeWindowOf(notes: PreparedNote[], curTime: number, spawnLimit: number): { first: number; last: number } {
-      const speed = game.speed * game.speedMul;
       const pastBuffer = 0.3 + (game.maxSlideSpan || 0);
-      const futureBuffer = -spawnLimit / speed + 0.3;
+      const futureBuffer = futureBufferSec(spawnLimit);
       const pastTh = curTime - pastBuffer;
       const futureTh = curTime + futureBuffer;
       let lo = 0, hi = notes.length, mid = 0;
@@ -1902,7 +1914,11 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       if (!j) return;
       commitJudge(n.id, j, dtMs);
       globalAudio.playHitSound('tap');
-      spawnBurst(n.x, n.y, j, 'tap', n.angle ?? 0);
+      /* 特效钉落位：`n.x/n.y` 是裸 base，必须补上该音符**自己 timeSec** 的图层偏移
+       * （与 3D 的 getLandingPos、以及本文件其余 8 处 spawnBurst 口径一致）——
+       * 漏掉会让命中的环出现在 base 处，与渲染中的音符（base+offset）错位。 */
+      const lo = landingOffOf2D(n);
+      spawnBurst(n.x + lo.x, n.y + lo.y, j, 'tap', n.angle ?? 0);
     }
 
     function handleReleaseInput(pid: string): void {
@@ -1959,7 +1975,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       },
     });
 
-    /** 命中最近的音符/子节点 id（判定面世界坐标；仅限 [curBeat-0.1, curBeat+0.5]）。 */
+    /** 命中最近的音符/子节点 id（判定面世界坐标；仅限 [curBeat-0.1, curBeat+0.5]）。
+     *  比较的是**合成后位置**（base + 当前帧图层偏移），与渲染/拖拽同一口径。 */
     function hitTestEditorNote(wx: number, wy: number): string | null {
       const chart = game.chart;
       if (!chart) return null;
@@ -1968,19 +1985,20 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       let bestId: string | null = null;
       let bestDist = Infinity;
       for (const n of game.notes) {
+        const off = offOf2D(n); // 子节点沿用头节点图层，故头/子共用同一份偏移
         const cands =
           n.type === 'slide'
             ? [
-                { id: n.id, x: n.x, y: n.y, beat: n.beat, r: 0.7 },
+                { id: n.id, x: n.x + off.x, y: n.y + off.y, beat: n.beat, r: 0.7 },
                 ...(n.resolvedNodes ?? []).map((sn, i) => ({
                   id: `${n.id}#${i + 1}`,
-                  x: sn.x,
-                  y: sn.y,
+                  x: sn.x + off.x,
+                  y: sn.y + off.y,
                   beat: sn.beat,
                   r: 0.7,
                 })),
               ]
-            : [{ id: n.id, x: n.x, y: n.y, beat: n.beat, r: n.type === 'tap' ? 0.85 : 0.65 }];
+            : [{ id: n.id, x: n.x + off.x, y: n.y + off.y, beat: n.beat, r: n.type === 'tap' ? 0.85 : 0.65 }];
         for (const c of cands) {
           if (c.beat < curBeat - 0.1 || c.beat > curBeat + 0.5) continue;
           const d = Math.hypot(wx - c.x, wy - c.y);
@@ -2110,13 +2128,30 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             return;
           }
           /* 编辑器拖拽：仅发起拖拽的那个指针可移动选中音符。
-           * 与 3D 版一致（GameCanvas.tsx 的 drag 分支）：x/y 钳制到
-           * ±NOTE_X_RANGE / ±NOTE_Y_RANGE 并按 0.1 取整，防止把音符拖出判定平面范围。 */
+           * 与 3D 版一致（GameCanvas.tsx 的 drag 分支）：先按**显示坐标**钳制到
+           * ±NOTE_X_RANGE / ±NOTE_Y_RANGE 并 0.1 取整，再反解成存储坐标 base
+           * （减去被拖单元**自己 timeSec** 的图层偏移）——否则有图层偏移时「指哪不打哪」。 */
           if (pr.isEditorMode && editorDragging && editorDragPid === String(ev.pointerId) && editorDragTargetId) {
             const w = screenToWorld(p.x, p.y);
             const cx = Math.round(Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, w.x)) * 10) / 10;
             const cy = Math.round(Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, w.y)) * 10) / 10;
-            pr.onMoveEditorNote?.(editorDragTargetId, cx, cy);
+            const dragSelId = editorDragTargetId;
+            const dragHash = dragSelId.indexOf('#');
+            const dragHead = noteById.get(dragHash >= 0 ? dragSelId.slice(0, dragHash) : dragSelId);
+            let dragOffX = 0;
+            let dragOffY = 0;
+            if (dragHead) {
+              const dragUnit = dragHash >= 0
+                ? dragHead.resolvedNodes?.[parseInt(dragSelId.slice(dragHash + 1)) - 1]
+                : dragHead;
+              const dragT = dragUnit && typeof dragUnit.timeSec === 'number' ? dragUnit.timeSec : dragHead.timeSec;
+              const dragOff = layerOffAtIdx2D(layerIdxOf2D(dragHead), typeof dragT === 'number' ? dragT : 0);
+              dragOffX = dragOff.x;
+              dragOffY = dragOff.y;
+            }
+            const bx = Math.round((cx - dragOffX) * 10) / 10;
+            const by = Math.round((cy - dragOffY) * 10) / 10;
+            pr.onMoveEditorNote?.(dragSelId, bx, by);
             return;
           }
           const prev = pendingMoves[String(ev.pointerId)];
