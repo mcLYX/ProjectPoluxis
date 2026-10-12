@@ -1094,16 +1094,10 @@
     };
   }
 
-  /* Find the best TAP note to hit at (wx,wy) near curTime (pointerdown only).
-   * Touch notes are hover-triggered and handled per-frame by processTouchNote,
-   * NOT by tap. Returns the note object or null.
-   *
-   * Overlap-merge judgment (mirrors full version 方案二): a tap is hittable if the
-   * touch point is inside its own TAP_HIT_HALF box OR any merged extraHitRegions.
-   * Among all hittable same-time taps, pick the closest to the touch point
-   * (tie-break by id). After consuming `best`, merge its own box into the other
-   * hittable same-time taps so subsequent presses on the overlap can still reach
-   * them. Does NOT cross into later time windows. */
+  /* tap 命中检索（pointerdown 即时判定）已下沉 shared/tapJudge.judgeTapCore
+   * （构建期内联为本作用域的 judgeTapCore）。Touch notes 仍是悬停触发，逐帧由
+   * processTouchNote 处理，不经 tap。候选仍取 tap 子集 + 二分时间窗，保持
+   * 「只扫窗口内 tap」的既有优化。 */
   var tapNotesCache = null, tapNotesCacheKey = null;
   function getTapNotes() {
     if (tapNotesCache && tapNotesCacheKey === game.notes) return tapNotesCache;
@@ -1120,69 +1114,31 @@
     while (lo < hi) { mid = (lo + hi) >> 1; if (notes[mid].timeSec <= futureTh) lo = mid + 1; else hi = mid; }
     return { first: first, last: lo };
   }
-  function findHitTapNote(wx, wy, curTime) {
-    var tapNotes = getTapNotes();
-    var overlapSet = [];
-    var win = findWindowOf(tapNotes, curTime, -game.renderDist);
-    for (var i = win.first; i < win.last; i++) {
-      var n = tapNotes[i];
-      if (game.judged[n.id] || n.fake) continue;
-      var dtMs = Math.abs((curTime - n.timeSec) * 1000);
-      if (dtMs >= HIT_WINDOW_MS) continue;
-      /* 图层偏移：命中判定用「合成后位置」（渲染与判定同一份值） */
-      var nOff = offOfLite(n);
-      var inOwn = Math.abs(n.x + nOff.x - wx) < TAP_HIT_HALF && Math.abs(n.y + nOff.y - wy) < TAP_HIT_HALF;
-      var extra = n.extraHitRegions;
-      var inExtra = false;
-      if (extra) {
-        for (var e = 0; e < extra.length; e++) {
-          if (Math.abs(extra[e].x - wx) < extra[e].half && Math.abs(extra[e].y - wy) < extra[e].half) { inExtra = true; break; }
-        }
-      }
-      if (inOwn || inExtra) overlapSet.push(n);
-    }
-    var best = null, bestDist = Infinity;
-    // Selection rule (fixes late-tap swallow bug): when the touch point lands
-    // inside hitboxes of taps at DIFFERENT times (neighbouring close taps whose
-    // TAP_HIT_HALF boxes overlap), prefer the MOST LATE one — closest to its miss
-    // deadline, the tap the player is racing to rescue. Judging the nearer-but-
-    // later tap first would swallow the earlier late tap (e.g. note-291 late but
-    // note-292 closer → 292 judged, 291 dropped). Within the chosen time group
-    // (truly same-time overlapping taps) fall back to 方案二: closest to touch
-    // point wins; then merge hitboxes. Times numeric & id-independent.
-    var bestLate = -Infinity, bestTimeSec = Infinity;
-    for (var k = 0; k < overlapSet.length; k++) {
-      var lat = curTime - overlapSet[k].timeSec; // seconds, signed; larger = later
-      if (lat > bestLate) { bestLate = lat; bestTimeSec = overlapSet[k].timeSec; }
-    }
-    for (var k2 = 0; k2 < overlapSet.length; k2++) {
-      var m = overlapSet[k2];
-      if (m.timeSec !== bestTimeSec) continue; // only the most-late time group
-      var mOff = offOfLite(m);
-      var dxm = m.x + mOff.x - wx, dym = m.y + mOff.y - wy;
-      var d = Math.sqrt(dxm * dxm + dym * dym);
-      if (d < bestDist || (d === bestDist && best !== null && m.timeSec < best.timeSec)) { best = m; bestDist = d; }
-    }
-    if (best) {
-      var bOff = offOfLite(best);
-      var merged = { x: best.x + bOff.x, y: best.y + bOff.y, half: TAP_HIT_HALF };
-      for (var j = 0; j < overlapSet.length; j++) {
-        var other = overlapSet[j];
-        // 方案二: merge ONLY into taps at the SAME timeSec. Never cross time
-        // windows, otherwise a tap at a different beat would gain a polluted hit
-        // area and trigger false/early hits later (e.g. note-9 / note-10 same pos).
-        if (other === best || other.timeSec !== best.timeSec) continue;
-        if (!other.extraHitRegions) other.extraHitRegions = [];
-        var dup = false;
-        for (var r = 0; r < other.extraHitRegions.length; r++) {
-          var reg = other.extraHitRegions[r];
-          if (reg.x === merged.x && reg.y === merged.y && reg.half === merged.half) { dup = true; break; }
-        }
-        if (!dup) other.extraHitRegions.push(merged);
-      }
-    }
-    return best;
+  /* tap / touch 判定核心的环境面与依赖注入。
+   * 依赖符号全部来自构建期内联的 shared/gameplaySpec.ts，与完整版
+   * src/systems/tapJudge.ts 同源（判定窗口 / 命中盒半宽 / 档位评定 / 盒内与窗口判定）。 */
+  var _TAP_DEPS = {
+    hitWindowMs: HIT_WINDOW_MS,
+    tapHitHalf: TAP_HIT_HALF,
+    touchHitHalf: TOUCH_HIT_HALF,
+    isWithinBox: isWithinBox,
+    withinHitWindow: withinHitWindow,
+    evaluateJudgement: evaluateJudgement
+  };
+  /* 合成立即位置 = base + 该音符图层偏移（渲染与判定同一份值）；偏移为 0 时直接返回
+   * 音符本身，省一次分配。 */
+  function _effectivePosLite(n) {
+    var o = offOfLite(n);
+    return (o.x === 0 && o.y === 0) ? n : { x: n.x + o.x, y: n.y + o.y };
   }
+  var _tapEnvLite = {
+    getEffectivePos: _effectivePosLite,
+    isJudged: function (n) { return !!game.judged[n.id]; }
+  };
+  var _touchEnvLite = {
+    getEffectivePos: _effectivePosLite,
+    isAnyPointerInside: isAnyPointerInside
+  };
 
   /* Is any active pointer within square half-size `half` of (x,y)?
    * Uses `active` (not `down`): mouse pointers are active on hover (no click),
@@ -1387,46 +1343,31 @@
 
   /* Per-frame touch note judgment — 与 GameCanvas 的 touch 判定同口径。
    * Touch notes are hover-triggered: any held pointer inside the zone during
-   * the timing window counts. No tap/click required. */
+   * the timing window counts. No tap/click required.
+   *
+   * 判定核心见 shared/tapJudge.processTouchCore（构建期内联）：早扫记账 / 到面结算 /
+   * 超窗 Miss 的状态机由核心负责，状态就地写回 game.touchStates（跨帧保留），本函数
+   * 只做「提交」（音效 / 特效 / 落位）。 */
   function processTouchNote(note, curTime) {
     if (note.fake) return; /* 假音符：完全不参与判定 */
-    var off = offOfLite(note);
-    landingOffOfLiteInto(note, _touchOffLite);
-    var lo = _touchOffLite; /* 复用缓冲（本函数私有） */
-    var dt = (curTime - note.timeSec) * 1000;
-    var inside = isAnyPointerInside(note.x + off.x, note.y + off.y, TOUCH_HIT_HALF);
     var track = game.touchStates[note.id];
-    if (!track) { track = { lastInsideTime: null, arrivalChecked: false }; game.touchStates[note.id] = track; }
-    if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && inside) track.lastInsideTime = curTime;
-    if (game.autoPlay && dt >= 0) {
-      commitJudge(note.id, 'S-Perfect', dt);
-      audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, 'S-Perfect', 'touch', note.angle);
+    if (!track) { track = createTouchJudgeState(); game.touchStates[note.id] = track; }
+    var dec = processTouchCore(note, curTime, !!game.autoPlay, track, _touchEnvLite, _TAP_DEPS);
+    if (!dec) return;
+    landingOffOfLiteInto(note, _touchOffLite);
+    var lo = _touchOffLite; /* 落点 = 自身 timeSec 的图层偏移 */
+    if (dec.judgement === 'Miss') {
+      /* 超窗 Miss：带落点提交，不播音效、不爆花（与抽出前一致）。 */
+      commitJudge(note.id, 'Miss', dec.dtMs, note.x + lo.x, note.y + lo.y, 'touch', note.angle);
       return;
     }
-    if (dt >= 0) {
-      if (!track.arrivalChecked) {
-        track.arrivalChecked = true;
-        if (inside) {
-          commitJudge(note.id, 'S-Perfect', dt);
-          audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, 'S-Perfect', 'touch', note.angle); return;
-        }
-        if (track.lastInsideTime !== null) {
-          var earlyDt = (track.lastInsideTime - note.timeSec) * 1000;
-          var j = evaluateJudgement(earlyDt);
-          if (j) { commitJudge(note.id, j, earlyDt); audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, j, 'touch', note.angle); return; }
-        }
-      }
-      if (inside && dt <= HIT_WINDOW_MS) {
-        var j2 = evaluateJudgement(dt);
-        if (j2) { commitJudge(note.id, j2, dt); audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, j2, 'touch', note.angle); return; }
-      }
-      if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x + lo.x, note.y + lo.y, 'touch', note.angle);
-    }
+    commitJudge(note.id, dec.judgement, dec.dtMs);
+    audio.playHitSound('touch'); spawnBurst(note.x + lo.x, note.y + lo.y, dec.judgement, 'touch', note.angle);
   }
 
   /* Per-frame judgment pass for ALL notes (slides + touch + tap miss).
    * Replaces the inline AutoPlay/miss logic that was in render(). Tap notes
-   * are still hit via findHitTapNote on pointerdown; here we only detect misses. */
+   * are still hit via judgeTapCore on pointerdown; here we only detect misses. */
   /* 处理已发生的事件（与 GameCanvas 的事件循环同口径）。
    * 支持 speed_change / text_display / note_color_change；
    * bg_change 在 Lite 无效（Lite 没有背景层实现），仅留空处理。 */
@@ -1468,7 +1409,7 @@
       } else if (n.type === 'touch') {
         if (!game.judged[n.id]) processTouchNote(n, curTime);
       } else {
-        /* tap: only miss detection here; hits via findHitTapNote on pointerdown */
+        /* tap: only miss detection here; hits via judgeTapCore on pointerdown */
         if (!game.autoPlay && !game.judged[n.id] && curTime > n.timeSec + HIT_WINDOW_MS / 1000) {
           var lo = landingOffOfLite(n);
           commitJudge(n.id, 'Miss', 0, n.x + lo.x, n.y + lo.y, 'tap', n.angle);
@@ -1492,14 +1433,19 @@
     game.pointers[pid] = { x: w.x, y: w.y, down: true, active: true, type: type };
     var curTime = game.curTime;
     /* Tap notes are click-triggered (immediate judgment on pointerdown).
-     * Slide/touch are hover-triggered and handled per-frame by processAllNotes. */
-    var n = findHitTapNote(w.x, w.y, curTime);
-    if (!n) return;
-    var dtMs = (curTime - n.timeSec) * 1000;
-    var j = evaluateJudgement(dtMs);
-    if (!j) return; /* outside judgement window → leave for per-frame miss detection (matches full version) */
-    commitJudge(n.id, j, dtMs);
-    audio.playHitSound('tap'); spawnBurst(n.x, n.y, j, 'tap', n.angle);
+     * Slide/touch are hover-triggered and handled per-frame by processAllNotes.
+     * 判定核心见 shared/tapJudge.judgeTapCore（同刻重叠合并「方案二」内含），
+     * 候选仍取 tap 子集 + 二分时间窗。 */
+    var tapNotes = getTapNotes();
+    var win = findWindowOf(tapNotes, curTime, -game.renderDist);
+    var dec = judgeTapCore(tapNotes.slice(win.first, win.last), w.x, w.y, curTime, _tapEnvLite, _TAP_DEPS);
+    if (!dec) return; /* no hittable tap / outside judgement window → per-frame miss detection handles it */
+    commitJudge(dec.note.id, dec.judgement, dec.dtMs);
+    /* 特效钉落位：`note.x/note.y` 是裸 base，必须补上该音符**自己 timeSec** 的图层偏移
+     * （与完整版及本文件 touch/slide 的落位口径一致）——漏掉会让命中的环出现在 base 处，
+     * 与渲染中的音符（base+offset）错位。 */
+    var lo = landingOffOfLite(dec.note);
+    audio.playHitSound('tap'); spawnBurst(dec.note.x + lo.x, dec.note.y + lo.y, dec.judgement, 'tap', dec.note.angle);
   }
   function handleMoveInput(sx, sy, pid, type) {
     if (game.state !== STATE.PLAYING) return;

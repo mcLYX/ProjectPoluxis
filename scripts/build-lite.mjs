@@ -46,6 +46,8 @@ const enableServer = !argv.includes('--no-server') && process.env.LITE_SERVER !=
  *    - layers.ts        : 图层树 + offset / speed / noteColor 三通道合成
  *    - triggers.ts      : 音符触发器（§3.4）的纯解析（动作 → 事件）
  *    - slideJudge.ts    : slide 链式判定的纯逻辑核心（外部能力经 SlideJudgeDeps 注入）
+ *    - tapJudge.ts      : tap 命中检索 / touch 逐帧判定的纯逻辑核心（外部能力经 TapHitEnv /
+ *                         TouchJudgeEnv 注入；与完整版 src/systems/tapJudge.ts 同一份实现）
  *    Order only affects readability; all are in scope before the components run. */
 const SHARED_FILES = [
   'gameplaySpec.ts',
@@ -56,6 +58,7 @@ const SHARED_FILES = [
   'layers.ts',
   'triggers.ts',
   'slideJudge.ts',
+  'tapJudge.ts',
 ];
 let sharedFragment = '';
 for (const f of SHARED_FILES) {

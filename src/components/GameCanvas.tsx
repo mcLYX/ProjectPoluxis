@@ -4,7 +4,6 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ChartData, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet } from '../types/game';
 import type { JudgeProjector, StoryboardPointerBridge, StoryboardRawPointer } from '../types/storyboard';
-import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt, speedAt, scrollDistWindow, updateLayerCurDist, layerDistAt, type PreparedNote } from '../utils/chartRuntime';
 import { buildLayerTree, layerOffsetAt, layerOffsetAtInto, layerColorAt, noteLayerIdx, type LayerTree } from '../utils/layers';
@@ -13,9 +12,11 @@ import { createFrameGate } from '../utils/frameLimiter';
 import { qualityStore } from '../qualityStore';
 import { EASING_FNS } from '../utils/easing';
 import { clampPlaneX, clampPlaneY } from '../utils/editorCoords';
-import { WORLD_UNITS_PER_SECOND, withinHitWindow } from '../systems/judge';
+import { WORLD_UNITS_PER_SECOND } from '../systems/judge';
 import { expandRing, type RingPt } from '../systems/geometry';
 import { TAP_SIZE, TOUCH_SIZE, SLIDE_SIZE, SLIDE_HALF, BLOOM_LAYER, JUDGE_Z, SLIDE_HIT_HALF, HIT_WINDOW_MS, TAP_RING_OUTER, TOUCH_RING_OUTER, SLIDE_RING_OUTER } from '../gameplayConstants';
+// touch 逐帧判定（悬停触发）已下沉 shared/tapJudge.processTouchCore，环境面在此注入。
+import { createTouchJudgeState, processTouchCore, tapJudgeDeps, type TouchJudgeEnv, type TouchJudgeState } from '../systems/tapJudge';
 // 快速制谱手势引擎：渲染器无关，3D 与 2D(GameCanvas2D / Lite 画质) 共用同一份实现。
 import {
   createQuickCreateController,
@@ -129,7 +130,6 @@ interface GameCanvasProps {
 // 已统一收敛到 ../gameplayConstants，此处仅保留本地派生项。
 // Pipe cross-section is a diamond slightly smaller than the slide node itself.
 const SLIDE_PIPE_HALF = SLIDE_HALF * 0.82;
-const TOUCH_HIT_HALF = 1.0;
 const SLIDE_RED = '#ff0000';
 /** 图层偏移的零值（旧谱面恒为此），避免热路径分配。 */
 const ZERO_OFF = { x: 0, y: 0 };
@@ -607,11 +607,6 @@ const FILL_Z = -0.001;
 // Slide pipes no longer share a geometry: each builds its own curved,
 // angle-rotated tube (see buildSlideTubeGeometry) so easing/angle vary per segment.
 
-interface TouchTrackState {
-  lastInsideTime: number | null;
-  arrivalChecked: boolean;
-}
-
 /** Runtime state per slide node */
 interface SlideNodeRt {
   judged: boolean;
@@ -982,7 +977,7 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const unionStampRef = useRef<{ arr: Int32Array | null; frame: number }>({ arr: null, frame: 0 });
   /** 负流速：上一帧访问过的音符下标（用于幽灵网格的帧戳差分清理）。 */
   const lastVisitedRef = useRef<{ notes: PreparedNote[] | null; list: number[] }>({ notes: null, list: [] });
-  const touchTrackRef = useRef<Map<string, TouchTrackState>>(new Map());
+  const touchTrackRef = useRef<Map<string, TouchJudgeState>>(new Map());
   const slideStateRef = useRef<Map<string, SlideRt>>(new Map());
 
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -2358,6 +2353,12 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
   const { commitJudgement, getSlideRt, processSlide } = useJudgeSystem(judgeCtx, spawnBurst);
   const handlePointerInteraction = useEditorGestures(judgeCtx, commitJudgement);
 
+  /** touch 逐帧判定（processTouchCore）的环境面：合成位置 + 活跃指针查询（悬停触发）。 */
+  const touchEnv: TouchJudgeEnv<PreparedNote> = {
+    getEffectivePos: judgeCtx.getEffectivePos,
+    isAnyPointerInside,
+  };
+
   const ensureSlideMeshes = (note: PreparedNote, colorHex: string): SlideMeshSet | null => {
     const scene = sceneRef.current;
     if (!scene) return null;
@@ -3339,26 +3340,13 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
           if (dt >= 0) { commitJudgement(note, 'S-Perfect', dt); continue; }
         }
         if (note.type === 'touch') {
-          const dt = (curTime - note.timeSec) * 1000;
-          const inside = isAnyPointerInside(note.x + noteOff.x, note.y + noteOff.y, TOUCH_HIT_HALF);
+          /* touch 逐帧判定（悬停触发）已下沉 shared/tapJudge.processTouchCore：
+           * 早扫记账 / 到面结算 / 超窗 Miss 的状态机由核心负责，状态就地写回
+           * touchTrackRef（跨帧保留），判定结论在此提交（含音效/特效/反馈）。 */
           let track = touchTrackRef.current.get(note.id);
-          if (!track) { track = { lastInsideTime: null, arrivalChecked: false }; touchTrackRef.current.set(note.id, track); }
-          if (withinHitWindow(dt, HIT_WINDOW_MS) && inside) track.lastInsideTime = curTime;
-          // AutoPlay: judge as soon as note has passed the plane (dt >= 0). The narrow
-          // 20ms window used previously would miss entirely on lower-framerate devices.
-          if (autoPlayRef.current && dt >= 0) { commitJudgement(note, 'S-Perfect', dt); continue; }
-          if (dt >= 0) {
-            if (!track.arrivalChecked) {
-              track.arrivalChecked = true;
-              if (inside) { commitJudgement(note, 'S-Perfect', dt); continue; }
-              if (track.lastInsideTime !== null) {
-                const earlyDt = (track.lastInsideTime - note.timeSec) * 1000;
-                const j = evaluateJudgement(earlyDt); if (j) { commitJudgement(note, j, earlyDt); continue; }
-              }
-            }
-            if (inside && dt <= HIT_WINDOW_MS) { const j = evaluateJudgement(dt); if (j) { commitJudgement(note, j, dt); continue; } }
-            if (dt > HIT_WINDOW_MS) commitJudgement(note, 'Miss', dt);
-          }
+          if (!track) { track = createTouchJudgeState(); touchTrackRef.current.set(note.id, track); }
+          const dec = processTouchCore(note, curTime, autoPlayRef.current, track, touchEnv, tapJudgeDeps);
+          if (dec) { commitJudgement(note, dec.judgement, dec.dtMs); continue; }
         } else {
           const dt = (curTime - note.timeSec) * 1000;
           if (dt > HIT_WINDOW_MS) commitJudgement(note, 'Miss', dt);

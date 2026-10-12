@@ -30,7 +30,7 @@ import { clampPlaneX, clampPlaneY } from '../utils/editorCoords';
 import { secondsToBeatMultiBpm, type SpeedPoint } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt, type ChartRuntime, type PreparedNote } from '../utils/chartRuntime';
 import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/triggers';
-import { calculateNoteScore, evaluateJudgement } from '../utils/scoring';
+import { calculateNoteScore } from '../utils/scoring';
 import {
   processSlideCore,
   recordBinding,
@@ -45,11 +45,18 @@ import {
   SLIDE_HALF,
   SLIDE_HIT_HALF,
   SLIDE_SIZE,
-  TAP_HIT_HALF,
   TAP_SIZE,
-  TOUCH_HIT_HALF,
   TOUCH_SIZE,
 } from '../shared/gameplaySpec';
+// tap 命中检索 / touch 逐帧判定已下沉 shared/tapJudge，环境面在此注入。
+import {
+  createTouchJudgeState,
+  judgeTapCore,
+  processTouchCore,
+  tapJudgeDeps,
+  type TapHitEnv,
+  type TouchJudgeEnv,
+} from '../systems/tapJudge';
 import { globalAudio } from '../audio/AudioManager';
 import { selectionStore } from '../selectionStore';
 // 快速制谱手势引擎：与 3D 渲染器共用同一份实现（渲染器只负责喂坐标 + 转发 delta）。
@@ -922,7 +929,6 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     /* 写入式落位偏移的复用缓冲（热路径：每可见音符每帧）。
      * 各调用点用**各自的** scratch，避免被中途调用（如 commitJudge）串改。 */
     const _projOff2DScratch = { x: 0, y: 0 };
-    const _touchOff2DScratch = { x: 0, y: 0 };
     /** 判定落位偏移 — **写入 out**（零分配）。 */
     function landingOffOf2DInto(n: { timeSec?: number }, out: { x: number; y: number }): void {
       if (!layerTree) { out.x = 0; out.y = 0; return; }
@@ -1370,56 +1376,43 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return false;
     }
 
+    /* tap / touch 判定核心的环境面：合成立即位置（offset 为 0 时直接返回音符本体，
+     * 零分配）+ 已判定集合 / 指针查询。 */
+    function effectivePos2D(n: PreparedNote): { x: number; y: number } {
+      const o = offOf2D(n);
+      return o.x === 0 && o.y === 0 ? n : { x: n.x + o.x, y: n.y + o.y };
+    }
+    const tapEnv2D: TapHitEnv<PreparedNote> = {
+      getEffectivePos: effectivePos2D,
+      isJudged: (n) => !!game.judged[n.id],
+    };
+    const touchEnv2D: TouchJudgeEnv<PreparedNote> = {
+      getEffectivePos: effectivePos2D,
+      isAnyPointerInside,
+    };
+
     function processTouchNote(note: PreparedNote, curTime: number): void {
       if (note.fake) return; /* 假音符：完全不参与判定 */
-      const off = offOf2D(note);
-      landingOffOf2DInto(note, _touchOff2DScratch);
-      const lo = _touchOff2DScratch; // 复用缓冲（本函数私有）
-      const dt = (curTime - note.timeSec) * 1000;
-      const inside = isAnyPointerInside(note.x + off.x, note.y + off.y, TOUCH_HIT_HALF);
+      /* touch 逐帧判定（悬停触发）已下沉 shared/tapJudge.processTouchCore：
+       * 早扫记账 / 到面结算 / 超窗 Miss 的状态机由核心负责，状态就地写回
+       * game.touchStates（跨帧保留），判定结论在此提交（音效 / 特效 / 反馈）。 */
       let track = game.touchStates[note.id];
       if (!track) {
-        track = { lastInsideTime: null, arrivalChecked: false };
+        track = createTouchJudgeState();
         game.touchStates[note.id] = track;
       }
-      if (dt >= -HIT_WINDOW_MS && dt <= HIT_WINDOW_MS && inside) track.lastInsideTime = curTime;
-      if (game.autoPlay && dt >= 0) {
-        commitJudge(note.id, 'S-Perfect', dt);
-        globalAudio.playHitSound('touch');
-        spawnBurst(note.x + lo.x, note.y + lo.y, 'S-Perfect', 'touch', note.angle ?? 0);
+      const dec = processTouchCore(note, curTime, game.autoPlay, track, touchEnv2D, tapJudgeDeps);
+      if (!dec) return;
+      // 落点 = 自身 timeSec 的图层偏移：音效 / 特效 / 反馈一律钉落位。
+      const lo = landingOffOf2D(note);
+      if (dec.judgement === 'Miss') {
+        // 超窗 Miss：带落点提交，不播音效、不爆花（与抽出前一致）。
+        commitJudge(note.id, 'Miss', dec.dtMs, note.x + lo.x, note.y + lo.y, 'touch', note.angle ?? 0);
         return;
       }
-      if (dt >= 0) {
-        if (!track.arrivalChecked) {
-          track.arrivalChecked = true;
-          if (inside) {
-            commitJudge(note.id, 'S-Perfect', dt);
-            globalAudio.playHitSound('touch');
-            spawnBurst(note.x + lo.x, note.y + lo.y, 'S-Perfect', 'touch', note.angle ?? 0);
-            return;
-          }
-          if (track.lastInsideTime !== null) {
-            const earlyDt = (track.lastInsideTime - note.timeSec) * 1000;
-            const j = evaluateJudgement(earlyDt);
-            if (j) {
-              commitJudge(note.id, j, earlyDt);
-              globalAudio.playHitSound('touch');
-              spawnBurst(note.x + lo.x, note.y + lo.y, j, 'touch', note.angle ?? 0);
-              return;
-            }
-          }
-        }
-        if (inside && dt <= HIT_WINDOW_MS) {
-          const j2 = evaluateJudgement(dt);
-          if (j2) {
-            commitJudge(note.id, j2, dt);
-            globalAudio.playHitSound('touch');
-            spawnBurst(note.x + lo.x, note.y + lo.y, j2, 'touch', note.angle ?? 0);
-            return;
-          }
-        }
-        if (dt > HIT_WINDOW_MS) commitJudge(note.id, 'Miss', dt, note.x + lo.x, note.y + lo.y, 'touch', note.angle ?? 0);
-      }
+      commitJudge(note.id, dec.judgement, dec.dtMs);
+      globalAudio.playHitSound('touch');
+      spawnBurst(note.x + lo.x, note.y + lo.y, dec.judgement, 'touch', note.angle ?? 0);
     }
 
     /* ---------------- 每帧判定遍历 ---------------- */
@@ -1832,72 +1825,6 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       return { first, last: lo };
     }
 
-    function findHitTapNote(wx: number, wy: number, curTime: number): PreparedNote | null {
-      const tapNotes = getTapNotes();
-      const overlapSet: PreparedNote[] = [];
-      // 命中判定用时间窗（与流速符号无关）。只扫 tap 子集，避免每次 pointerdown
-      // 对窗口内所有音符（含 touch/slide）做无谓的距离判定。
-      const win = timeWindowOf(tapNotes, curTime, -game.renderDist);
-      for (let i = win.first; i < win.last; i++) {
-        const n = tapNotes[i];
-        if (game.judged[n.id] || n.fake) continue;
-        const dtMs = Math.abs((curTime - n.timeSec) * 1000);
-        if (dtMs >= HIT_WINDOW_MS) continue;
-        /* 图层偏移：命中判定用「合成后位置」（渲染与判定同一份值） */
-        const nOff = offOf2D(n);
-        const inOwn =
-          Math.abs(n.x + nOff.x - wx) < TAP_HIT_HALF && Math.abs(n.y + nOff.y - wy) < TAP_HIT_HALF;
-        let inExtra = false;
-        if (n.extraHitRegions) {
-          for (const e of n.extraHitRegions) {
-            if (Math.abs(e.x - wx) < e.half && Math.abs(e.y - wy) < e.half) {
-              inExtra = true;
-              break;
-            }
-          }
-        }
-        if (inOwn || inExtra) overlapSet.push(n);
-      }
-      if (overlapSet.length === 0) return null;
-      /* 优先选「最晚」的时间组（抢救将 miss 的 tap），再按距离取最近。 */
-      let bestLate = -Infinity;
-      let bestTimeSec = Infinity;
-      for (const m of overlapSet) {
-        const lat = curTime - m.timeSec;
-        if (lat > bestLate) {
-          bestLate = lat;
-          bestTimeSec = m.timeSec;
-        }
-      }
-      let best: PreparedNote | null = null;
-      let bestDist = Infinity;
-      for (const m of overlapSet) {
-        if (m.timeSec !== bestTimeSec) continue;
-        const mOff = offOf2D(m);
-        const dxm = m.x + mOff.x - wx;
-        const dym = m.y + mOff.y - wy;
-        const d = Math.sqrt(dxm * dxm + dym * dym);
-        if (d < bestDist || (d === bestDist && best !== null && m.timeSec < best.timeSec)) {
-          best = m;
-          bestDist = d;
-        }
-      }
-      if (best) {
-        const chosen = best as PreparedNote;
-        const chosenOff = offOf2D(chosen);
-        const merged = { x: chosen.x + chosenOff.x, y: chosen.y + chosenOff.y, half: TAP_HIT_HALF };
-        for (const other of overlapSet) {
-          if (other === chosen || other.timeSec !== chosen.timeSec) continue;
-          if (!other.extraHitRegions) other.extraHitRegions = [];
-          const dup = other.extraHitRegions.some(
-            (reg) => reg.x === merged.x && reg.y === merged.y && reg.half === merged.half,
-          );
-          if (!dup) other.extraHitRegions.push(merged);
-        }
-      }
-      return best;
-    }
-
     function handleTapInput(sx: number, sy: number, pid: string, type: string): void {
       if (propsRef.current.isEditorMode) {
         handleEditorDown(sx, sy, pid);
@@ -1907,18 +1834,20 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
       const w = screenToWorld(sx, sy);
       game.pointers[pid] = { x: w.x, y: w.y, down: true, active: true, type };
       const curTime = game.curTime;
-      const n = findHitTapNote(w.x, w.y, curTime);
-      if (!n) return;
-      const dtMs = (curTime - n.timeSec) * 1000;
-      const j = evaluateJudgement(dtMs);
-      if (!j) return;
-      commitJudge(n.id, j, dtMs);
+      /* tap 命中（pointerdown 即时判定，含方案二同刻重叠合并）已下沉
+       * shared/tapJudge.judgeTapCore。候选仍取 tap 子集 + 二分时间窗，
+       * 保持「只扫窗口内 tap」的既有优化。 */
+      const tapNotes = getTapNotes();
+      const win = timeWindowOf(tapNotes, curTime, -game.renderDist);
+      const dec = judgeTapCore(tapNotes.slice(win.first, win.last), w.x, w.y, curTime, tapEnv2D, tapJudgeDeps);
+      if (!dec) return;
+      commitJudge(dec.note.id, dec.judgement, dec.dtMs);
       globalAudio.playHitSound('tap');
-      /* 特效钉落位：`n.x/n.y` 是裸 base，必须补上该音符**自己 timeSec** 的图层偏移
+      /* 特效钉落位：`note.x/note.y` 是裸 base，必须补上该音符**自己 timeSec** 的图层偏移
        * （与 3D 的 getLandingPos、以及本文件其余 8 处 spawnBurst 口径一致）——
        * 漏掉会让命中的环出现在 base 处，与渲染中的音符（base+offset）错位。 */
-      const lo = landingOffOf2D(n);
-      spawnBurst(n.x + lo.x, n.y + lo.y, j, 'tap', n.angle ?? 0);
+      const lo = landingOffOf2D(dec.note);
+      spawnBurst(dec.note.x + lo.x, dec.note.y + lo.y, dec.judgement, 'tap', dec.note.angle ?? 0);
     }
 
     function handleReleaseInput(pid: string): void {

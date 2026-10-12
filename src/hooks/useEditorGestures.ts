@@ -1,11 +1,9 @@
-import type { HitRegion, JudgementType } from '../types/game';
+import type { JudgementType } from '../types/game';
 import type { PreparedNote } from '../utils/chartRuntime';
 import { clampPlaneX, clampPlaneY } from '../utils/editorCoords';
-import { isWithinBox } from '../systems/judge';
-import { evaluateJudgement } from '../utils/scoring';
 import { globalAudio } from '../audio/AudioManager';
-// 游戏常数统一收敛在 gameplayConstants（单一来源）。
-import { HIT_WINDOW_MS, TAP_HIT_HALF } from '../gameplayConstants';
+// tap 命中检索 + 选中（方案二重叠合并）已下沉 shared/tapJudge，环境面在此注入。
+import { judgeTapCore, tapJudgeDeps } from '../systems/tapJudge';
 import type { JudgeSystemContext } from './judgeContext';
 
 /** commitJudgement 的函数签名（与 useJudgeSystem 返回值一致）。 */
@@ -88,73 +86,21 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     // so judgement and visuals are perfectly synchronized.
     const curTime = globalAudio.getCurrentTime();
     const notes = ctx.resolvedRef.current;
-    // 方案二: overlap-aware tap judgment.
-    // A tap is "hittable" if the touch point falls inside its own box OR any of
-    // its merged extra hit regions. Among all hittable same-time taps, pick the
-    // one closest to the touch point (tie-break by id) and consume it; then merge
-    // the consumed tap's own box into every other hittable tap the point overlapped,
-    // so subsequent presses on the overlap can still reach them.
-    const overlapSet: PreparedNote[] = [];
-    for (const n of notes) {
-      if (ctx.judgedNotesRef.current.has(n.id) || n.type !== 'tap' || n.fake) continue;
-      const dt = Math.abs((curTime - n.timeSec) * 1000);
-      if (dt >= HIT_WINDOW_MS) continue;
-      const ep = ctx.getEffectivePos(n);
-      const inOwn = isWithinBox(px, py, ep.x, ep.y, TAP_HIT_HALF);
-      const inExtra = (n.extraHitRegions ?? []).some(
-        (r) => Math.abs(px - r.x) < r.half && Math.abs(py - r.y) < r.half
-      );
-      if (inOwn || inExtra) overlapSet.push(n);
-    }
-    let best: PreparedNote | null = null;
-    let bestDist = Infinity;
-    // Selection rule (fixes late-tap swallow bug): when the touch point lands
-    // inside the hitbox of taps at DIFFERENT times (neighbouring close taps with
-    // overlapping TAP_HIT_HALF boxes), prefer the MOST LATE one — the tap closest
-    // to its miss deadline is the one the player is racing to rescue. Judging the
-    // nearer-but-later tap first would swallow the earlier late tap (e.g. note-291
-    // late but note-292 closer → 292 got judged, 291 dropped). Within the chosen
-    // time group (truly same-time overlapping taps) fall back to 方案二: pick the
-    // closest to the touch point, then merge hitboxes. Times are numeric and
-    // id-independent (ids can be arbitrary strings).
-    let bestLate = -Infinity;
-    let bestTimeSec = Infinity;
-    for (const n of overlapSet) {
-      const late = curTime - n.timeSec; // seconds, signed; larger = later
-      if (late > bestLate) { bestLate = late; bestTimeSec = n.timeSec; }
-    }
-    for (const n of overlapSet) {
-      if (n.timeSec !== bestTimeSec) continue; // only the most-late time group
-      const ep = ctx.getEffectivePos(n);
-      const d = Math.hypot(px - ep.x, py - ep.y);
-      /* 同级时间组内的并列处理：上面的 `n.timeSec !== bestTimeSec` 已把候选收敛到
-       * **同一时刻**，故原先那句 `d === bestDist && best !== null && n.timeSec <
-       * best.timeSec` 恒为 false —— 三者都是死判断（`best !== null` 亦非 TS 窄化所需，
-       * 因为删掉后不再访问 `best.timeSec`）。并列时取先遇到者即可，语义不变。 */
-      if (d < bestDist) {
-        best = n;
-        bestDist = d;
-      }
-    }
-    if (best) {
-      const dt = (curTime - best.timeSec) * 1000;
-      const j = evaluateJudgement(dt);
-      if (j) {
-        commitJudgement(best, j, dt);
-        // Merge the consumed tap's own box ONLY into other taps at the SAME
-        // timeSec (方案二). Never cross time windows: a tap at a different beat
-        // must keep its own hitbox, otherwise its hit area would be polluted and
-        // trigger false/early hits later (e.g. note-9 / note-10 same position).
-        const bestEp = ctx.getEffectivePos(best);
-        const merged: HitRegion = { x: bestEp.x, y: bestEp.y, half: TAP_HIT_HALF };
-        for (const other of overlapSet) {
-          if (other === best || other.timeSec !== best.timeSec) continue;
-          const regions = other.extraHitRegions ?? (other.extraHitRegions = []);
-          const dup = regions.some((r) => r.x === merged.x && r.y === merged.y && r.half === merged.half);
-          if (!dup) regions.push(merged);
-        }
-      }
-    }
+    /* 方案二（overlap-aware tap judgment）已下沉 shared/tapJudge.judgeTapCore：
+     * 命中盒 = 自身盒 ∪ 已合并的 extraHitRegions；同刻重叠取最近、跨时刻取最晚；
+     * 判定后把自身盒合并进同刻其它可命中 tap。规则面在 tapJudgeDeps，环境面在此注入。 */
+    const hit = judgeTapCore(
+      notes,
+      px,
+      py,
+      curTime,
+      {
+        getEffectivePos: (n: PreparedNote) => ctx.getEffectivePos(n),
+        isJudged: (n: PreparedNote) => ctx.judgedNotesRef.current.has(n.id),
+      },
+      tapJudgeDeps,
+    );
+    if (hit) commitJudgement(hit.note, hit.judgement, hit.dtMs);
   };
 
   return handlePointerInteraction;
