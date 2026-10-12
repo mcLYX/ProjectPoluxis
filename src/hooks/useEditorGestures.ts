@@ -1,7 +1,6 @@
-import * as THREE from 'three';
 import type { HitRegion, JudgementType } from '../types/game';
 import type { PreparedNote } from '../utils/chartRuntime';
-import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { clampPlaneX, clampPlaneY } from '../utils/editorCoords';
 import { isWithinBox } from '../systems/judge';
 import { evaluateJudgement } from '../utils/scoring';
 import { globalAudio } from '../audio/AudioManager';
@@ -26,8 +25,8 @@ export const useEditorGestures = (ctx: JudgeSystemContext, commitJudgement: Comm
     if (ctx.isEditorModeRef.current) {
       const tool = ctx.activeToolRef.current;
       if (tool === 'place-tap' || tool === 'place-touch' || tool === 'place-slide') {
-        const clampedX = Math.round(THREE.MathUtils.clamp(px, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
-        const clampedY = Math.round(THREE.MathUtils.clamp(py, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
+        const clampedX = Math.round(clampPlaneX(px) * 10) / 10;
+        const clampedY = Math.round(clampPlaneY(py) * 10) / 10;
         ctx.onPlaceEditorNoteRef.current?.(clampedX, clampedY);
         return;
       }

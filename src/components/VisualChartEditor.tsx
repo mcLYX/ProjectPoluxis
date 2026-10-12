@@ -6,6 +6,7 @@ import { exportChartJson, parseAndValidateChart } from '../utils/chartParser';
 import { countPlayableNotes, getMaxBeat, beatToSecondsMultiBpm } from '../utils/beatTime';
 import { EASING_TYPES, EASING_FNS } from '../utils/easing';
 import { buildLayerTree, layerOffsetAt, noteLayerIdx } from '../utils/layers';
+import { flipBaseAlongScreen } from '../utils/editorCoords';
 import { isTriggerEventUnsupported } from '../shared/triggers';
 import {
   ChevronLeft,
@@ -455,12 +456,13 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     isEvent?: boolean;
   }
   const X_MIN = -NOTE_X_RANGE, X_MAX = NOTE_X_RANGE, Y_MIN = -NOTE_Y_RANGE, Y_MAX = NOTE_Y_RANGE;
-  /** 链面板：头节点图层在给定拍的**合成偏移**（屏幕参考系 = base + 此值）。
+  /** 当前谱面的图层树（随谱面重建）。链面板与批量取反共用，避免逐次重建。 */
+  const layerTreeNow = useMemo(() => buildLayerTree(chart), [chart]);
+  /** 链面板/批量操作：头节点图层在给定拍的**合成偏移**（屏幕参考系 = base + 此值）。
    *  子节点无 layerId，沿用头节点图层；时间取子节点自己的 beat（偏移随拍变化）。 */
   const chainOffsetAt = (layerId: string | undefined, beat: number) => {
-    const tree = buildLayerTree(chart);
     const t = beatToSecondsMultiBpm(beat, chart.metadata.bpm, chart.metadata.offset, chart.metadata.bpmlist);
-    return layerOffsetAt(tree, noteLayerIdx(tree, { layerId }), t);
+    return layerOffsetAt(layerTreeNow, noteLayerIdx(layerTreeNow, { layerId }), t);
   };
   const round10 = (v: number) => Math.round(v * 10) / 10;
   /** base → 面板显示值（屏幕参考系下加该单位自己时刻的合成偏移）。 */
@@ -1057,9 +1059,19 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const handleBatchFlipX = () => {
     if (!validBatchRange || notesInBatch.length === 0) return;
     const flipIds = new Set(notesInBatch.map((n) => n.id));
+    /* 按**屏幕坐标**取反（考虑图层偏移）：屏幕 = base + 该单位**自己 beat** 的偏移，
+     * 取反后反解回 base（`flipBaseAlongScreen`）。子节点沿用头节点图层、时间取子节点
+     * 自己的 beat。**不夹范围**：带偏移时 base 可合法越界，交由设计 §4.4 的越界复检处理。 */
     const updatedNotes = chart.notes.map((n) =>
       flipIds.has(n.id)
-        ? { ...n, x: -n.x, nodes: n.nodes?.map((sn) => ({ ...sn, x: -sn.x })) }
+        ? {
+            ...n,
+            x: flipBaseAlongScreen(n.x, chainOffsetAt(n.layerId, n.beat).x),
+            nodes: n.nodes?.map((sn) => ({
+              ...sn,
+              x: flipBaseAlongScreen(sn.x, chainOffsetAt(n.layerId, sn.beat).x),
+            })),
+          }
         : n
     );
     onUpdateChart({ ...chart, notes: updatedNotes });
@@ -1068,9 +1080,17 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
   const handleBatchFlipY = () => {
     if (!validBatchRange || notesInBatch.length === 0) return;
     const flipIds = new Set(notesInBatch.map((n) => n.id));
+    /* 见 handleBatchFlipX：同样按屏幕坐标取反（base' = −base − 2·offset），不夹范围。 */
     const updatedNotes = chart.notes.map((n) =>
       flipIds.has(n.id)
-        ? { ...n, y: -n.y, nodes: n.nodes?.map((sn) => ({ ...sn, y: -sn.y })) }
+        ? {
+            ...n,
+            y: flipBaseAlongScreen(n.y, chainOffsetAt(n.layerId, n.beat).y),
+            nodes: n.nodes?.map((sn) => ({
+              ...sn,
+              y: flipBaseAlongScreen(sn.y, chainOffsetAt(n.layerId, sn.beat).y),
+            })),
+          }
         : n
     );
     onUpdateChart({ ...chart, notes: updatedNotes });
@@ -1574,20 +1594,28 @@ export const VisualChartEditor: React.FC<VisualChartEditorProps> = ({
     }
 
     // ---- FlipX / FlipY：只翻转被选中的单位（头或子）----
+    // 与批量 FlipX/FlipY（handleBatchFlipX/Y）同口径：按**屏幕坐标**取反
+    // （考虑图层偏移，base' = −base − 2·offset），不夹范围。
     if (op === 'FlipX' || op === 'FlipY') {
       const flipX = op === 'FlipX';
       const updatedNotes = chart.notes.map((n) => {
         let next = n;
         let changed = false;
         if (selIds.has(n.id)) {
-          next = { ...n, x: flipX ? -n.x : n.x, y: !flipX ? -n.y : n.y };
+          const off = chainOffsetAt(n.layerId, n.beat);
+          next = flipX
+            ? { ...n, x: flipBaseAlongScreen(n.x, off.x) }
+            : { ...n, y: flipBaseAlongScreen(n.y, off.y) };
           changed = true;
         }
         if (n.nodes) {
           const nodes = n.nodes.map((sn, i) => {
             if (!selIds.has(`${n.id}#${i + 1}`)) return sn;
             changed = true;
-            return { ...sn, x: flipX ? -sn.x : sn.x, y: !flipX ? -sn.y : sn.y };
+            const off = chainOffsetAt(n.layerId, sn.beat);
+            return flipX
+              ? { ...sn, x: flipBaseAlongScreen(sn.x, off.x) }
+              : { ...sn, y: flipBaseAlongScreen(sn.y, off.y) };
           });
           if (changed) next = { ...next, nodes };
         }

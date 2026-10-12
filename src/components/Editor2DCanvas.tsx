@@ -10,7 +10,8 @@ import { usePropRefs } from '../hooks/usePropRefs';
 import { selectionStore } from '../selectionStore';
 import { buildLayerTree, layerOffsetAt } from '../utils/layers';
 import { shouldDeselectOnRightClick } from '../utils/editorPointer';
-import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { NOTE_X_RANGE } from '../types/game';
+import { clampPlaneX, clampDisplayToBaseX, clampDisplayToBaseY } from '../utils/editorCoords';
 
 /** 判定平面世界 X 范围（权威源 types/game.NOTE_X_RANGE）。屏幕坐标钳制同用它。 */
 const X_MIN = -NOTE_X_RANGE;
@@ -186,7 +187,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const meta = chartRef.current.metadata;
     return layerOffsetAt(tree, idx, beatToSecondsMultiBpm(beat, meta.bpm, meta.offset || 0, meta.bpmlist));
   };
-  const clampScreenX = (x: number) => Math.max(X_MIN, Math.min(X_MAX, x));
+  // 屏幕坐标 X 钳制统一走 utils/editorCoords.clampPlaneX（唯一权威实现）。
 
   const toolRef = useRef(activeTool);
   const isPlayingRef = useRef(isPlaying);
@@ -957,7 +958,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     // x 为**屏幕坐标**（所见即所得）；上层 onPlaceNote 按放置目标图层在该 beat
     // 的合成偏移反解 base（y=0 屏幕同样会被反解）。
-    const x = round9(clampScreenX(snap(worldX, xStep)));
+    const x = round9(clampPlaneX(snap(worldX, xStep)));
     // 放置音符；返回新 note/子节点 id，以便按住不放上下拖动调整 Y 值。
     const placed = onPlaceRef.current(x, 0, beat);
     if (placed) {
@@ -1014,8 +1015,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // 绝对目标值，而非基于已更新的 placeY 累加（否则会犯与批量拖动相同的
       // 增量累积错误）。钳制在**屏幕 y** 上（±NOTE_Y_RANGE）：屏幕 = base + 图层偏移。
       const oy = drag.placeOy ?? 0;
-      const yScr = Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, (drag.y0 ?? 0) + oy + steps * 0.1));
-      const y = round9(yScr - oy);
+      const y = round9(clampDisplayToBaseY((drag.y0 ?? 0) + oy + steps * 0.1, oy));
       if (y !== drag.placeY) {
         drag.placeY = y;
         drag.moved = true;
@@ -1048,7 +1048,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       /* 拖动过程中即吸附节拍：以被抓取音符吸附后的位移作为统一增量，
        * 与松手时的处理一致（始终吸附）。 */
       const grabBeat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
-      const grabX = round9(clampScreenX(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1))));
+      const grabX = round9(clampPlaneX(snap(worldX - drag.offX, X_SPAN / Math.max(1, (vlineRef.current | 0) - 1))));
       // Delta from the grabbed note's original position (屏幕坐标增量).
       const grabSnap = drag.multiSnapshot.find((s) => s.id === drag.multiGrabId);
       if (!grabSnap) return;
@@ -1059,7 +1059,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
       // 每个单位：屏幕目标 = base + 自身偏移 + dx，钳 ±2.4 后反解 base 提交。
       const liveMap = new Map<string, { x: number; y: number; beat: number }>();
       for (const s of drag.multiSnapshot) {
-        const nx = round9(clampScreenX(s.x + s.ox + dx) - s.ox);
+        const nx = round9(clampDisplayToBaseX(s.x + s.ox + dx, s.ox));
         liveMap.set(s.id, { x: nx, y: s.y, beat: s.beat + dBeat });
       }
       multiLiveRef.current = liveMap;
@@ -1076,8 +1076,7 @@ export const Editor2DCanvas: React.FC<Editor2DCanvasProps> = ({
     const beat = round9(snap(timeToBeat(t - drag.offBeat, segsRef.current), snapRef.current));
     const xStep = X_SPAN / Math.max(1, (vlineRef.current | 0) - 1);
     /* 屏幕坐标钳 ±2.4 后，按被拖音符图层在**新 beat** 的偏移反解 base 提交。 */
-    const xScr = clampScreenX(snap(worldX - drag.offX, xStep));
-    const x = round9(xScr - offAt(drag.layerId, beat).x);
+    const x = round9(clampDisplayToBaseX(snap(worldX - drag.offX, xStep), offAt(drag.layerId, beat).x));
     drag.moved = true;
     // Preserve the note's original y (2D ignores y, but keep it intact on drag).
     // Update the live-drag ref so the canvas draws the note in real time,

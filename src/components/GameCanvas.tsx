@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ChartData, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet, NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { ChartData, ResolvedEvent, JudgementFeedback, JudgementType, NoteType, EasingType, SkinTextureSet } from '../types/game';
 import type { JudgeProjector, StoryboardPointerBridge, StoryboardRawPointer } from '../types/storyboard';
 import { evaluateJudgement } from '../utils/scoring';
 import { getScrollDistance, secondsToBeatMultiBpm } from '../utils/beatTime';
@@ -12,6 +12,7 @@ import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/trigg
 import { createFrameGate } from '../utils/frameLimiter';
 import { qualityStore } from '../qualityStore';
 import { EASING_FNS } from '../utils/easing';
+import { clampPlaneX, clampPlaneY } from '../utils/editorCoords';
 import { WORLD_UNITS_PER_SECOND, withinHitWindow } from '../systems/judge';
 import { expandRing, type RingPt } from '../systems/geometry';
 import { TAP_SIZE, TOUCH_SIZE, SLIDE_SIZE, SLIDE_HALF, BLOOM_LAYER, JUDGE_Z, SLIDE_HIT_HALF, HIT_WINDOW_MS, TAP_RING_OUTER, TOUCH_RING_OUTER, SLIDE_RING_OUTER } from '../gameplayConstants';
@@ -2587,8 +2588,8 @@ const GameCanvasImpl: React.FC<GameCanvasProps> = ({
         const dDragY = dragPointer.y - pointerDownStartRef.current.y;
         if (Math.sqrt(dDragX * dDragX + dDragY * dDragY) > DRAG_START_THRESHOLD) {
           isDraggingRef.current = true;
-          const clampedX = Math.round(THREE.MathUtils.clamp(dragPointer.x, -NOTE_X_RANGE, NOTE_X_RANGE) * 10) / 10;
-          const clampedY = Math.round(THREE.MathUtils.clamp(dragPointer.y, -NOTE_Y_RANGE, NOTE_Y_RANGE) * 10) / 10;
+          const clampedX = Math.round(clampPlaneX(dragPointer.x) * 10) / 10;
+          const clampedY = Math.round(clampPlaneY(dragPointer.y) * 10) / 10;
           // 图层偏移：拖动写回的是**存储坐标 base**（编辑态所见 = 合成后落点，
           // 故 base = 显示位置 − 该音符图层在「被拖动单位自己的时间」的偏移；
           // slide 子节点各自有自己的 timeSec，不能沿用头节点的）。

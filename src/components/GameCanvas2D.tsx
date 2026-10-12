@@ -26,7 +26,7 @@ import type {
   NoteType,
   SkinImageSet,
 } from '../types/game';
-import { NOTE_X_RANGE, NOTE_Y_RANGE } from '../types/game';
+import { clampPlaneX, clampPlaneY } from '../utils/editorCoords';
 import { secondsToBeatMultiBpm, type SpeedPoint } from '../utils/beatTime';
 import { getChartRuntime, scrollDistanceAt, scrollDistWindow, updateLayerCurDist, layerDistAt, type ChartRuntime, type PreparedNote } from '../utils/chartRuntime';
 import { resolveTriggerEvents, isTriggerEventUnsupported } from '../shared/triggers';
@@ -2022,8 +2022,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         return;
       }
       if (tool === 'place-tap' || tool === 'place-touch' || tool === 'place-slide') {
-        const cx = Math.round(Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, w.x)) * 10) / 10;
-        const cy = Math.round(Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, w.y)) * 10) / 10;
+        const cx = Math.round(clampPlaneX(w.x) * 10) / 10;
+        const cy = Math.round(clampPlaneY(w.y) * 10) / 10;
         p.onPlaceEditorNote?.(cx, cy);
         return;
       }
@@ -2133,8 +2133,8 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
            * （减去被拖单元**自己 timeSec** 的图层偏移）——否则有图层偏移时「指哪不打哪」。 */
           if (pr.isEditorMode && editorDragging && editorDragPid === String(ev.pointerId) && editorDragTargetId) {
             const w = screenToWorld(p.x, p.y);
-            const cx = Math.round(Math.max(-NOTE_X_RANGE, Math.min(NOTE_X_RANGE, w.x)) * 10) / 10;
-            const cy = Math.round(Math.max(-NOTE_Y_RANGE, Math.min(NOTE_Y_RANGE, w.y)) * 10) / 10;
+            const cx = Math.round(clampPlaneX(w.x) * 10) / 10;
+            const cy = Math.round(clampPlaneY(w.y) * 10) / 10;
             const dragSelId = editorDragTargetId;
             const dragHash = dragSelId.indexOf('#');
             const dragHead = noteById.get(dragHash >= 0 ? dragSelId.slice(0, dragHash) : dragSelId);
