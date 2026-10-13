@@ -1,7 +1,7 @@
 {
   "name": "poluxis",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.0.51",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,6 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "build:mv-world": "vite build --config worldexeme_mv/vite.config.ts && node worldexeme_mv/scripts/minify-story.mjs",
     "dev:toy": "vite --config vite.toy.config.ts --mode toy",
     "build:toy": "npm run build:lite:toy && vite build --config vite.toy.config.ts --mode toy"
   },

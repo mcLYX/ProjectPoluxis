@@ -19,11 +19,12 @@
  * ## 判定等价性（硬红线）
  *
  * 优化只能削减「重复计算」，不能改变任何数值语义：
- *  - `scrollDist` 直接用**原** `getScrollDistance` 计算，逐位一致；
- *  - 前缀和版本**仅在 speedPoints 已按 timeSec 升序、且无退化数据时启用**，
- *    否则回退原函数 —— 原函数按数组顺序迭代，未排序谱面下两者语义不同，不能互换；
+ *  - `scrollDist` / `globalDist` 由前缀表 `prefixDistanceAt(prefix, ·)` 求得，与
+ *    `getScrollDistance(·, speedPoints)` **逐位一致**（该等价由 `buildSpeedPrefix`
+ *    的不变式保证：`speedPoints` 已按 timeSec 升序、时刻有限）；
  *  - `totalNotes` / `lastNoteTime` / `maxSlideSpan` 的计算与 `GameCanvas.resetPlayState`
  *    逐行同构。
+ * 以上均由 `__tests__/chartRuntime.test.ts` 逐位对拍锁定。
  *
  * ## 缓存策略
  *
@@ -35,7 +36,6 @@ import type { ChartData, ResolvedNote, ResolvedSlideNode } from '../types/game';
 import {
   buildSpeedPrefix,
   extractSpeedPoints,
-  getScrollDistance,
   prefixDistanceAt,
   resolveChart,
   resolveEvents,
@@ -225,7 +225,10 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
   const distAt = (li: number, t: number): number => {
     const ld = layerDist[li];
     if (ld.prefix) return prefixDistanceAt(ld.prefix, t);
-    const base = ld.globalBase ? getScrollDistance(t, speedPoints) : t;
+    // 默认根图层 base = 全局时间轴距离 `getScrollDistance(t, speedPoints)`。
+    // 前缀表 `prefix` 已按同一语义建好（见 shared/beatTime.buildSpeedPrefix），
+    // 故直接用 O(log n) 的等价值，避免每个音符一次 O(变速点数) 线性扫描。
+    const base = ld.globalBase ? prefixDistanceAt(prefix, t) : t;
     return ld.mul === 1 ? base : ld.mul * base;
   };
 
@@ -245,13 +248,15 @@ export function buildChartRuntime(chart: ChartData): ChartRuntime {
     const n = notes[i];
     const li = noteLayerIdx(layerTree, n);
     n.layerIdx = li;
-    n.globalDist = getScrollDistance(n.timeSec, speedPoints);
+    // globalDist = 全局时间轴距离。用前缀表 O(log n) 求，等价于原
+    // `getScrollDistance(n.timeSec, speedPoints)`（对拍见 __tests__/chartRuntime.test.ts）。
+    n.globalDist = prefixDistanceAt(prefix, n.timeSec);
     n.scrollDist = distAt(li, n.timeSec);
     const children = n.resolvedNodes;
     if (children) {
       for (let j = 0; j < children.length; j++) {
         // slide 子节点不带 layerId，沿用头节点的图层。
-        children[j].globalDist = getScrollDistance(children[j].timeSec, speedPoints);
+        children[j].globalDist = prefixDistanceAt(prefix, children[j].timeSec);
         children[j].scrollDist = distAt(li, children[j].timeSec);
       }
     }

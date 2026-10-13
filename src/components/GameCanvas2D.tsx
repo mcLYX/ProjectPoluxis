@@ -59,6 +59,7 @@ import {
 } from '../systems/tapJudge';
 import { globalAudio } from '../audio/AudioManager';
 import { selectionStore } from '../selectionStore';
+import { liveDragStore } from '../liveDragStore';
 // 快速制谱手势引擎：与 3D 渲染器共用同一份实现（渲染器只负责喂坐标 + 转发 delta）。
 import {
   createQuickCreateController,
@@ -1880,6 +1881,42 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
     /* 命中即记住拖拽目标 id（不依赖 props.selectedNoteId —— 后者要等 React 更新，
      * 首个 pointermove 可能仍读到旧值，导致拖动错误音符）。 */
     let editorDragTargetId: string | null = null;
+    /* 拖拽期间只做**即时视觉覆盖**（直改 runtime 音符坐标），权威提交推迟到拖拽结束
+     * （松手/取消）一次性落地 —— 与 3D `liveMoveResolvedNote` + `liveDragStore` 的约定一致。
+     * 原先每次 pointermove 都 `onMoveEditorNote` → `setCurrentChart` → 整局 `resetGame`
+     *（含全谱重预处理），是编辑器拖动卡顿的主因。 */
+    let editorDragLiveX = 0;
+    let editorDragLiveY = 0;
+    /** 本次拖拽是否真的移动过（纯点击不产生提交，避免无谓重建）。 */
+    let editorDragMoved = false;
+
+    /**
+     * 拖拽实时跟随：直接改写 runtime 音符的 base 坐标，使下一帧的窗口化渲染循环即按
+     * 新位置绘制（渲染读的正是这些对象），无需任何 React 提交。与 3D
+     * `liveMoveResolvedNote`（GameCanvas.tsx）同构。
+     *
+     * ⚠️ 本组件「按需渲染」（见 loop 的 needRender）：非播放态下只改坐标**不会**触发重绘，
+     * 必须显式置脏，否则拖拽画面不动（这正是实时跟随一度失效的原因）。
+     */
+    function liveMoveResolvedNote2D(id: string, x: number, y: number): void {
+      renderState.dirty = true;
+      const hashIdx = id.indexOf('#');
+      if (hashIdx < 0) {
+        const n = noteById.get(id);
+        if (n) { n.x = x; n.y = y; }
+        return;
+      }
+      /* tap/touch 链已摊平为独立音符（id 自带 "#i"），优先精确匹配；否则落到 slide 子节点。 */
+      const exact = noteById.get(id);
+      if (exact) { exact.x = x; exact.y = y; return; }
+      const base = id.slice(0, hashIdx);
+      const childIdx = parseInt(id.slice(hashIdx + 1), 10) - 1;
+      const n = noteById.get(base);
+      if (n && n.resolvedNodes && childIdx >= 0 && childIdx < n.resolvedNodes.length) {
+        n.resolvedNodes[childIdx].x = x;
+        n.resolvedNodes[childIdx].y = y;
+      }
+    }
 
     /** 编辑器当前时间轴（播放态读音频时钟，否则读 gameTime）。 */
     function editorCurTime(): number {
@@ -1962,6 +1999,7 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
         editorDragging = true;
         editorDragPid = pid;
         editorDragTargetId = id;
+        editorDragMoved = false; // 新一次拖拽：待移动后才产生提交
       }
     }
 
@@ -2080,7 +2118,14 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
             }
             const bx = Math.round((cx - dragOffX) * 10) / 10;
             const by = Math.round((cy - dragOffY) * 10) / 10;
-            pr.onMoveEditorNote?.(dragSelId, bx, by);
+            /* 即时视觉跟随：直改 runtime 音符坐标（本帧渲染即按新位置），不触发 React
+             * 提交；权威位置在拖拽结束时统一落地（见 release）。避免每帧 setCurrentChart
+             * → 整局 resetGame（含全谱重预处理）。 */
+            liveMoveResolvedNote2D(dragSelId, bx, by);
+            liveDragStore.set({ id: dragSelId, x: bx, y: by });
+            editorDragLiveX = bx;
+            editorDragLiveY = by;
+            editorDragMoved = true;
             return;
           }
           const prev = pendingMoves[String(ev.pointerId)];
@@ -2101,9 +2146,16 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           // cancel / leave：丢弃手势，不落音（与 3D 的 onPointerCancel/Leave 一致）。
           delete qcTracks[String(pid)];
           if (editorDragPid === String(pid)) {
+            /* 拖拽权威提交：整个拖拽只在结束（松手/取消）时落一次 —— 实时位置已由
+             * liveMoveResolvedNote2D 上屏，这里把最终 base 写回 React chart 状态。 */
+            if (editorDragMoved && editorDragTargetId) {
+              propsRef.current.onMoveEditorNote?.(editorDragTargetId, editorDragLiveX, editorDragLiveY);
+            }
             editorDragging = false;
             editorDragPid = null;
             editorDragTargetId = null;
+            editorDragMoved = false;
+            liveDragStore.clear();
           }
           delete pendingMoves[String(pid)];
           handleReleaseInput(String(pid));
@@ -2121,7 +2173,14 @@ function GameCanvas2DImpl(props: GameCanvas2DProps) {
           release(pid);
         });
         add(el, 'pointercancel', (e) => release((e as PointerEvent).pointerId));
-        add(el, 'pointerleave', (e) => release((e as PointerEvent).pointerId));
+        add(el, 'pointerleave', (e) => {
+          const pid = (e as PointerEvent).pointerId;
+          /* 拖拽中的指针离开元素不释放（与 GameCanvas 的 onPointerLeave 一致）：最终提交
+             在 pointerup 发生；若在此提前 release，会丢掉这次未提交的实时位移而使画面
+             与谱面不一致。pointerdown 已 setPointerCapture，正常拖拽本就不会收到 leave。 */
+          if (editorDragPid === String(pid)) return;
+          release(pid);
+        });
         return () => removers.forEach((r) => r());
       }
 
